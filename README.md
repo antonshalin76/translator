@@ -36,7 +36,7 @@ The daemon owns audio routing and device selection. The Python sidecar owns prov
 
 - Ubuntu 24.04 or a comparable Linux desktop with PipeWire and PulseAudio compatibility.
 - `pactl`, `pw-link`, and `wpctl` available in the user session.
-- Rust 1.85+.
+- Rust 1.88+.
 - Python 3.12 and `uv`.
 - Bun for the Tauri/Vite frontend.
 - Headphones for normal duplex use. Open-speaker mode is guarded by AEC validation.
