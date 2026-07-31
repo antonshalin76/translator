@@ -1,0 +1,23 @@
+{
+  "name": "translator-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tauri control UI for the local full-duplex Translator desktop service.",
+  "author": "Anton Shalin <anton.shalin@gmail.com>",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test src/*.test.ts",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
+}

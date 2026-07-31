@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runtime_dir="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required for the user service}"
+token_path="${runtime_dir}/translator/control.token"
+
+command -v systemctl >/dev/null
+command -v translator-daemon >/dev/null
+
+systemctl --user daemon-reload
+systemctl --user show translator.service \
+  --property=FragmentPath \
+  --property=LoadState \
+  --property=ActiveState \
+  --property=SubState \
+  --property=MainPID \
+  --no-pager
+
+systemctl --user start translator.service
+sleep 2
+systemctl --user is-active --quiet translator.service
+test -f "${token_path}"
+first_token="$(cat "${token_path}")"
+test "${#first_token}" -eq 64
+test "$(stat -c '%a' "${token_path}")" = "600"
+
+systemctl --user kill --signal=KILL translator.service
+for _ in $(seq 1 20); do
+  if systemctl --user is-active --quiet translator.service; then
+    break
+  fi
+  sleep 0.5
+done
+systemctl --user is-active --quiet translator.service
+test -f "${token_path}"
+crash_token="$(cat "${token_path}")"
+test "${#crash_token}" -eq 64
+test "${first_token}" != "${crash_token}"
+
+systemctl --user restart translator.service
+sleep 2
+systemctl --user is-active --quiet translator.service
+test -f "${token_path}"
+second_token="$(cat "${token_path}")"
+test "${#second_token}" -eq 64
+test "${crash_token}" != "${second_token}"
+
+systemctl --user stop translator.service
+translator-daemon --audio-graph-cleanup >/dev/null || true
+if pactl list short sinks | grep -Eq 'translator_|Translator_'; then
+  pactl list short sinks | grep -E 'translator_|Translator_' >&2
+  exit 1
+fi
+if pactl list short sources | grep -Eq 'translator_|Translator_'; then
+  pactl list short sources | grep -E 'translator_|Translator_' >&2
+  exit 1
+fi
+systemctl --user show translator.service \
+  --property=ActiveState \
+  --property=SubState \
+  --property=Result \
+  --no-pager

@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: Publication hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Required public artifacts
+        run: |
+          set -euo pipefail
+          test -f README.md
+          test -f LICENSE
+          test -f SECURITY.md
+          test -f CONTRIBUTING.md
+          test -f .env.example
+          test -f docs/publication/github-description.md
+          test -f docs/publication/release-checklist.md
+
+      - name: Secret pattern scan
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            --exclude='.env.example' \
+            --exclude-dir='.git' \
+            --exclude-dir='target' \
+            --exclude-dir='node_modules' \
+            --exclude-dir='.venv' \
+            --exclude-dir='dist' \
+            --exclude-dir='output' \
+            '(sk-proj-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{20,}|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY)' \
+            .; then
+            echo "Potential committed secret found."
+            exit 1
+          fi
+
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            protobuf-compiler
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal --component rustfmt
+          rustup default 1.85.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build frontend dist for Tauri tests
+        working-directory: apps/translator-ui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test --workspace
+
+  python:
+    name: Python sidecar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Install sidecar dependencies
+        working-directory: sidecar
+        run: uv sync --locked --all-groups
+
+      - name: Offline sidecar tests
+        working-directory: sidecar
+        run: |
+          uv run pytest \
+            tests/test_provider_contract.py \
+            tests/test_openai_provider.py \
+            tests/test_openai_runtime.py \
+            tests/test_provider_engine.py \
+            tests/test_source_commit.py
+
+  ui:
+    name: Tauri UI frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: apps/translator-ui
+        run: bun install --frozen-lockfile
+
+      - name: Unit tests
+        working-directory: apps/translator-ui
+        run: bun test src/*.test.ts
+
+      - name: Build frontend
+        working-directory: apps/translator-ui
+        run: bun run build
+
+  contract-docs:
+    name: Contract and desktop docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system and Python tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          python -m pip install --upgrade uv
+
+      - name: Install sidecar dependencies for script imports
+        working-directory: sidecar
+        run: uv sync --locked --all-groups
+
+      - name: Run non-live repository checks
+        run: |
+          PYTHONPATH=sidecar sidecar/.venv/bin/python -m unittest \
+            tests.test_task1_boundaries \
+            tests.test_task8_ui_controls \
+            tests.test_task9_desktop_run_mode \
+            tests.test_task10_simulated_app_stream_smoke \
+            tests.test_task11_openai_adapter_preflight

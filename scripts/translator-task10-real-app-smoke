@@ -1,0 +1,894 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TASK7_REPORT = ROOT / "docs/benchmarks/task7-live-human-round-trip.json"
+DEFAULT_OUTPUT_DIR = ROOT / "docs/benchmarks"
+DAEMON_BASE_URL = "http://127.0.0.1:47681"
+VIRTUAL_MIC_DESCRIPTION = "Translator_Virtual_Mic"
+
+REPORT_PATHS = {
+    "telegram_desktop": "docs/benchmarks/task10-telegram-smoke-report.json",
+    "google_meet_browser": "docs/benchmarks/task10-meet-smoke-report.json",
+    "latency_ledger": "docs/benchmarks/task10-latency-ledger.json",
+    "privacy_marker_scan": "docs/benchmarks/task10-privacy-marker-scan.json",
+    "validation": "docs/benchmarks/task10-validation-report.json",
+}
+
+APP_DEFINITIONS = {
+    "telegram_desktop": {
+        "display_name": "Telegram Desktop",
+        "required_binaries": ["telegram-desktop"],
+        "process_binaries": ["telegram-desktop"],
+    },
+    "google_meet_browser": {
+        "display_name": "Google Meet via Firefox/Chromium/Chrome",
+        "required_binaries": ["firefox", "chromium", "chromium-browser", "google-chrome"],
+        "process_binaries": ["firefox", "chromium", "chromium-browser", "google-chrome", "chrome"],
+    },
+}
+
+FORBIDDEN_REPORT_KEYS = {
+    "pcm",
+    "pcm_bytes",
+    "raw_pcm",
+    "transcript",
+    "translation_text",
+    "source_text",
+    "target_text",
+    "spoken_content",
+    "spoken_phrase",
+}
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def run_command(args: list[str], timeout: float = 20.0) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            "ok": False,
+            "returncode": None,
+            "safe_error": error.__class__.__name__,
+            "stdout": "",
+        }
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "safe_error": None if completed.returncode == 0 else "command_failed",
+        "stdout": completed.stdout.decode("utf-8", errors="replace"),
+    }
+
+
+def command_json(args: list[str], timeout: float = 20.0) -> tuple[list[dict[str, Any]], str | None]:
+    result = run_command(args, timeout=timeout)
+    if not result["ok"]:
+        return [], result["safe_error"] or "command_failed"
+    try:
+        value = json.loads(result["stdout"])
+    except json.JSONDecodeError:
+        return [], "json_parse_failed"
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)], None
+    return [], "unexpected_json_shape"
+
+
+def binary_status(names: list[str]) -> dict[str, str | None]:
+    return {name: shutil.which(name) for name in names}
+
+
+def active_processes(names: list[str]) -> list[str]:
+    found: list[str] = []
+    for name in names:
+        result = run_command(["pgrep", "-x", name], timeout=5.0)
+        if result["ok"]:
+            found.append(name)
+    return sorted(set(found))
+
+
+def service_state() -> dict[str, Any]:
+    enabled = run_command(["systemctl", "--user", "is-enabled", "translator.service"], timeout=5.0)
+    active = run_command(["systemctl", "--user", "is-active", "translator.service"], timeout=5.0)
+    show = run_command(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            "translator.service",
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=MainPID",
+            "--no-pager",
+        ],
+        timeout=5.0,
+    )
+    properties: dict[str, str] = {}
+    for line in show["stdout"].splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            properties[key] = value
+    return {
+        "enabled": enabled["stdout"].strip() if enabled["stdout"].strip() else "unknown",
+        "active": active["stdout"].strip() if active["stdout"].strip() else "unknown",
+        "properties": properties,
+    }
+
+
+def ensure_service(start_service: bool) -> tuple[dict[str, Any], bool]:
+    before = service_state()
+    if not start_service or before["active"] == "active":
+        return before, False
+    start = run_command(["systemctl", "--user", "start", "translator.service"], timeout=20.0)
+    for _ in range(40):
+        current = service_state()
+        if current["active"] == "active":
+            current["start_command"] = {"ok": start["ok"], "safe_error": start["safe_error"]}
+            return current, True
+        time.sleep(0.25)
+    after = service_state()
+    after["start_command"] = {"ok": start["ok"], "safe_error": "service_start_timeout"}
+    return after, False
+
+
+def stop_service_if_needed(started_by_script: bool, stop_after: bool) -> dict[str, Any] | None:
+    if not started_by_script or not stop_after:
+        return None
+    stop = run_command(["systemctl", "--user", "stop", "translator.service"], timeout=20.0)
+    cleanup = run_command(["translator-daemon", "--audio-graph-cleanup"], timeout=20.0)
+    return {
+        "stop_command": {"ok": stop["ok"], "safe_error": stop["safe_error"]},
+        "cleanup_command": {"ok": cleanup["ok"], "safe_error": cleanup["safe_error"]},
+        "after": service_state(),
+    }
+
+
+def daemon_token() -> str | None:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime_dir:
+        return None
+    token_path = Path(runtime_dir) / "translator/control.token"
+    try:
+        token = token_path.read_text().strip()
+    except OSError:
+        return None
+    if len(token) == 64:
+        return token
+    return None
+
+
+def daemon_request(path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    token = daemon_token()
+    if token is None:
+        return {"ok": False, "safe_error": "control_token_unavailable"}
+    data = None
+    headers = {"Authorization": f"Bearer {token}"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        f"{DAEMON_BASE_URL}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10.0) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return {"ok": True, "status": response.status, "json": json.loads(body)}
+    except urllib.error.HTTPError as error:
+        return {"ok": False, "status": error.code, "safe_error": "http_error"}
+    except (OSError, json.JSONDecodeError, TimeoutError) as error:
+        return {"ok": False, "safe_error": error.__class__.__name__}
+
+
+def props(stream: dict[str, Any]) -> dict[str, str]:
+    raw = stream.get("properties")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+def translator_owned(properties: dict[str, str]) -> bool:
+    if properties.get("translator.owner", "").lower() == "true":
+        return True
+    application = properties.get("application.name", "").lower()
+    binary = properties.get("application.process.binary", "").lower()
+    names = [
+        properties.get("node.name", ""),
+        properties.get("media.name", ""),
+        properties.get("stream.description", ""),
+    ]
+    return (
+        application.startswith("translator")
+        or binary.startswith("translator-")
+        or binary in {"translator-daemon", "translator-sidecar", "translator-ui"}
+        or any(value.lower().startswith("translator") for value in names)
+    )
+
+
+def classify_task10_app(properties: dict[str, str]) -> str | None:
+    return classify_task10_stream(0, properties, None)
+
+
+def classify_task10_stream(
+    stream_id: int,
+    properties: dict[str, str],
+    confirmed_meet_stream_id: int | None,
+) -> str | None:
+    application = properties.get("application.name", "").lower()
+    binary = properties.get("application.process.binary", "").lower()
+    media = " ".join(
+        [
+            application,
+            properties.get("media.name", ""),
+            properties.get("stream.description", ""),
+        ]
+    ).lower()
+    if translator_owned(properties):
+        return None
+    if "telegram" in binary or "telegram desktop" in application:
+        return "telegram_desktop"
+    browser = binary in {"firefox", "chromium", "chromium-browser", "google-chrome", "chrome"} or (
+        application in {"firefox", "chromium", "google chrome", "chrome"}
+    )
+    if browser and (stream_id == confirmed_meet_stream_id or "meet" in media):
+        return "google_meet_browser"
+    return None
+
+
+def call_like(properties: dict[str, str]) -> bool:
+    role = properties.get("media.role", "").lower()
+    media = " ".join(
+        [
+            properties.get("media.name", ""),
+            properties.get("stream.description", ""),
+        ]
+    ).lower()
+    return role in {"communication", "phone"} or any(
+        marker in media for marker in ("webrtc", "voice", "call", "meet")
+    )
+
+
+def collect_audio_state(confirmed_meet_stream_id: int | None = None) -> dict[str, Any]:
+    sink_inputs, sink_input_error = command_json(["pactl", "--format=json", "list", "sink-inputs"])
+    sinks, sink_error = command_json(["pactl", "--format=json", "list", "sinks"])
+    sources, source_error = command_json(["pactl", "--format=json", "list", "sources"])
+    sink_names = {
+        int(item["index"]): item.get("name", "")
+        for item in sinks
+        if "index" in item and isinstance(item.get("name"), str)
+    }
+    candidates: list[dict[str, Any]] = []
+    non_scope_count = 0
+    unconfirmed_browser_call_count = 0
+    for stream in sink_inputs:
+        properties = props(stream)
+        stream_id = int(stream.get("index", 0) or 0)
+        binary = properties.get("application.process.binary", "").lower()
+        browser = binary in {"firefox", "chromium", "chromium-browser", "google-chrome", "chrome"}
+        app_key = classify_task10_stream(stream_id, properties, confirmed_meet_stream_id)
+        if app_key is None:
+            if browser and call_like(properties) and not translator_owned(properties):
+                unconfirmed_browser_call_count += 1
+            non_scope_count += 1
+            continue
+        sink_index = int(stream.get("sink", 0) or 0)
+        candidates.append(
+            {
+                "stream_id": stream_id,
+                "app_key": app_key,
+                "application_name": APP_DEFINITIONS[app_key]["display_name"],
+                "process_binary": properties.get("application.process.binary", ""),
+                "media_role": properties.get("media.role") or None,
+                "call_like": call_like(properties),
+                "meet_confirmed": app_key != "google_meet_browser"
+                or stream_id == confirmed_meet_stream_id
+                or "meet"
+                in " ".join(
+                    [
+                        properties.get("application.name", ""),
+                        properties.get("media.name", ""),
+                        properties.get("stream.description", ""),
+                    ]
+                ).lower(),
+                "current_sink_name": sink_names.get(sink_index, ""),
+                "on_translator_remote_in": sink_names.get(sink_index, "") == "translator_remote_in",
+            }
+        )
+    virtual_mic_present = any(
+        item.get("name") == "translator_virtual_mic"
+        or props(item).get("device.description") == VIRTUAL_MIC_DESCRIPTION
+        for item in sources
+    )
+    return {
+        "pactl_available": shutil.which("pactl") is not None,
+        "errors": {
+            "sink_inputs": sink_input_error,
+            "sinks": sink_error,
+            "sources": source_error,
+        },
+        "task10_route_candidates": candidates,
+        "non_task10_sink_input_count": non_scope_count,
+        "unconfirmed_browser_call_count": unconfirmed_browser_call_count,
+        "virtual_microphone": {
+            "expected_description": VIRTUAL_MIC_DESCRIPTION,
+            "source_present": virtual_mic_present,
+        },
+    }
+
+
+def collect_audio_state_with_settle(
+    seconds: float,
+    confirmed_meet_stream_id: int | None = None,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, seconds)
+    attempt = 0
+    while True:
+        attempt += 1
+        state = collect_audio_state(confirmed_meet_stream_id)
+        state["settle_attempts"] = attempt
+        if state["virtual_microphone"]["source_present"] or time.monotonic() >= deadline:
+            return state
+        time.sleep(0.25)
+
+
+def select_manual_route(stream_id: int | None, audio_state: dict[str, Any]) -> dict[str, Any]:
+    if stream_id is None:
+        return {"attempted": False, "status": "not_attempted"}
+    candidates = audio_state["task10_route_candidates"]
+    candidate = next(
+        (candidate for candidate in candidates if candidate["stream_id"] == stream_id),
+        None,
+    )
+    if candidate is None:
+        return {
+            "attempted": True,
+            "status": "blocked",
+            "safe_error": "stream_id_is_not_a_task10_candidate",
+        }
+    if not candidate["call_like"]:
+        return {
+            "attempted": True,
+            "status": "blocked",
+            "safe_error": "stream_id_is_not_call_like",
+        }
+    if candidate["app_key"] == "google_meet_browser" and not candidate["meet_confirmed"]:
+        return {
+            "attempted": True,
+            "status": "blocked",
+            "safe_error": "meet_stream_not_confirmed",
+        }
+    response = daemon_request(
+        "/v1/routes/manual-override",
+        method="POST",
+        payload={"stream_id": stream_id},
+    )
+    return {
+        "attempted": True,
+        "status": "passed" if response["ok"] else "failed",
+        "stream_id": candidate["stream_id"],
+        "candidate_app_key": candidate["app_key"],
+        "http_status": response.get("status"),
+        "safe_error": response.get("safe_error"),
+    }
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def recording_evidence(path_text: str | None) -> dict[str, Any]:
+    if not path_text:
+        return {"provided": False}
+    path = Path(path_text).expanduser()
+    if not path.exists() or not path.is_file():
+        return {"provided": True, "status": "missing"}
+    return {
+        "provided": True,
+        "status": "present",
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
+
+
+def load_task7() -> dict[str, Any]:
+    return json.loads(TASK7_REPORT.read_text())
+
+
+def task7_debt(task7: dict[str, Any]) -> dict[str, Any]:
+    acceptance = task7["acceptance"]
+    return {
+        "task7_complete": acceptance["task7_complete"],
+        "local_provider_latency_classification": task7["classification"],
+        "requires_mvp_b_provider_comparison": acceptance["requires_mvp_b_provider_comparison"],
+        "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
+        "blocked_acceptance_item": acceptance["blocked_acceptance_item"],
+    }
+
+
+def app_report(
+    app_key: str,
+    environment: dict[str, Any],
+    audio_state: dict[str, Any],
+    manual_route: dict[str, Any],
+    live_app: str | None,
+    recording: dict[str, Any],
+    overlapping_speech_confirmed: bool,
+    virtual_mic_selected_confirmed: bool,
+    remote_outgoing_translation_confirmed: bool,
+) -> dict[str, Any]:
+    definition = APP_DEFINITIONS[app_key]
+    candidates = [
+        candidate
+        for candidate in audio_state["task10_route_candidates"]
+        if candidate["app_key"] == app_key
+    ]
+    call_like_candidate = any(candidate["call_like"] for candidate in candidates)
+    candidate_stream_ids = {
+        candidate["stream_id"] for candidate in candidates if candidate["call_like"]
+    }
+    route_matches_app_candidate = (
+        manual_route.get("status") == "passed"
+        and manual_route.get("candidate_app_key") == app_key
+        and manual_route.get("stream_id") in candidate_stream_ids
+    )
+    live_selected = live_app == app_key
+    live_passed = (
+        live_selected
+        and call_like_candidate
+        and recording.get("status") == "present"
+        and overlapping_speech_confirmed
+        and route_matches_app_candidate
+        and virtual_mic_selected_confirmed
+        and remote_outgoing_translation_confirmed
+    )
+    blockers: list[str] = []
+    if not candidates:
+        blockers.append("no_active_task10_route_candidate")
+    if not audio_state["virtual_microphone"]["source_present"]:
+        blockers.append("translator_virtual_microphone_not_present")
+    if live_selected and not virtual_mic_selected_confirmed:
+        blockers.append("call_app_virtual_microphone_selection_not_confirmed")
+    if live_selected and not remote_outgoing_translation_confirmed:
+        blockers.append("remote_outgoing_translation_receipt_not_confirmed")
+    if live_selected and not route_matches_app_candidate:
+        blockers.append("incoming_manual_route_not_bound_to_app_candidate")
+    if not live_passed:
+        blockers.append("real_second_endpoint_recording_not_verified")
+    return {
+        "schema_version": "translator.task10-real-app-smoke.v1",
+        "generated_at": utc_now(),
+        "app_key": app_key,
+        "app": definition["display_name"],
+        "completed": live_passed,
+        "route_discovery": {
+            "required_binaries": binary_status(definition["required_binaries"]),
+            "running_processes": active_processes(definition["process_binaries"]),
+            "candidate_count": len(candidates),
+            "call_like_candidate_count": sum(1 for candidate in candidates if candidate["call_like"]),
+            "candidates": candidates,
+        },
+        "incoming_route_selection": manual_route,
+        "virtual_microphone": {
+            **audio_state["virtual_microphone"],
+            "call_app_selection_confirmed": virtual_mic_selected_confirmed if live_selected else False,
+            "remote_outgoing_translation_confirmed": (
+                remote_outgoing_translation_confirmed if live_selected else False
+            ),
+        },
+        "translated_only_default": {
+            "original_audio_mixed_by_default": False,
+            "debug_text_enabled": False,
+            "debug_capture_enabled": False,
+        },
+        "live_second_endpoint": {
+            "status": "passed" if live_passed else "blocked",
+            "recording": recording if live_selected else {"provided": False},
+            "overlapping_speech_confirmed": overlapping_speech_confirmed if live_selected else False,
+        },
+        "privacy": {
+            "external_provider_started": False,
+            "debug_text_enabled": False,
+            "debug_capture_enabled": False,
+        },
+        "environment": environment,
+        "blockers": blockers,
+    }
+
+
+def latency_ledger(task7: dict[str, Any]) -> dict[str, Any]:
+    latency_ms = task7["latency_ms"]
+    return {
+        "schema_version": "translator.task10-latency-ledger.v1",
+        "generated_at": utc_now(),
+        "source": "docs/benchmarks/task7-live-human-round-trip.json",
+        "task7_debt_carried": task7_debt(task7),
+        "local_provider_latency_classification": task7["classification"],
+        "target_ms": 1000,
+        "usable_release_limit_ms": 1500,
+        "physical_mic_onset_to_returned_ru_first_audible_ms": latency_ms[
+            "physical_mic_onset_to_returned_ru_first_audible"
+        ],
+        "outgoing_first_audio_ms": latency_ms["outgoing_first_audio"],
+        "incoming_first_audio_ms": latency_ms["incoming_first_audio"],
+        "task11_mandatory": task7["acceptance"]["requires_mvp_b_provider_comparison"],
+        "release_implication": "measured_prototype_not_usable_release_until_a_provider_meets_limit",
+    }
+
+
+def walk_keys(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        keys = list(value)
+        for child in value.values():
+            keys.extend(walk_keys(child))
+        return keys
+    if isinstance(value, list):
+        keys: list[str] = []
+        for child in value:
+            keys.extend(walk_keys(child))
+        return keys
+    return []
+
+
+def privacy_scan(
+    payloads: dict[str, dict[str, Any]],
+    log_files: list[str],
+    privacy_markers: list[str],
+) -> dict[str, Any]:
+    forbidden_matches: list[dict[str, str]] = []
+    for name, payload in payloads.items():
+        matches = sorted(FORBIDDEN_REPORT_KEYS.intersection(walk_keys(payload)))
+        for match in matches:
+            forbidden_matches.append({"report": name, "key": match})
+    log_matches: list[dict[str, str]] = []
+    scanned_logs: list[dict[str, Any]] = []
+    missing_logs: list[str] = []
+    for log_file in log_files:
+        path = Path(log_file).expanduser()
+        if not path.exists() or not path.is_file():
+            missing_logs.append(log_file)
+            continue
+        text = path.read_text(errors="replace")
+        scanned_logs.append({"path": str(path), "bytes": path.stat().st_size})
+        for marker in privacy_markers:
+            if marker and marker in text:
+                log_matches.append({"path": str(path), "marker_sha256": hashlib.sha256(marker.encode()).hexdigest()})
+    log_scan_passed = bool(log_files) and not missing_logs and not log_matches
+    report_key_scan_passed = not forbidden_matches
+    return {
+        "schema_version": "translator.task10-privacy-marker-scan.v1",
+        "generated_at": utc_now(),
+        "reports_scanned": sorted(payloads),
+        "report_payload_key_scan": {
+            "passed": report_key_scan_passed,
+            "forbidden_report_key_matches": forbidden_matches,
+        },
+        "log_scan": {
+            "status": "passed" if log_scan_passed else "blocked" if not log_files else "failed",
+            "scanned_logs": scanned_logs,
+            "missing_logs": missing_logs,
+            "marker_matches": log_matches,
+            "required_for_task10_completion": True,
+        },
+        "passed": report_key_scan_passed and log_scan_passed,
+        "external_provider_started": False,
+        "debug_text_enabled": False,
+        "debug_capture_enabled": False,
+    }
+
+
+def repo_c4_status(run_scan: bool) -> dict[str, Any]:
+    if not run_scan:
+        return {
+            "result": "not_run_by_smoke_script",
+            "required_at_task_close": True,
+        }
+    generator = Path("/home/anton/.agents/skills/repo-c4-scan/scripts/generate_repo_c4.py")
+    validator = Path("/home/anton/.agents/skills/repo-c4-scan/scripts/validate_repo_c4.py")
+    generate = run_command(["python3", str(generator), str(ROOT)], timeout=120.0)
+    validate = run_command(["python3", str(validator), str(ROOT / "repo-c4.json")], timeout=120.0)
+    status: dict[str, Any] = {
+        "command": "python3 generate_repo_c4.py /home/anton/Source/translator && python3 validate_repo_c4.py /home/anton/Source/translator/repo-c4.json",
+        "result": "passed" if generate["ok"] and validate["ok"] else "failed",
+        "generate_ok": generate["ok"],
+        "validate_ok": validate["ok"],
+    }
+    try:
+        repo_c4 = json.loads((ROOT / "repo-c4.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        status["safe_error"] = "repo_c4_unreadable"
+        return status
+    status["containers"] = len(repo_c4.get("containers", []))
+    status["components"] = len(repo_c4.get("components", []))
+    meta = repo_c4.get("meta", {})
+    architecture_fidelity = meta.get("architecture_fidelity", {})
+    edge_counts = architecture_fidelity.get("edge_count_by_type", {})
+    status["internal_edges"] = sum(
+        value for value in edge_counts.values() if isinstance(value, int)
+    )
+    status["architecture_fidelity_partial_reasons"] = architecture_fidelity.get(
+        "partial_reasons", []
+    )
+    status["tool_orchestration_partial_reasons"] = (
+        meta.get("tool_orchestration", {}).get("partial_reasons", [])
+    )
+    return status
+
+
+def validation_report(
+    task7: dict[str, Any],
+    environment: dict[str, Any],
+    reports: dict[str, dict[str, Any]],
+    scan: dict[str, Any],
+    repo_c4: dict[str, Any],
+) -> dict[str, Any]:
+    telegram_done = reports["telegram_desktop"]["completed"]
+    meet_done = reports["google_meet_browser"]["completed"]
+    virtual_mic_remote_passed = any(
+        reports[key]["virtual_microphone"]["call_app_selection_confirmed"]
+        and reports[key]["virtual_microphone"]["remote_outgoing_translation_confirmed"]
+        for key in ("telegram_desktop", "google_meet_browser")
+    )
+    mvp_a_gate_satisfied = (
+        telegram_done
+        and meet_done
+        and virtual_mic_remote_passed
+        and scan["passed"]
+        and repo_c4.get("result") == "passed"
+    )
+    return {
+        "schema_version": "translator.task10-validation.v1",
+        "evidence_written_at": utc_now(),
+        "completed": mvp_a_gate_satisfied,
+        "mvp_a_gate_satisfied": mvp_a_gate_satisfied,
+        "task": "Task 10: Real-App MVP-A Smokes Telegram And Meet",
+        "task7_debt_carried": task7_debt(task7),
+        "smoke_reports": {
+            "telegram_desktop": REPORT_PATHS["telegram_desktop"],
+            "google_meet_browser": REPORT_PATHS["google_meet_browser"],
+        },
+        "latency_ledger": REPORT_PATHS["latency_ledger"],
+        "privacy_marker_scan": REPORT_PATHS["privacy_marker_scan"],
+        "repo_c4_scan": repo_c4,
+        "autonomous_evidence": {
+            "telegram_smoke_completed": telegram_done,
+            "meet_smoke_completed": meet_done,
+            "privacy_scan_passed": scan["passed"],
+            "local_provider_only": True,
+            "service_environment": environment,
+        },
+        "live_second_endpoint": {
+            "status": "blocked" if not mvp_a_gate_satisfied else "passed",
+            "required_evidence": "Telegram or Meet call with real second endpoint, overlapping Ru/En speech and receiving-side recording",
+        },
+        "acceptance": [
+            {
+                "item": "Telegram Desktop incoming audio can be selected, translated and played to physical sink",
+                "status": "blocked" if not telegram_done else "passed",
+            },
+            {
+                "item": "Firefox/Chromium Meet incoming audio can be selected, translated and played to physical sink",
+                "status": "blocked" if not meet_done else "passed",
+            },
+            {
+                "item": "Translator_Virtual_Mic is selected as call app microphone and remote endpoint receives outgoing translation",
+                "status": "passed" if virtual_mic_remote_passed else "blocked",
+            },
+            {
+                "item": "Original audio is not mixed by default",
+                "status": "passed_by_existing_task7_and_runtime_contracts",
+            },
+            {
+                "item": "Synthetic and real-app logs contain no spoken content",
+                "status": "passed"
+                if scan["passed"]
+                else "blocked"
+                if scan["log_scan"]["status"] == "blocked"
+                else "failed",
+            },
+            {
+                "item": "MVP-A gate is satisfied",
+                "status": "passed" if mvp_a_gate_satisfied else "blocked",
+            },
+        ],
+        "latency": {
+            "classification": task7["classification"],
+            "task11_mandatory": task7["acceptance"]["requires_mvp_b_provider_comparison"],
+        },
+        "critic": {
+            "verdict": "pending",
+            "summary": "Pending post-implementation evidence review.",
+        },
+    }
+
+
+def read_existing_report(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def completed_app_report_has_bound_route(app_key: str, report: dict[str, Any]) -> bool:
+    if (
+        report.get("schema_version") != "translator.task10-real-app-smoke.v1"
+        or report.get("app_key") != app_key
+        or report.get("completed") is not True
+    ):
+        return False
+    route = report.get("incoming_route_selection", {})
+    if (
+        route.get("status") != "passed"
+        or route.get("candidate_app_key") != app_key
+        or not isinstance(route.get("stream_id"), int)
+    ):
+        return False
+    candidates = report.get("route_discovery", {}).get("candidates", [])
+    matching_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("stream_id") == route["stream_id"]
+        and candidate.get("app_key") == app_key
+        and candidate.get("call_like") is True
+    ]
+    if not matching_candidates:
+        return False
+    if app_key == "google_meet_browser" and not any(
+        candidate.get("meet_confirmed") is True for candidate in matching_candidates
+    ):
+        return False
+    live_endpoint = report.get("live_second_endpoint", {})
+    virtual_microphone = report.get("virtual_microphone", {})
+    return (
+        live_endpoint.get("status") == "passed"
+        and live_endpoint.get("recording", {}).get("status") == "present"
+        and live_endpoint.get("overlapping_speech_confirmed") is True
+        and virtual_microphone.get("call_app_selection_confirmed") is True
+        and virtual_microphone.get("remote_outgoing_translation_confirmed") is True
+    )
+
+
+def merge_existing_app_reports(
+    output_dir: Path,
+    reports: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    merged = dict(reports)
+    for key in ("telegram_desktop", "google_meet_browser"):
+        current = reports[key]
+        existing = read_existing_report(report_path(output_dir, key))
+        if (
+            existing is not None
+            and completed_app_report_has_bound_route(key, existing)
+            and current.get("completed") is not True
+        ):
+            merged[key] = existing
+    return merged
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def report_path(output_dir: Path, key: str) -> Path:
+    return output_dir / Path(REPORT_PATHS[key]).name
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Collect Task 10 real-app smoke evidence.")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--start-service", action="store_true")
+    parser.add_argument("--stop-after", action="store_true")
+    parser.add_argument("--settle-seconds", type=float, default=5.0)
+    parser.add_argument("--manual-route-stream-id", type=int)
+    parser.add_argument("--confirm-meet-stream-id", type=int)
+    parser.add_argument("--live-app", choices=sorted(APP_DEFINITIONS))
+    parser.add_argument("--receiving-recording")
+    parser.add_argument("--overlapping-speech-confirmed", action="store_true")
+    parser.add_argument("--virtual-mic-selected-confirmed", action="store_true")
+    parser.add_argument("--remote-outgoing-translation-confirmed", action="store_true")
+    parser.add_argument("--log-file", action="append", default=[])
+    parser.add_argument("--privacy-marker", action="append", default=["private-spoken-marker", "task10-spoken-marker"])
+    parser.add_argument("--repo-c4-scan", action="store_true")
+    parser.add_argument("--require-live-evidence", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    task7 = load_task7()
+    output_dir = args.output_dir
+    service, started_by_script = ensure_service(args.start_service)
+    try:
+        audio_state = (
+            collect_audio_state_with_settle(args.settle_seconds, args.confirm_meet_stream_id)
+            if service["active"] == "active"
+            else collect_audio_state(args.confirm_meet_stream_id)
+        )
+        daemon_status = daemon_request("/v1/status") if service["active"] == "active" else None
+        environment = {
+            "generated_by": "scripts/translator-task10-real-app-smoke",
+            "service": service,
+            "daemon_status_available": bool(daemon_status and daemon_status["ok"]),
+            "audio_state": audio_state,
+        }
+        manual_route = select_manual_route(args.manual_route_stream_id, audio_state)
+        recording = recording_evidence(args.receiving_recording)
+        reports = {
+            "telegram_desktop": app_report(
+                "telegram_desktop",
+                environment,
+                audio_state,
+                manual_route,
+                args.live_app,
+                recording,
+                args.overlapping_speech_confirmed,
+                args.virtual_mic_selected_confirmed,
+                args.remote_outgoing_translation_confirmed,
+            ),
+            "google_meet_browser": app_report(
+                "google_meet_browser",
+                environment,
+                audio_state,
+                manual_route,
+                args.live_app,
+                recording,
+                args.overlapping_speech_confirmed,
+                args.virtual_mic_selected_confirmed,
+                args.remote_outgoing_translation_confirmed,
+            ),
+            "latency_ledger": latency_ledger(task7),
+        }
+        reports = merge_existing_app_reports(output_dir, reports)
+        scan = privacy_scan(reports, args.log_file, args.privacy_marker)
+        reports["privacy_marker_scan"] = scan
+        repo_c4 = repo_c4_status(args.repo_c4_scan)
+        validation = validation_report(task7, environment, reports, scan, repo_c4)
+        reports["validation"] = validation
+        for key, payload in reports.items():
+            write_json(report_path(output_dir, key), payload)
+        print(json.dumps(validation, indent=2, sort_keys=True))
+        if args.require_live_evidence and not validation["mvp_a_gate_satisfied"]:
+            return 2
+        return 0
+    finally:
+        stopped = stop_service_if_needed(started_by_script, args.stop_after)
+        if stopped is not None:
+            write_json(output_dir / "task10-service-stop-report.json", stopped)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

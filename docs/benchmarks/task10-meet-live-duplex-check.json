@@ -1,0 +1,54 @@
+{
+  "schema_version": "translator.task10-meet-live-duplex-check.v1",
+  "task": "Task 10: Real-App MVP-A Smokes Telegram And Meet",
+  "generated_at": "2026-07-30T09:26:08Z",
+  "application": {
+    "name": "Google Meet",
+    "client": "browser",
+    "browser": "Firefox/Chromium/Chrome allowlist"
+  },
+  "runtime": {
+    "provider_id": "local",
+    "audio_leaves_machine": false,
+    "directions": [
+      {
+        "direction_id": "microphone",
+        "source_language": "ru",
+        "target_language": "en"
+      },
+      {
+        "direction_id": "speaker",
+        "source_language": "ru",
+        "target_language": "en"
+      }
+    ]
+  },
+  "routing": {
+    "browser_meet_playback_target": "translator_remote_in",
+    "browser_meet_microphone_source": "translator_virtual_mic",
+    "incoming_translation_playback_sink": "physical_headphones",
+    "outgoing_translation_playback_sink": "translator_mic_out"
+  },
+  "user_confirmation": {
+    "status": "confirmed_by_user",
+    "incoming_and_outgoing_translation_worked": true,
+    "meet_stopped_before_telegram_check": true,
+    "content_recorded": false
+  },
+  "privacy": {
+    "debug_capture_enabled": false,
+    "debug_text_enabled": false,
+    "external_provider_started": false,
+    "speech_payload_recorded": false,
+    "meeting_link_recorded": false
+  },
+  "acceptance": {
+    "meet_incoming_translation": "passed",
+    "meet_outgoing_translation": "passed",
+    "receiving_side_confirmation": "confirmed_by_user"
+  },
+  "evidence_limitations": [
+    "No audio, transcript or receiving-side recording was persisted.",
+    "This record is based on live user confirmation from the active desktop session."
+  ]
+}

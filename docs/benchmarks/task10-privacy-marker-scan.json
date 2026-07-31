@@ -1,0 +1,35 @@
+{
+  "debug_capture_enabled": false,
+  "debug_text_enabled": false,
+  "external_provider_started": false,
+  "generated_at": "2026-07-30T09:26:08Z",
+  "log_scan": {
+    "forbidden_payload_matches": [],
+    "journal_lines_scanned_since": "2026-07-30 00:00:00 UTC",
+    "journal_unit": "translator.service",
+    "marker_matches": [
+      {
+        "count": 2,
+        "marker": "debug_text_state_changed",
+        "status": "safe_control_event_without_text_payload"
+      }
+    ],
+    "missing_logs": [],
+    "required_for_task10_completion": true,
+    "scanned_logs": [],
+    "status": "passed"
+  },
+  "passed": true,
+  "report_payload_key_scan": {
+    "forbidden_report_key_matches": [],
+    "passed": true
+  },
+  "reports_scanned": [
+    "google_meet_browser",
+    "google_meet_live_duplex",
+    "latency_ledger",
+    "telegram_desktop",
+    "telegram_desktop_live_duplex"
+  ],
+  "schema_version": "translator.task10-privacy-marker-scan.v1"
+}

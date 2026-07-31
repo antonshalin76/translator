@@ -1,0 +1,6207 @@
+{
+  "classification": "fails_usable_limit",
+  "cold_probe": {
+    "directions": {
+      "en_to_ru": {
+        "capture_to_first_audio_ms": 1751.579939,
+        "capture_to_last_audio_ms": 1771.94652,
+        "dropped": false,
+        "provider_latency_ms": 1770.0,
+        "queue_lag_ms": 0.0,
+        "restarted": false,
+        "speech_onset_to_first_audible_ms": 1842.419708
+      },
+      "ru_to_en": {
+        "capture_to_first_audio_ms": 1787.28197,
+        "capture_to_last_audio_ms": 1796.65723,
+        "dropped": false,
+        "provider_latency_ms": 1794.0,
+        "queue_lag_ms": 0.0,
+        "restarted": false,
+        "speech_onset_to_first_audible_ms": 1880.413624
+      }
+    },
+    "excluded_from_percentiles": true
+  },
+  "directions": {
+    "en_to_ru": {
+      "capture_to_first_audio_ms": {
+        "p50": 2451.442907,
+        "p95": 2901.897953
+      },
+      "capture_to_last_audio_ms": {
+        "p50": 2672.520386,
+        "p95": 3857.939234
+      },
+      "direction": "en_to_ru",
+      "drop_count": 0,
+      "drop_rate": 0.0,
+      "final_mode": "streaming_first",
+      "provider_latency_ms": {
+        "p50": 2505.0,
+        "p95": 2940.0
+      },
+      "quality_passed": true,
+      "queue_lag_ms": {
+        "p50": 126.0,
+        "p95": 130.0
+      },
+      "restart_count": 0,
+      "samples": [
+        {
+          "capture_to_first_audio_ms": 2537.630076,
+          "capture_to_last_audio_ms": 2899.603865,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 10,
+          "provider_latency_ms": 2554.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2664.417456,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2520.30203,
+          "capture_to_last_audio_ms": 2876.484211,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 11,
+          "provider_latency_ms": 2534.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2631.218021,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3103.248288,
+          "capture_to_last_audio_ms": 3840.070231,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 12,
+          "provider_latency_ms": 3242.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3207.180835,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2745.237767,
+          "capture_to_last_audio_ms": 3451.905031,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 13,
+          "provider_latency_ms": 2761.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2855.335407,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2710.892022,
+          "capture_to_last_audio_ms": 3192.893813,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 14,
+          "provider_latency_ms": 2728.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2812.607158,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2804.044866,
+          "capture_to_last_audio_ms": 3631.44867,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 15,
+          "provider_latency_ms": 2822.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2898.082494,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2721.306871,
+          "capture_to_last_audio_ms": 3435.782515,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 16,
+          "provider_latency_ms": 2760.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2857.028806,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2875.423877,
+          "capture_to_last_audio_ms": 3830.345541,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 17,
+          "provider_latency_ms": 2940.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2973.346023,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2781.811825,
+          "capture_to_last_audio_ms": 3634.605663,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 18,
+          "provider_latency_ms": 2797.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2898.308995,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2856.984955,
+          "capture_to_last_audio_ms": 3918.724644,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 19,
+          "provider_latency_ms": 2875.0,
+          "quality_passed": true,
+          "queue_lag_ms": 143.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2951.46738,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1570.659986,
+          "capture_to_last_audio_ms": 1579.400049,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 20,
+          "provider_latency_ms": 1579.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1629.839893,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1147.589161,
+          "capture_to_last_audio_ms": 1154.423441,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 21,
+          "provider_latency_ms": 1154.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1219.462144,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1787.960237,
+          "capture_to_last_audio_ms": 1809.327816,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 22,
+          "provider_latency_ms": 1806.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1855.746841,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1615.264827,
+          "capture_to_last_audio_ms": 1629.741909,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 23,
+          "provider_latency_ms": 1629.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1673.772424,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2352.932378,
+          "capture_to_last_audio_ms": 2481.258658,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 24,
+          "provider_latency_ms": 2410.0,
+          "quality_passed": true,
+          "queue_lag_ms": 70.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2425.692175,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2240.868734,
+          "capture_to_last_audio_ms": 2262.266263,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 25,
+          "provider_latency_ms": 2262.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2358.02124,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1922.721,
+          "capture_to_last_audio_ms": 1979.995681,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 26,
+          "provider_latency_ms": 1976.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2037.181085,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1974.909243,
+          "capture_to_last_audio_ms": 2093.784957,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 27,
+          "provider_latency_ms": 2027.0,
+          "quality_passed": true,
+          "queue_lag_ms": 67.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2056.665559,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1759.089717,
+          "capture_to_last_audio_ms": 1785.488196,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 28,
+          "provider_latency_ms": 1785.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1856.889009,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1408.883523,
+          "capture_to_last_audio_ms": 1419.167917,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 29,
+          "provider_latency_ms": 1419.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1511.556769,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2569.840944,
+          "capture_to_last_audio_ms": 3054.807551,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 30,
+          "provider_latency_ms": 2593.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2680.862522,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2547.96125,
+          "capture_to_last_audio_ms": 2905.621035,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 31,
+          "provider_latency_ms": 2563.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2684.715568,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3187.116194,
+          "capture_to_last_audio_ms": 3847.058919,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 32,
+          "provider_latency_ms": 3263.0,
+          "quality_passed": true,
+          "queue_lag_ms": 126.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3323.682003,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2764.875815,
+          "capture_to_last_audio_ms": 3363.207531,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 33,
+          "provider_latency_ms": 2780.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2855.444067,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2730.233523,
+          "capture_to_last_audio_ms": 3325.876264,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 34,
+          "provider_latency_ms": 2745.0,
+          "quality_passed": true,
+          "queue_lag_ms": 130.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2855.246419,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2868.908422,
+          "capture_to_last_audio_ms": 3584.166711,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 35,
+          "provider_latency_ms": 2903.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2973.657514,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2720.693155,
+          "capture_to_last_audio_ms": 3406.86668,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 36,
+          "provider_latency_ms": 2742.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2812.759926,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2850.917932,
+          "capture_to_last_audio_ms": 3922.468131,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 37,
+          "provider_latency_ms": 2868.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2962.12581,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2784.034213,
+          "capture_to_last_audio_ms": 3621.718087,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 38,
+          "provider_latency_ms": 2801.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2919.244123,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2868.512018,
+          "capture_to_last_audio_ms": 3909.522468,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 39,
+          "provider_latency_ms": 2907.0,
+          "quality_passed": true,
+          "queue_lag_ms": 130.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2972.937901,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1540.907586,
+          "capture_to_last_audio_ms": 1551.55598,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 40,
+          "provider_latency_ms": 1551.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1650.048346,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1136.830379,
+          "capture_to_last_audio_ms": 1143.025147,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 41,
+          "provider_latency_ms": 1143.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1251.05935,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1880.229583,
+          "capture_to_last_audio_ms": 1893.095421,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 42,
+          "provider_latency_ms": 1892.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1998.745808,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1642.354632,
+          "capture_to_last_audio_ms": 1655.233355,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 43,
+          "provider_latency_ms": 1655.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1695.599227,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2374.781043,
+          "capture_to_last_audio_ms": 2580.562225,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 44,
+          "provider_latency_ms": 2411.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2485.440147,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2248.343519,
+          "capture_to_last_audio_ms": 2265.912141,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 45,
+          "provider_latency_ms": 2265.0,
+          "quality_passed": true,
+          "queue_lag_ms": 2.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2378.442276,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1908.165665,
+          "capture_to_last_audio_ms": 1925.60506,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 46,
+          "provider_latency_ms": 1925.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2037.261047,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1865.538875,
+          "capture_to_last_audio_ms": 1898.841441,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 47,
+          "provider_latency_ms": 1899.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1941.02035,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1702.44552,
+          "capture_to_last_audio_ms": 1718.361917,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 48,
+          "provider_latency_ms": 1717.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1792.520361,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1416.734742,
+          "capture_to_last_audio_ms": 1435.704873,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 49,
+          "provider_latency_ms": 1435.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1501.727385,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2549.612107,
+          "capture_to_last_audio_ms": 2900.43885,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 50,
+          "provider_latency_ms": 2563.0,
+          "quality_passed": true,
+          "queue_lag_ms": 126.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2685.5593,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2543.526009,
+          "capture_to_last_audio_ms": 2894.792407,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 51,
+          "provider_latency_ms": 2559.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2642.032909,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3021.034997,
+          "capture_to_last_audio_ms": 3688.759265,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 52,
+          "provider_latency_ms": 3043.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3134.004215,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2745.326336,
+          "capture_to_last_audio_ms": 3339.104961,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 53,
+          "provider_latency_ms": 2762.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2834.504505,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2791.497432,
+          "capture_to_last_audio_ms": 3364.096308,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 54,
+          "provider_latency_ms": 2824.0,
+          "quality_passed": true,
+          "queue_lag_ms": 130.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2897.736132,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2823.719982,
+          "capture_to_last_audio_ms": 3618.051244,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 55,
+          "provider_latency_ms": 2855.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2920.104514,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2699.938262,
+          "capture_to_last_audio_ms": 3417.108238,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 56,
+          "provider_latency_ms": 2718.0,
+          "quality_passed": true,
+          "queue_lag_ms": 129.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2823.296918,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2867.263252,
+          "capture_to_last_audio_ms": 3821.389041,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 57,
+          "provider_latency_ms": 2884.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2983.797381,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2802.193627,
+          "capture_to_last_audio_ms": 3882.525192,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 58,
+          "provider_latency_ms": 2822.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2887.568018,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2901.897953,
+          "capture_to_last_audio_ms": 3860.358225,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 59,
+          "provider_latency_ms": 2920.0,
+          "quality_passed": true,
+          "queue_lag_ms": 129.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3015.722126,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1557.472966,
+          "capture_to_last_audio_ms": 1568.058207,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 60,
+          "provider_latency_ms": 1568.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1639.500811,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1205.174309,
+          "capture_to_last_audio_ms": 1222.19007,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 61,
+          "provider_latency_ms": 1222.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1272.610198,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1809.762839,
+          "capture_to_last_audio_ms": 1829.98866,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 62,
+          "provider_latency_ms": 1830.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1879.136367,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1616.252663,
+          "capture_to_last_audio_ms": 1624.785637,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 63,
+          "provider_latency_ms": 1624.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1696.004476,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2451.442907,
+          "capture_to_last_audio_ms": 2672.520386,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 64,
+          "provider_latency_ms": 2505.0,
+          "quality_passed": true,
+          "queue_lag_ms": 108.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2531.796498,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2335.7476,
+          "capture_to_last_audio_ms": 2351.633039,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 65,
+          "provider_latency_ms": 2351.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2420.664979,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1926.936688,
+          "capture_to_last_audio_ms": 1953.314083,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 66,
+          "provider_latency_ms": 1953.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2036.984669,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1889.95193,
+          "capture_to_last_audio_ms": 1961.571959,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 67,
+          "provider_latency_ms": 1934.0,
+          "quality_passed": true,
+          "queue_lag_ms": 26.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1960.247133,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1745.487462,
+          "capture_to_last_audio_ms": 1780.355845,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 68,
+          "provider_latency_ms": 1779.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1858.756198,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1403.923903,
+          "capture_to_last_audio_ms": 1419.554025,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 69,
+          "provider_latency_ms": 1419.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1518.257607,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2543.5275,
+          "capture_to_last_audio_ms": 2904.221385,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 70,
+          "provider_latency_ms": 2559.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2657.800308,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2564.741752,
+          "capture_to_last_audio_ms": 2905.044543,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 71,
+          "provider_latency_ms": 2579.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2673.957743,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2998.216107,
+          "capture_to_last_audio_ms": 3822.335127,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 72,
+          "provider_latency_ms": 3019.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3132.550171,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2744.417928,
+          "capture_to_last_audio_ms": 3305.602958,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 73,
+          "provider_latency_ms": 2760.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2834.032763,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2791.27263,
+          "capture_to_last_audio_ms": 3265.47995,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 74,
+          "provider_latency_ms": 2810.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2909.010805,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2777.711988,
+          "capture_to_last_audio_ms": 3566.435221,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 75,
+          "provider_latency_ms": 2793.0,
+          "quality_passed": true,
+          "queue_lag_ms": 192.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2919.877104,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2722.590486,
+          "capture_to_last_audio_ms": 3442.77311,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 76,
+          "provider_latency_ms": 2752.0,
+          "quality_passed": true,
+          "queue_lag_ms": 133.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2844.555083,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2883.379769,
+          "capture_to_last_audio_ms": 3831.248248,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 77,
+          "provider_latency_ms": 2912.0,
+          "quality_passed": true,
+          "queue_lag_ms": 129.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3015.263536,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2809.508801,
+          "capture_to_last_audio_ms": 3638.901032,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 78,
+          "provider_latency_ms": 2827.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2930.05096,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2860.005296,
+          "capture_to_last_audio_ms": 3814.948354,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 79,
+          "provider_latency_ms": 2878.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2994.133341,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1555.910566,
+          "capture_to_last_audio_ms": 1571.502152,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 80,
+          "provider_latency_ms": 1571.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1640.039846,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1171.305898,
+          "capture_to_last_audio_ms": 1176.989936,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 81,
+          "provider_latency_ms": 1177.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1283.202461,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1867.150509,
+          "capture_to_last_audio_ms": 1881.331163,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 82,
+          "provider_latency_ms": 1880.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1940.677686,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1685.730637,
+          "capture_to_last_audio_ms": 1695.637538,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 83,
+          "provider_latency_ms": 1695.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1781.181159,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2378.691671,
+          "capture_to_last_audio_ms": 2480.735249,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 84,
+          "provider_latency_ms": 2424.0,
+          "quality_passed": true,
+          "queue_lag_ms": 54.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2453.15637,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2316.773232,
+          "capture_to_last_audio_ms": 2342.161144,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 85,
+          "provider_latency_ms": 2342.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2412.777523,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1873.943206,
+          "capture_to_last_audio_ms": 1884.998252,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 86,
+          "provider_latency_ms": 1884.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1962.850883,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2061.225383,
+          "capture_to_last_audio_ms": 2158.326805,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 87,
+          "provider_latency_ms": 2102.0,
+          "quality_passed": true,
+          "queue_lag_ms": 56.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2131.351271,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1803.973777,
+          "capture_to_last_audio_ms": 1835.854373,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 88,
+          "provider_latency_ms": 1834.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1898.271698,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1418.278155,
+          "capture_to_last_audio_ms": 1428.50321,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 89,
+          "provider_latency_ms": 1428.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1505.724816,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2537.64453,
+          "capture_to_last_audio_ms": 3015.356404,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 90,
+          "provider_latency_ms": 2556.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2698.884961,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2548.110561,
+          "capture_to_last_audio_ms": 2884.039544,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 91,
+          "provider_latency_ms": 2571.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2652.843677,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3111.310987,
+          "capture_to_last_audio_ms": 3706.652065,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 92,
+          "provider_latency_ms": 3202.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3250.596176,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2761.198699,
+          "capture_to_last_audio_ms": 3310.886933,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 93,
+          "provider_latency_ms": 2778.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2855.616331,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2748.87091,
+          "capture_to_last_audio_ms": 3228.076322,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 94,
+          "provider_latency_ms": 2764.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2834.488834,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2788.872039,
+          "capture_to_last_audio_ms": 3489.356783,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 95,
+          "provider_latency_ms": 2806.0,
+          "quality_passed": true,
+          "queue_lag_ms": 129.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2918.939986,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2701.705342,
+          "capture_to_last_audio_ms": 3401.928575,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 96,
+          "provider_latency_ms": 2719.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2837.088436,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2852.484197,
+          "capture_to_last_audio_ms": 3791.883326,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 97,
+          "provider_latency_ms": 2871.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2993.752793,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2784.568094,
+          "capture_to_last_audio_ms": 3626.475939,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 98,
+          "provider_latency_ms": 2802.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2898.47359,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2824.372967,
+          "capture_to_last_audio_ms": 3857.939234,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 99,
+          "provider_latency_ms": 2843.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2972.227368,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1632.635765,
+          "capture_to_last_audio_ms": 1661.567072,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 100,
+          "provider_latency_ms": 1660.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1735.596861,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1139.819427,
+          "capture_to_last_audio_ms": 1146.093069,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 101,
+          "provider_latency_ms": 1146.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1225.962317,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1714.859576,
+          "capture_to_last_audio_ms": 1722.673611,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 102,
+          "provider_latency_ms": 1722.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1789.537831,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1710.43415,
+          "capture_to_last_audio_ms": 1738.513571,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 103,
+          "provider_latency_ms": 1738.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1767.319178,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2334.761863,
+          "capture_to_last_audio_ms": 2635.490199,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 104,
+          "provider_latency_ms": 2356.0,
+          "quality_passed": true,
+          "queue_lag_ms": 126.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2403.471246,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2435.013735,
+          "capture_to_last_audio_ms": 2446.498316,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 105,
+          "provider_latency_ms": 2446.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2581.040515,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1857.141931,
+          "capture_to_last_audio_ms": 1882.270833,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 106,
+          "provider_latency_ms": 1881.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1962.311716,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1985.588114,
+          "capture_to_last_audio_ms": 2114.888042,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 107,
+          "provider_latency_ms": 2020.0,
+          "quality_passed": true,
+          "queue_lag_ms": 94.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2076.767066,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1774.009327,
+          "capture_to_last_audio_ms": 1810.870954,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 108,
+          "provider_latency_ms": 1810.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1876.973165,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1373.143846,
+          "capture_to_last_audio_ms": 1381.725893,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 109,
+          "provider_latency_ms": 1381.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1490.963665,
+          "timed_out": false
+        }
+      ],
+      "speech_onset_to_first_audible_ms": {
+        "p50": 2581.040515,
+        "p95": 3015.722126
+      },
+      "timeout_count": 0,
+      "timeout_rate": 0.0,
+      "transitions": [
+        {
+          "from_mode": "quality_first",
+          "pair_index": 2,
+          "reason": "first_audible",
+          "to_mode": "balanced"
+        },
+        {
+          "from_mode": "balanced",
+          "pair_index": 5,
+          "reason": "first_audible",
+          "to_mode": "streaming_first"
+        }
+      ]
+    },
+    "ru_to_en": {
+      "capture_to_first_audio_ms": {
+        "p50": 2686.684984,
+        "p95": 3443.118529
+      },
+      "capture_to_last_audio_ms": {
+        "p50": 2696.570695,
+        "p95": 4009.630577
+      },
+      "direction": "ru_to_en",
+      "drop_count": 0,
+      "drop_rate": 0.0,
+      "final_mode": "streaming_first",
+      "provider_latency_ms": {
+        "p50": 2696.0,
+        "p95": 3473.0
+      },
+      "quality_passed": true,
+      "queue_lag_ms": {
+        "p50": 0.0,
+        "p95": 128.0
+      },
+      "restart_count": 0,
+      "samples": [
+        {
+          "capture_to_first_audio_ms": 2833.623659,
+          "capture_to_last_audio_ms": 2869.540174,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 10,
+          "provider_latency_ms": 2869.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2911.935542,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3042.385844,
+          "capture_to_last_audio_ms": 3238.624777,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 11,
+          "provider_latency_ms": 3059.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3156.723602,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3227.9715,
+          "capture_to_last_audio_ms": 3654.53322,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 12,
+          "provider_latency_ms": 3254.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3370.839819,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3307.482918,
+          "capture_to_last_audio_ms": 3521.520066,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 13,
+          "provider_latency_ms": 3325.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3402.218257,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3226.239756,
+          "capture_to_last_audio_ms": 3586.630861,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 14,
+          "provider_latency_ms": 3242.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3338.064839,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3362.989492,
+          "capture_to_last_audio_ms": 3833.61427,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 15,
+          "provider_latency_ms": 3401.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3472.460094,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3271.313446,
+          "capture_to_last_audio_ms": 3739.189931,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 16,
+          "provider_latency_ms": 3294.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3402.28103,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3329.298426,
+          "capture_to_last_audio_ms": 3988.439881,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 17,
+          "provider_latency_ms": 3364.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3445.22297,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3306.773422,
+          "capture_to_last_audio_ms": 3789.967837,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 18,
+          "provider_latency_ms": 3336.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3445.138438,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3396.278532,
+          "capture_to_last_audio_ms": 3862.990414,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 19,
+          "provider_latency_ms": 3416.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3498.225636,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1797.799965,
+          "capture_to_last_audio_ms": 1808.871239,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 20,
+          "provider_latency_ms": 1808.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1898.483892,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1596.488313,
+          "capture_to_last_audio_ms": 1602.294012,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 21,
+          "provider_latency_ms": 1602.0,
+          "quality_passed": true,
+          "queue_lag_ms": 1.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1661.250417,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1688.53925,
+          "capture_to_last_audio_ms": 1705.584119,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 22,
+          "provider_latency_ms": 1705.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1762.685633,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1912.983222,
+          "capture_to_last_audio_ms": 1926.858679,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 23,
+          "provider_latency_ms": 1926.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2007.4972,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2005.4766,
+          "capture_to_last_audio_ms": 2033.373561,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 24,
+          "provider_latency_ms": 2032.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2108.679909,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1915.761881,
+          "capture_to_last_audio_ms": 1923.277853,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 25,
+          "provider_latency_ms": 1923.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1965.077173,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1941.365524,
+          "capture_to_last_audio_ms": 1961.61817,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 26,
+          "provider_latency_ms": 1959.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2041.41301,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2179.741121,
+          "capture_to_last_audio_ms": 2191.691987,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 27,
+          "provider_latency_ms": 2189.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2264.647587,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1773.608817,
+          "capture_to_last_audio_ms": 1791.97667,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 28,
+          "provider_latency_ms": 1791.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1838.854311,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1796.507811,
+          "capture_to_last_audio_ms": 1813.132618,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 29,
+          "provider_latency_ms": 1812.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1856.899798,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2852.515902,
+          "capture_to_last_audio_ms": 2885.838621,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 30,
+          "provider_latency_ms": 2886.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2949.112791,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3019.782167,
+          "capture_to_last_audio_ms": 3246.232946,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 31,
+          "provider_latency_ms": 3043.0,
+          "quality_passed": true,
+          "queue_lag_ms": 106.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3146.204142,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3167.00482,
+          "capture_to_last_audio_ms": 3861.935687,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 32,
+          "provider_latency_ms": 3226.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3296.859792,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3319.163425,
+          "capture_to_last_audio_ms": 3678.819293,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 33,
+          "provider_latency_ms": 3334.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3423.688284,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3203.502631,
+          "capture_to_last_audio_ms": 3548.519553,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 34,
+          "provider_latency_ms": 3221.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3316.736484,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3344.664679,
+          "capture_to_last_audio_ms": 3697.258614,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 35,
+          "provider_latency_ms": 3363.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3445.235485,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3014.799167,
+          "capture_to_last_audio_ms": 3563.495173,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 36,
+          "provider_latency_ms": 3046.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3103.961221,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3349.32833,
+          "capture_to_last_audio_ms": 3825.204271,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 37,
+          "provider_latency_ms": 3377.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3444.968644,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3381.797457,
+          "capture_to_last_audio_ms": 4043.546482,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 38,
+          "provider_latency_ms": 3407.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3519.477472,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3550.074572,
+          "capture_to_last_audio_ms": 3972.383019,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 39,
+          "provider_latency_ms": 3567.0,
+          "quality_passed": true,
+          "queue_lag_ms": 129.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3637.144624,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1803.53818,
+          "capture_to_last_audio_ms": 1822.130866,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 40,
+          "provider_latency_ms": 1818.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1898.206356,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1649.580639,
+          "capture_to_last_audio_ms": 1653.58851,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 41,
+          "provider_latency_ms": 1653.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1712.591986,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1746.584663,
+          "capture_to_last_audio_ms": 1758.072631,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 42,
+          "provider_latency_ms": 1757.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1820.306882,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1976.529321,
+          "capture_to_last_audio_ms": 1985.100704,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 43,
+          "provider_latency_ms": 1984.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2061.423107,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2176.059476,
+          "capture_to_last_audio_ms": 2208.065543,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 44,
+          "provider_latency_ms": 2208.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2276.681029,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1920.328748,
+          "capture_to_last_audio_ms": 1931.79077,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 45,
+          "provider_latency_ms": 1931.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2018.304254,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2056.682263,
+          "capture_to_last_audio_ms": 2083.43955,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 46,
+          "provider_latency_ms": 2083.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2167.885953,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2053.363625,
+          "capture_to_last_audio_ms": 2063.091634,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 47,
+          "provider_latency_ms": 2062.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2144.389496,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1837.24343,
+          "capture_to_last_audio_ms": 1856.044833,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 48,
+          "provider_latency_ms": 1856.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1925.554552,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1961.658395,
+          "capture_to_last_audio_ms": 1970.913074,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 49,
+          "provider_latency_ms": 1969.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2092.311502,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2850.470485,
+          "capture_to_last_audio_ms": 2880.703073,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 50,
+          "provider_latency_ms": 2878.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2942.284567,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3077.783879,
+          "capture_to_last_audio_ms": 3185.073562,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 51,
+          "provider_latency_ms": 3092.0,
+          "quality_passed": true,
+          "queue_lag_ms": 93.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3167.547785,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3172.992677,
+          "capture_to_last_audio_ms": 3719.283318,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 52,
+          "provider_latency_ms": 3205.0,
+          "quality_passed": true,
+          "queue_lag_ms": 129.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3263.602173,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3508.316108,
+          "capture_to_last_audio_ms": 3743.8874,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 53,
+          "provider_latency_ms": 3544.0,
+          "quality_passed": true,
+          "queue_lag_ms": 107.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3605.285381,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3405.393384,
+          "capture_to_last_audio_ms": 3839.622971,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 54,
+          "provider_latency_ms": 3441.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3540.543481,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3378.462523,
+          "capture_to_last_audio_ms": 3860.600647,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 55,
+          "provider_latency_ms": 3396.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3466.037708,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2974.863582,
+          "capture_to_last_audio_ms": 3415.825481,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 56,
+          "provider_latency_ms": 3014.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3066.454885,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3363.297764,
+          "capture_to_last_audio_ms": 3948.273951,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 57,
+          "provider_latency_ms": 3410.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3466.661564,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3363.303441,
+          "capture_to_last_audio_ms": 3964.159378,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 58,
+          "provider_latency_ms": 3386.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3477.052329,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3457.689342,
+          "capture_to_last_audio_ms": 4046.539904,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 59,
+          "provider_latency_ms": 3474.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3562.559539,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1857.949882,
+          "capture_to_last_audio_ms": 1872.147781,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 60,
+          "provider_latency_ms": 1871.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1940.875791,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1668.28405,
+          "capture_to_last_audio_ms": 1676.144177,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 61,
+          "provider_latency_ms": 1676.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1753.10316,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1721.223554,
+          "capture_to_last_audio_ms": 1735.693837,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 62,
+          "provider_latency_ms": 1735.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1806.20546,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1948.987453,
+          "capture_to_last_audio_ms": 1959.959633,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 63,
+          "provider_latency_ms": 1962.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2040.90125,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2354.521617,
+          "capture_to_last_audio_ms": 2401.420869,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 64,
+          "provider_latency_ms": 2400.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2417.422565,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1916.544821,
+          "capture_to_last_audio_ms": 1953.874625,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 65,
+          "provider_latency_ms": 1957.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2007.683559,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1957.746438,
+          "capture_to_last_audio_ms": 1978.979802,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 66,
+          "provider_latency_ms": 1979.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2039.532143,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2068.524152,
+          "capture_to_last_audio_ms": 2089.53718,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 67,
+          "provider_latency_ms": 2089.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2145.230818,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1823.643538,
+          "capture_to_last_audio_ms": 1850.147045,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 68,
+          "provider_latency_ms": 1849.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1902.724861,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1781.658278,
+          "capture_to_last_audio_ms": 1798.795296,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 69,
+          "provider_latency_ms": 1798.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1883.572476,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2884.457384,
+          "capture_to_last_audio_ms": 2964.406981,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 70,
+          "provider_latency_ms": 2912.0,
+          "quality_passed": true,
+          "queue_lag_ms": 52.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3001.735547,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3083.594915,
+          "capture_to_last_audio_ms": 3284.368223,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 71,
+          "provider_latency_ms": 3100.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3178.074902,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3209.332856,
+          "capture_to_last_audio_ms": 3676.009582,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 72,
+          "provider_latency_ms": 3231.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3317.112493,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3336.219001,
+          "capture_to_last_audio_ms": 3681.587166,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 73,
+          "provider_latency_ms": 3354.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3402.247711,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3154.528053,
+          "capture_to_last_audio_ms": 3583.216967,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 74,
+          "provider_latency_ms": 3176.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3253.225519,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3425.899884,
+          "capture_to_last_audio_ms": 3917.10905,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 75,
+          "provider_latency_ms": 3473.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3541.705028,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3267.879071,
+          "capture_to_last_audio_ms": 3687.271638,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 76,
+          "provider_latency_ms": 3296.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3349.176184,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3578.978534,
+          "capture_to_last_audio_ms": 4052.257633,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 77,
+          "provider_latency_ms": 3621.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3700.768459,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3355.433983,
+          "capture_to_last_audio_ms": 3902.999294,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 78,
+          "provider_latency_ms": 3371.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3455.430697,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3443.118529,
+          "capture_to_last_audio_ms": 4158.71232,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 79,
+          "provider_latency_ms": 3459.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3540.937681,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1743.731983,
+          "capture_to_last_audio_ms": 1756.014427,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 80,
+          "provider_latency_ms": 1755.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1846.313563,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1678.203532,
+          "capture_to_last_audio_ms": 1683.141385,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 81,
+          "provider_latency_ms": 1682.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1766.439489,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1794.586243,
+          "capture_to_last_audio_ms": 1817.15476,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 82,
+          "provider_latency_ms": 1817.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1857.633334,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2071.345775,
+          "capture_to_last_audio_ms": 2097.780438,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 83,
+          "provider_latency_ms": 2097.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2135.939492,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2220.737243,
+          "capture_to_last_audio_ms": 2254.591005,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 84,
+          "provider_latency_ms": 2251.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2276.107556,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1936.984292,
+          "capture_to_last_audio_ms": 1951.78821,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 85,
+          "provider_latency_ms": 1951.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1997.796913,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1993.167642,
+          "capture_to_last_audio_ms": 2017.12605,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 86,
+          "provider_latency_ms": 2016.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2062.859211,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2187.195121,
+          "capture_to_last_audio_ms": 2199.954041,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 87,
+          "provider_latency_ms": 2199.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2240.134209,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1769.336288,
+          "capture_to_last_audio_ms": 1788.62246,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 88,
+          "provider_latency_ms": 1788.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1838.912406,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2664.325493,
+          "capture_to_last_audio_ms": 2671.40267,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 89,
+          "provider_latency_ms": 2671.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2767.279084,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2888.630325,
+          "capture_to_last_audio_ms": 2968.594784,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 90,
+          "provider_latency_ms": 2910.0,
+          "quality_passed": true,
+          "queue_lag_ms": 59.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2997.800253,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3034.117889,
+          "capture_to_last_audio_ms": 3137.703406,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 91,
+          "provider_latency_ms": 3048.0,
+          "quality_passed": true,
+          "queue_lag_ms": 90.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3135.6015,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3138.324218,
+          "capture_to_last_audio_ms": 3574.45954,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 92,
+          "provider_latency_ms": 3189.0,
+          "quality_passed": true,
+          "queue_lag_ms": 128.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3280.571595,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3293.200847,
+          "capture_to_last_audio_ms": 3651.117809,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 93,
+          "provider_latency_ms": 3307.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3381.059683,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3137.369927,
+          "capture_to_last_audio_ms": 3564.055528,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 94,
+          "provider_latency_ms": 3154.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3253.319609,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3300.389365,
+          "capture_to_last_audio_ms": 3780.274362,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 95,
+          "provider_latency_ms": 3319.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3401.797905,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3032.434661,
+          "capture_to_last_audio_ms": 3582.998839,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 96,
+          "provider_latency_ms": 3052.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3147.054792,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3344.188295,
+          "capture_to_last_audio_ms": 3922.704898,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 97,
+          "provider_latency_ms": 3362.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3433.906748,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3422.289578,
+          "capture_to_last_audio_ms": 4009.630577,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 98,
+          "provider_latency_ms": 3444.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3498.612174,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 3554.082534,
+          "capture_to_last_audio_ms": 4148.817547,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 99,
+          "provider_latency_ms": 3574.0,
+          "quality_passed": true,
+          "queue_lag_ms": 127.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 3657.778647,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1815.051117,
+          "capture_to_last_audio_ms": 1830.478649,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 100,
+          "provider_latency_ms": 1830.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1920.568441,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1619.846653,
+          "capture_to_last_audio_ms": 1623.815728,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 101,
+          "provider_latency_ms": 1623.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1708.762196,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2686.684984,
+          "capture_to_last_audio_ms": 2696.570695,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 102,
+          "provider_latency_ms": 2696.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2752.394205,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1980.918421,
+          "capture_to_last_audio_ms": 1998.328084,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 103,
+          "provider_latency_ms": 1998.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2058.944816,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2188.701957,
+          "capture_to_last_audio_ms": 2198.982242,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 104,
+          "provider_latency_ms": 2199.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2268.559704,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1900.980688,
+          "capture_to_last_audio_ms": 1911.107222,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 105,
+          "provider_latency_ms": 1911.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2031.660762,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1929.796604,
+          "capture_to_last_audio_ms": 1956.75274,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 106,
+          "provider_latency_ms": 1956.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2018.482616,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 2203.849044,
+          "capture_to_last_audio_ms": 2219.073504,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 107,
+          "provider_latency_ms": 2219.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 2303.58514,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1797.637379,
+          "capture_to_last_audio_ms": 1816.398814,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 108,
+          "provider_latency_ms": 1816.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1858.914659,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 1804.240398,
+          "capture_to_last_audio_ms": 1816.251074,
+          "dropped": false,
+          "mode": "streaming_first",
+          "pair_index": 109,
+          "provider_latency_ms": 1816.0,
+          "quality_passed": true,
+          "queue_lag_ms": 0.0,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1888.731923,
+          "timed_out": false
+        }
+      ],
+      "speech_onset_to_first_audible_ms": {
+        "p50": 2767.279084,
+        "p95": 3541.705028
+      },
+      "timeout_count": 0,
+      "timeout_rate": 0.0,
+      "transitions": [
+        {
+          "from_mode": "quality_first",
+          "pair_index": 2,
+          "reason": "first_audible",
+          "to_mode": "balanced"
+        },
+        {
+          "from_mode": "balanced",
+          "pair_index": 5,
+          "reason": "first_audible",
+          "to_mode": "streaming_first"
+        }
+      ]
+    }
+  },
+  "evidence_scope": "production_pipeline_e2e",
+  "excluded_warmups": 10,
+  "fixtures": {
+    "corpus_sha256": "5048ac82565edd3e64392f1b28ae2092fb61199c27883d856788e67da84c03eb",
+    "items": [
+      {
+        "audio_sha256": "79ad4b4f697df015da3a81d3eb7b646887dc60efe31b9bcee74e88dac4afbfb8",
+        "direction": "ru_to_en",
+        "duration_ms": 3400,
+        "fixture_id": "warmup-000-ru_to_en"
+      },
+      {
+        "audio_sha256": "e9111e09d8a2722c1281a8b4a6005f1e50377a942f128d0834261f03690075b2",
+        "direction": "en_to_ru",
+        "duration_ms": 3000,
+        "fixture_id": "warmup-000-en_to_ru"
+      },
+      {
+        "audio_sha256": "e5ef1d1e1f3de6199031c8011de1de5e1655da2f9eacdb26a47fa03632437156",
+        "direction": "ru_to_en",
+        "duration_ms": 3100,
+        "fixture_id": "warmup-001-ru_to_en"
+      },
+      {
+        "audio_sha256": "39c06653a016c34d1bff284529c3eef3f2ffaa802fa83e4d62bbf934f936292b",
+        "direction": "en_to_ru",
+        "duration_ms": 2600,
+        "fixture_id": "warmup-001-en_to_ru"
+      },
+      {
+        "audio_sha256": "993b6f78465b7223f0b0ef92835c84070ad2510708fa1cea8fba4f736484188c",
+        "direction": "ru_to_en",
+        "duration_ms": 3200,
+        "fixture_id": "warmup-002-ru_to_en"
+      },
+      {
+        "audio_sha256": "f65b813577c1325a35d8edae41ba2f6577e1cbb013a953fafb7206cdc6f2e75a",
+        "direction": "en_to_ru",
+        "duration_ms": 3200,
+        "fixture_id": "warmup-002-en_to_ru"
+      },
+      {
+        "audio_sha256": "1465630a8f359f6881b554d2a42ca63527b01c099fc4017d43cca631fb8f0300",
+        "direction": "ru_to_en",
+        "duration_ms": 3400,
+        "fixture_id": "warmup-003-ru_to_en"
+      },
+      {
+        "audio_sha256": "88a7fe04fc279a599269b37dd25519f7122dadb2812a3d05c0c1713ea7189373",
+        "direction": "en_to_ru",
+        "duration_ms": 3100,
+        "fixture_id": "warmup-003-en_to_ru"
+      },
+      {
+        "audio_sha256": "ed64a301d399f23b1c2fba6651213e9b1a9091d00e800bee0f585898d29b7cfb",
+        "direction": "ru_to_en",
+        "duration_ms": 3600,
+        "fixture_id": "warmup-004-ru_to_en"
+      },
+      {
+        "audio_sha256": "0fb3d2077d031b244c6fcaa8e5b11dfabc78116b18615104f77674723db8888e",
+        "direction": "en_to_ru",
+        "duration_ms": 3600,
+        "fixture_id": "warmup-004-en_to_ru"
+      },
+      {
+        "audio_sha256": "7f9971be8bf564f4fe9daa0ea55fc35a73d50cfaf476b2dbdd66c161f60b769a",
+        "direction": "ru_to_en",
+        "duration_ms": 3400,
+        "fixture_id": "warmup-005-ru_to_en"
+      },
+      {
+        "audio_sha256": "867bddb8d1740aa5075f9a3526332fb1abc27cbd15b4fc2dee335cfe49ab5679",
+        "direction": "en_to_ru",
+        "duration_ms": 3600,
+        "fixture_id": "warmup-005-en_to_ru"
+      },
+      {
+        "audio_sha256": "bc5864ee908b595a8bc31197d28459b2de158ffd65c232f19263bd036c0bdaa5",
+        "direction": "ru_to_en",
+        "duration_ms": 3300,
+        "fixture_id": "warmup-006-ru_to_en"
+      },
+      {
+        "audio_sha256": "8dba6d87c75385a6ca0fe8de858ab4ba647fac0c5309c00c3d6951de8d7dbd66",
+        "direction": "en_to_ru",
+        "duration_ms": 3200,
+        "fixture_id": "warmup-006-en_to_ru"
+      },
+      {
+        "audio_sha256": "bc77f54a8b783e34b0683974ebcb0516a0bf62fcbb92f1467d2b7c9a372dae0b",
+        "direction": "ru_to_en",
+        "duration_ms": 3500,
+        "fixture_id": "warmup-007-ru_to_en"
+      },
+      {
+        "audio_sha256": "40942b9fafea0945e8e5a5777252aed91f4a34e57536eae0797ed0b36aa2f76e",
+        "direction": "en_to_ru",
+        "duration_ms": 3300,
+        "fixture_id": "warmup-007-en_to_ru"
+      },
+      {
+        "audio_sha256": "fc0f91e6f2e87118ddd41f4c16ab385a60f80fee04ba20cba78bc857341160ae",
+        "direction": "ru_to_en",
+        "duration_ms": 3200,
+        "fixture_id": "warmup-008-ru_to_en"
+      },
+      {
+        "audio_sha256": "a79fde1382e1123b339bb4b4e027a3e25996c282110baaa2918a1f23b4120874",
+        "direction": "en_to_ru",
+        "duration_ms": 3100,
+        "fixture_id": "warmup-008-en_to_ru"
+      },
+      {
+        "audio_sha256": "09c19127d1818f40d0f585e86e067240c39a02249ab8ba15edc35dcf6fb900fa",
+        "direction": "ru_to_en",
+        "duration_ms": 3400,
+        "fixture_id": "warmup-009-ru_to_en"
+      },
+      {
+        "audio_sha256": "3e7d1485627eadecd7ea1cf119b6ba036b25a7a2e2b21c45b01bd53ef2bf5fb7",
+        "direction": "en_to_ru",
+        "duration_ms": 2900,
+        "fixture_id": "warmup-009-en_to_ru"
+      },
+      {
+        "audio_sha256": "95ad0b6b5f8f30254c18b05baa313ac51c024a7c4234375b266f94a8a93180df",
+        "direction": "ru_to_en",
+        "duration_ms": 4400,
+        "fixture_id": "measured-000-ru_to_en"
+      },
+      {
+        "audio_sha256": "56063d545cd24a6be9c450b5e3cae434b7f6557905c99105d9c092fc02e22146",
+        "direction": "en_to_ru",
+        "duration_ms": 4000,
+        "fixture_id": "measured-000-en_to_ru"
+      },
+      {
+        "audio_sha256": "ccd2554f8d3008ff7096cd97ae0bae470fb778567e279755ba7a19b61b0e5874",
+        "direction": "ru_to_en",
+        "duration_ms": 4600,
+        "fixture_id": "measured-001-ru_to_en"
+      },
+      {
+        "audio_sha256": "06330efb3784c56d05f0e9713ad234130cacceca8b2d218dbf2a04f64971e526",
+        "direction": "en_to_ru",
+        "duration_ms": 4000,
+        "fixture_id": "measured-001-en_to_ru"
+      },
+      {
+        "audio_sha256": "a7c2342c0750aeb1e28f07ed5d0ffb81d326e69aa73dc9a3299f07e3d707a2d2",
+        "direction": "ru_to_en",
+        "duration_ms": 4600,
+        "fixture_id": "measured-002-ru_to_en"
+      },
+      {
+        "audio_sha256": "9d414a8fbaff082cda71a2eed8469b60ee46abfcce11634b6e075e0b6c245b71",
+        "direction": "en_to_ru",
+        "duration_ms": 4400,
+        "fixture_id": "measured-002-en_to_ru"
+      },
+      {
+        "audio_sha256": "74ec8642273cd628dcdf9eabfabe6ba9f2b411187c027a0f39dec5dfc81a579a",
+        "direction": "ru_to_en",
+        "duration_ms": 4800,
+        "fixture_id": "measured-003-ru_to_en"
+      },
+      {
+        "audio_sha256": "f1901b49c523a085b0a619796bc37b35519495d6e89e814c1bc470ef958111d9",
+        "direction": "en_to_ru",
+        "duration_ms": 4200,
+        "fixture_id": "measured-003-en_to_ru"
+      },
+      {
+        "audio_sha256": "1947912e0d07706d3ce893d78de36c82d5d07e4d8dd9cb7699bd883848917da8",
+        "direction": "ru_to_en",
+        "duration_ms": 4700,
+        "fixture_id": "measured-004-ru_to_en"
+      },
+      {
+        "audio_sha256": "d70a91668466e713221145911c4b6ce8f338748deb713e72ab8317c012f8ff5c",
+        "direction": "en_to_ru",
+        "duration_ms": 4200,
+        "fixture_id": "measured-004-en_to_ru"
+      },
+      {
+        "audio_sha256": "00a2f061dd604d8823c78262d069199ca56b2b1cde8f612a1b220cf5c9ae8aa3",
+        "direction": "ru_to_en",
+        "duration_ms": 4800,
+        "fixture_id": "measured-005-ru_to_en"
+      },
+      {
+        "audio_sha256": "f28096a5e255be1f642849af7ded6af937ae457f61144bcfba69710ed7b3f847",
+        "direction": "en_to_ru",
+        "duration_ms": 4200,
+        "fixture_id": "measured-005-en_to_ru"
+      },
+      {
+        "audio_sha256": "727f93993d3d2fc6e0dd2e65d45e90e767e3c883aa334b0b5411942ba7ecb8e9",
+        "direction": "ru_to_en",
+        "duration_ms": 4500,
+        "fixture_id": "measured-006-ru_to_en"
+      },
+      {
+        "audio_sha256": "80e12d6ddbd1fe6d56fe99c6a5f3a71bc2b44425ee2c6189a896d36c90a679f0",
+        "direction": "en_to_ru",
+        "duration_ms": 4100,
+        "fixture_id": "measured-006-en_to_ru"
+      },
+      {
+        "audio_sha256": "e553e6bb883faa5d31c95daba6295458ff6f3eeb23f4268b1b91bead3c813ea1",
+        "direction": "ru_to_en",
+        "duration_ms": 4900,
+        "fixture_id": "measured-007-ru_to_en"
+      },
+      {
+        "audio_sha256": "8dd54d77ca15ac64ddf5f658556240e337bb25765f750a0b59ee4ae65bcbcc2f",
+        "direction": "en_to_ru",
+        "duration_ms": 4300,
+        "fixture_id": "measured-007-en_to_ru"
+      },
+      {
+        "audio_sha256": "505edb9d2ac5de89fa3a85a7802f32baf56e111ad70e2d32855f637e51ff5c0b",
+        "direction": "ru_to_en",
+        "duration_ms": 5000,
+        "fixture_id": "measured-008-ru_to_en"
+      },
+      {
+        "audio_sha256": "9e394653106181a4c819e7ea6e62079b4111a7ab95fa1858e6ab3044d51eb15b",
+        "direction": "en_to_ru",
+        "duration_ms": 4200,
+        "fixture_id": "measured-008-en_to_ru"
+      },
+      {
+        "audio_sha256": "b067034fd87ba04c34bb6b14347a142e6cffd9c9556228344b03bd84fe3f0e2a",
+        "direction": "ru_to_en",
+        "duration_ms": 5000,
+        "fixture_id": "measured-009-ru_to_en"
+      },
+      {
+        "audio_sha256": "61e2f8a0cd6c258f9d2b8ee3e1e4dc9baff4fe18c354335bda6a0590b9e17cbb",
+        "direction": "en_to_ru",
+        "duration_ms": 4300,
+        "fixture_id": "measured-009-en_to_ru"
+      }
+    ]
+  },
+  "graph": {
+    "after": {
+      "counts": {
+        "sink_inputs": 0,
+        "sinks": 0,
+        "source_outputs": 0,
+        "sources": 0
+      },
+      "endpoints": {
+        "sinks": [],
+        "sources": []
+      },
+      "routes": {
+        "sink_inputs": [],
+        "source_outputs": []
+      }
+    },
+    "before": {
+      "counts": {
+        "sink_inputs": 0,
+        "sinks": 0,
+        "source_outputs": 0,
+        "sources": 0
+      },
+      "endpoints": {
+        "sinks": [],
+        "sources": []
+      },
+      "routes": {
+        "sink_inputs": [],
+        "source_outputs": []
+      }
+    },
+    "unchanged_after_cleanup": true
+  },
+  "measured_count_per_direction": 100,
+  "profile": {
+    "duration_seconds": null,
+    "kind": "cold"
+  },
+  "quality_evidence": {
+    "corpus_id": "task6-v4",
+    "passes_thresholds": true,
+    "schema_version": "translator.task6-benchmark.v2",
+    "sha256": "a563b986db097e89236e3ad0b92b884bbbea56f562339d08cbba1d50cd7e98c6"
+  },
+  "quality_passed": true,
+  "release_eligible": false,
+  "resources": {
+    "cpu_percent_p95": 2213.8,
+    "cpu_percent_peak": 2476.0,
+    "limits": {
+      "cpu_percent_p95": 2400.0,
+      "cpu_percent_peak": 2880.0,
+      "required_duration_seconds": null,
+      "rss_bytes_peak": 4294967296,
+      "vram_mib_peak": 6144
+    },
+    "observed_duration_seconds": 524.065102274,
+    "rss_bytes_peak": 1457086464,
+    "samples": [
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121578442114650,
+        "rss_bytes": 979992576,
+        "vram_mib": 1768
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121579438995106,
+        "rss_bytes": 980078592,
+        "vram_mib": 1768
+      },
+      {
+        "cpu_percent": 187.9,
+        "monotonic_ns": 121580466231658,
+        "rss_bytes": 1259929600,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2351.9,
+        "monotonic_ns": 121581437681218,
+        "rss_bytes": 1299730432,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.4,
+        "monotonic_ns": 121582442629615,
+        "rss_bytes": 1299738624,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121583442720256,
+        "rss_bytes": 1299779584,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1916.6,
+        "monotonic_ns": 121584440972711,
+        "rss_bytes": 1318580224,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 626.0,
+        "monotonic_ns": 121585439752598,
+        "rss_bytes": 1318580224,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.7,
+        "monotonic_ns": 121586440453103,
+        "rss_bytes": 1318604800,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1331.9,
+        "monotonic_ns": 121587443026589,
+        "rss_bytes": 1319108608,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1083.5,
+        "monotonic_ns": 121588439869744,
+        "rss_bytes": 1319108608,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.4,
+        "monotonic_ns": 121589457335098,
+        "rss_bytes": 1319133184,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121590447032458,
+        "rss_bytes": 1319174144,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1964.3,
+        "monotonic_ns": 121591439088103,
+        "rss_bytes": 1327833088,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121592466677887,
+        "rss_bytes": 1327833088,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 16.0,
+        "monotonic_ns": 121593456728958,
+        "rss_bytes": 1327902720,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1352.9,
+        "monotonic_ns": 121594452177913,
+        "rss_bytes": 1338089472,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1211.6,
+        "monotonic_ns": 121595436597040,
+        "rss_bytes": 1338089472,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.4,
+        "monotonic_ns": 121596453718927,
+        "rss_bytes": 1338109952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121597451256069,
+        "rss_bytes": 1338187776,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1683.0,
+        "monotonic_ns": 121598446165023,
+        "rss_bytes": 1360998400,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1024.4,
+        "monotonic_ns": 121599439672700,
+        "rss_bytes": 1360998400,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.8,
+        "monotonic_ns": 121600443610497,
+        "rss_bytes": 1360998400,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121601452367992,
+        "rss_bytes": 1361047552,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 252.6,
+        "monotonic_ns": 121602458997849,
+        "rss_bytes": 1361649664,
+        "vram_mib": 1942
+      },
+      {
+        "cpu_percent": 2333.4,
+        "monotonic_ns": 121603442181063,
+        "rss_bytes": 1369391104,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.3,
+        "monotonic_ns": 121604442805215,
+        "rss_bytes": 1369391104,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121605443750895,
+        "rss_bytes": 1369436160,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 530.3,
+        "monotonic_ns": 121606471069705,
+        "rss_bytes": 1369518080,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2062.4,
+        "monotonic_ns": 121607444600855,
+        "rss_bytes": 1321656320,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.2,
+        "monotonic_ns": 121608443460341,
+        "rss_bytes": 1321660416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121609444846066,
+        "rss_bytes": 1321730048,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1343.2,
+        "monotonic_ns": 121610469252148,
+        "rss_bytes": 1322979328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1374.0,
+        "monotonic_ns": 121611444199487,
+        "rss_bytes": 1322979328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1.4,
+        "monotonic_ns": 121612446817141,
+        "rss_bytes": 1322983424,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121613442586269,
+        "rss_bytes": 1323044864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1608.0,
+        "monotonic_ns": 121614458967747,
+        "rss_bytes": 1331326976,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 943.2,
+        "monotonic_ns": 121615446214380,
+        "rss_bytes": 1331326976,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.4,
+        "monotonic_ns": 121616459964990,
+        "rss_bytes": 1331384320,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1127.8,
+        "monotonic_ns": 121617488086672,
+        "rss_bytes": 1331474432,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 1438.3,
+        "monotonic_ns": 121618452693271,
+        "rss_bytes": 1331478528,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.2,
+        "monotonic_ns": 121619454725820,
+        "rss_bytes": 1331499008,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.8,
+        "monotonic_ns": 121620453621256,
+        "rss_bytes": 1331527680,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121621444327426,
+        "rss_bytes": 1331560448,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2193.9,
+        "monotonic_ns": 121622448969461,
+        "rss_bytes": 1339002880,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 535.1,
+        "monotonic_ns": 121623446736063,
+        "rss_bytes": 1339002880,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.9000000000000004,
+        "monotonic_ns": 121624467080549,
+        "rss_bytes": 1339002880,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121625449158254,
+        "rss_bytes": 1339002880,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121626444129798,
+        "rss_bytes": 1339006976,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1695.9,
+        "monotonic_ns": 121627455476093,
+        "rss_bytes": 1345839104,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1062.9,
+        "monotonic_ns": 121628445704194,
+        "rss_bytes": 1345839104,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.8,
+        "monotonic_ns": 121629461369545,
+        "rss_bytes": 1345839104,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121630460335166,
+        "rss_bytes": 1345843200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121631464125789,
+        "rss_bytes": 1345851392,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121632447642002,
+        "rss_bytes": 1345851392,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1949.2,
+        "monotonic_ns": 121633455759614,
+        "rss_bytes": 1350205440,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1011.2,
+        "monotonic_ns": 121634453682862,
+        "rss_bytes": 1350205440,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.4,
+        "monotonic_ns": 121635460434645,
+        "rss_bytes": 1350205440,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121636454967412,
+        "rss_bytes": 1350225920,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121637466840233,
+        "rss_bytes": 1350283264,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 16.2,
+        "monotonic_ns": 121638451374343,
+        "rss_bytes": 1350508544,
+        "vram_mib": 1942
+      },
+      {
+        "cpu_percent": 2255.1,
+        "monotonic_ns": 121639456406079,
+        "rss_bytes": 1355534336,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 555.9,
+        "monotonic_ns": 121640450151105,
+        "rss_bytes": 1355534336,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.5,
+        "monotonic_ns": 121641453475512,
+        "rss_bytes": 1355272192,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121642458704650,
+        "rss_bytes": 1355276288,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121643455695451,
+        "rss_bytes": 1355276288,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 427.3,
+        "monotonic_ns": 121644453734401,
+        "rss_bytes": 1355300864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2384.9,
+        "monotonic_ns": 121645468064636,
+        "rss_bytes": 1355419648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 78.2,
+        "monotonic_ns": 121646449835788,
+        "rss_bytes": 1355419648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2.2,
+        "monotonic_ns": 121647452591059,
+        "rss_bytes": 1355419648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121648452681194,
+        "rss_bytes": 1355419648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.0,
+        "monotonic_ns": 121649449617399,
+        "rss_bytes": 1355419648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 394.5,
+        "monotonic_ns": 121650457346395,
+        "rss_bytes": 1356648448,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2167.9,
+        "monotonic_ns": 121651452482690,
+        "rss_bytes": 1356722176,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 356.1,
+        "monotonic_ns": 121652457723837,
+        "rss_bytes": 1356722176,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.600000000000001,
+        "monotonic_ns": 121653467526725,
+        "rss_bytes": 1356722176,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.1,
+        "monotonic_ns": 121654457979144,
+        "rss_bytes": 1356726272,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121655461043849,
+        "rss_bytes": 1356726272,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 354.1,
+        "monotonic_ns": 121656466096951,
+        "rss_bytes": 1356779520,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2242.6,
+        "monotonic_ns": 121657455369269,
+        "rss_bytes": 1357041664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.3,
+        "monotonic_ns": 121658453170385,
+        "rss_bytes": 1357041664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.0,
+        "monotonic_ns": 121659463999614,
+        "rss_bytes": 1357058048,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121660461259936,
+        "rss_bytes": 1357221888,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.8,
+        "monotonic_ns": 121661475161786,
+        "rss_bytes": 1354817536,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 37.4,
+        "monotonic_ns": 121662463687380,
+        "rss_bytes": 1355042816,
+        "vram_mib": 1942
+      },
+      {
+        "cpu_percent": 2289.4,
+        "monotonic_ns": 121663478541426,
+        "rss_bytes": 1360441344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 609.0,
+        "monotonic_ns": 121664456521843,
+        "rss_bytes": 1360441344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.800000000000001,
+        "monotonic_ns": 121665467401820,
+        "rss_bytes": 1360441344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.0,
+        "monotonic_ns": 121666455513565,
+        "rss_bytes": 1360449536,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121667460798078,
+        "rss_bytes": 1360453632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121668456577947,
+        "rss_bytes": 1360453632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1715.7,
+        "monotonic_ns": 121669463394362,
+        "rss_bytes": 1360596992,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1096.7,
+        "monotonic_ns": 121670457316509,
+        "rss_bytes": 1360625664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.2,
+        "monotonic_ns": 121671476471411,
+        "rss_bytes": 1360625664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121672470199494,
+        "rss_bytes": 1360629760,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121673459962115,
+        "rss_bytes": 1360637952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121674463617948,
+        "rss_bytes": 1360637952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1236.8000000000002,
+        "monotonic_ns": 121675492126064,
+        "rss_bytes": 1361620992,
+        "vram_mib": 1878
+      },
+      {
+        "cpu_percent": 1553.3,
+        "monotonic_ns": 121676458792729,
+        "rss_bytes": 1361661952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121677478556570,
+        "rss_bytes": 1361661952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.0,
+        "monotonic_ns": 121678463640910,
+        "rss_bytes": 1361661952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121679455543176,
+        "rss_bytes": 1361661952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1579.0,
+        "monotonic_ns": 121680475186240,
+        "rss_bytes": 1361829888,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1047.7,
+        "monotonic_ns": 121681459494659,
+        "rss_bytes": 1361829888,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.2,
+        "monotonic_ns": 121682462787856,
+        "rss_bytes": 1361833984,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1006.0,
+        "monotonic_ns": 121683481913370,
+        "rss_bytes": 1361854464,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1411.3,
+        "monotonic_ns": 121684464582842,
+        "rss_bytes": 1361858560,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.7,
+        "monotonic_ns": 121685460921954,
+        "rss_bytes": 1361862656,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121686459214292,
+        "rss_bytes": 1361862656,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1946.0,
+        "monotonic_ns": 121687458076852,
+        "rss_bytes": 1359773696,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121688478711584,
+        "rss_bytes": 1359773696,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.2,
+        "monotonic_ns": 121689460627433,
+        "rss_bytes": 1359785984,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1206.4,
+        "monotonic_ns": 121690494066726,
+        "rss_bytes": 1360842752,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1351.0,
+        "monotonic_ns": 121691458964207,
+        "rss_bytes": 1360842752,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.4,
+        "monotonic_ns": 121692473138259,
+        "rss_bytes": 1360850944,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.2,
+        "monotonic_ns": 121693460984869,
+        "rss_bytes": 1360850944,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1483.3,
+        "monotonic_ns": 121694484182664,
+        "rss_bytes": 1364287488,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1247.9,
+        "monotonic_ns": 121695461780955,
+        "rss_bytes": 1364287488,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.1,
+        "monotonic_ns": 121696463965163,
+        "rss_bytes": 1364287488,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121697479920231,
+        "rss_bytes": 1364299776,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 82.6,
+        "monotonic_ns": 121698470962124,
+        "rss_bytes": 1364303872,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2431.1,
+        "monotonic_ns": 121699460896205,
+        "rss_bytes": 1364316160,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121700467252381,
+        "rss_bytes": 1364316160,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121701478332330,
+        "rss_bytes": 1364320256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 226.8,
+        "monotonic_ns": 121702475770071,
+        "rss_bytes": 1364320256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2393.1,
+        "monotonic_ns": 121703462649412,
+        "rss_bytes": 1364328448,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.2,
+        "monotonic_ns": 121704478198289,
+        "rss_bytes": 1364328448,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121705478708855,
+        "rss_bytes": 1364332544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 813.5,
+        "monotonic_ns": 121706467479622,
+        "rss_bytes": 1396801536,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1976.4,
+        "monotonic_ns": 121707464307019,
+        "rss_bytes": 1396805632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.6,
+        "monotonic_ns": 121708478598630,
+        "rss_bytes": 1396805632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.2,
+        "monotonic_ns": 121709471521310,
+        "rss_bytes": 1396805632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1082.6000000000001,
+        "monotonic_ns": 121710491623106,
+        "rss_bytes": 1396817920,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1566.0,
+        "monotonic_ns": 121711473775931,
+        "rss_bytes": 1396817920,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.3,
+        "monotonic_ns": 121712477052178,
+        "rss_bytes": 1396817920,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 778.0,
+        "monotonic_ns": 121713484135631,
+        "rss_bytes": 1396826112,
+        "vram_mib": 1942
+      },
+      {
+        "cpu_percent": 1728.4,
+        "monotonic_ns": 121714468490732,
+        "rss_bytes": 1396834304,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.8,
+        "monotonic_ns": 121715472705323,
+        "rss_bytes": 1396834304,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121716469066924,
+        "rss_bytes": 1396834304,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121717473935918,
+        "rss_bytes": 1395290112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1902.6,
+        "monotonic_ns": 121718467682389,
+        "rss_bytes": 1397141504,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 854.1,
+        "monotonic_ns": 121719468290722,
+        "rss_bytes": 1397141504,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1.5,
+        "monotonic_ns": 121720470194498,
+        "rss_bytes": 1397141504,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.8,
+        "monotonic_ns": 121721493166421,
+        "rss_bytes": 1397141504,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.2,
+        "monotonic_ns": 121722468653332,
+        "rss_bytes": 1397145600,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1476.7,
+        "monotonic_ns": 121723480812602,
+        "rss_bytes": 1397174272,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1246.3,
+        "monotonic_ns": 121724468753641,
+        "rss_bytes": 1397268480,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.6,
+        "monotonic_ns": 121725466863068,
+        "rss_bytes": 1397268480,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121726490823137,
+        "rss_bytes": 1397284864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121727474680334,
+        "rss_bytes": 1397284864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121728466781273,
+        "rss_bytes": 1397284864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1688.7,
+        "monotonic_ns": 121729494033362,
+        "rss_bytes": 1408978944,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1335.1,
+        "monotonic_ns": 121730470829390,
+        "rss_bytes": 1408978944,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.1,
+        "monotonic_ns": 121731489161681,
+        "rss_bytes": 1408978944,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121732482370350,
+        "rss_bytes": 1408978944,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121733468884973,
+        "rss_bytes": 1408978944,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121734467913798,
+        "rss_bytes": 1408983040,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1639.8,
+        "monotonic_ns": 121735474494675,
+        "rss_bytes": 1408987136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1169.9,
+        "monotonic_ns": 121736468797215,
+        "rss_bytes": 1409048576,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.5,
+        "monotonic_ns": 121737471232669,
+        "rss_bytes": 1409048576,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.0,
+        "monotonic_ns": 121738472429266,
+        "rss_bytes": 1409048576,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121739488298818,
+        "rss_bytes": 1409056768,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.2,
+        "monotonic_ns": 121740471109845,
+        "rss_bytes": 1409056768,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1914.6,
+        "monotonic_ns": 121741476132399,
+        "rss_bytes": 1407451136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 863.1,
+        "monotonic_ns": 121742470682404,
+        "rss_bytes": 1407451136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.4,
+        "monotonic_ns": 121743489449174,
+        "rss_bytes": 1407451136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121744479458062,
+        "rss_bytes": 1407467520,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121745487036513,
+        "rss_bytes": 1407508480,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121746471202756,
+        "rss_bytes": 1407557632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2037.1,
+        "monotonic_ns": 121747474080829,
+        "rss_bytes": 1409019904,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1027.1,
+        "monotonic_ns": 121748470439959,
+        "rss_bytes": 1409019904,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.4,
+        "monotonic_ns": 121749471306037,
+        "rss_bytes": 1409019904,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.0,
+        "monotonic_ns": 121750470893458,
+        "rss_bytes": 1409019904,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121751473772458,
+        "rss_bytes": 1409028096,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 52.9,
+        "monotonic_ns": 121752477286298,
+        "rss_bytes": 1409032192,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 2386.1,
+        "monotonic_ns": 121753470564127,
+        "rss_bytes": 1409077248,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 361.6,
+        "monotonic_ns": 121754472790513,
+        "rss_bytes": 1409077248,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.300000000000001,
+        "monotonic_ns": 121755480277086,
+        "rss_bytes": 1409077248,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121756493040829,
+        "rss_bytes": 1409081344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 16.2,
+        "monotonic_ns": 121757477935499,
+        "rss_bytes": 1409085440,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 94.2,
+        "monotonic_ns": 121758483836144,
+        "rss_bytes": 1409093632,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 2338.5,
+        "monotonic_ns": 121759475165282,
+        "rss_bytes": 1409363968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 401.4,
+        "monotonic_ns": 121760477720398,
+        "rss_bytes": 1409363968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.8,
+        "monotonic_ns": 121761476059785,
+        "rss_bytes": 1409363968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.9,
+        "monotonic_ns": 121762490583409,
+        "rss_bytes": 1409363968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 16.0,
+        "monotonic_ns": 121763493819235,
+        "rss_bytes": 1409363968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.2,
+        "monotonic_ns": 121764476084932,
+        "rss_bytes": 1409363968,
+        "vram_mib": 1942
+      },
+      {
+        "cpu_percent": 2108.2,
+        "monotonic_ns": 121765500049537,
+        "rss_bytes": 1409478656,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 782.7,
+        "monotonic_ns": 121766473860604,
+        "rss_bytes": 1409478656,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.4,
+        "monotonic_ns": 121767476054539,
+        "rss_bytes": 1409478656,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.0,
+        "monotonic_ns": 121768493974305,
+        "rss_bytes": 1409482752,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.2,
+        "monotonic_ns": 121769476603413,
+        "rss_bytes": 1409503232,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121770475852594,
+        "rss_bytes": 1409560576,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1275.4,
+        "monotonic_ns": 121771632496759,
+        "rss_bytes": 1410826240,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1713.6999999999998,
+        "monotonic_ns": 121772479891949,
+        "rss_bytes": 1411043328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.6,
+        "monotonic_ns": 121773497070838,
+        "rss_bytes": 1411043328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121774486757694,
+        "rss_bytes": 1411043328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121775480728933,
+        "rss_bytes": 1411043328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1430.9,
+        "monotonic_ns": 121776528830172,
+        "rss_bytes": 1416286208,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1075.8,
+        "monotonic_ns": 121777480083356,
+        "rss_bytes": 1416286208,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.2,
+        "monotonic_ns": 121778492443997,
+        "rss_bytes": 1416286208,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 913.1,
+        "monotonic_ns": 121779482258084,
+        "rss_bytes": 1416290304,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1497.6,
+        "monotonic_ns": 121780480184228,
+        "rss_bytes": 1416298496,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.1,
+        "monotonic_ns": 121781484992593,
+        "rss_bytes": 1416298496,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121782484869108,
+        "rss_bytes": 1416298496,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1579.1,
+        "monotonic_ns": 121783497444993,
+        "rss_bytes": 1416327168,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1023.9,
+        "monotonic_ns": 121784485021185,
+        "rss_bytes": 1416327168,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.4,
+        "monotonic_ns": 121785484262204,
+        "rss_bytes": 1416327168,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 643.8,
+        "monotonic_ns": 121786521236983,
+        "rss_bytes": 1416339456,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 1951.8,
+        "monotonic_ns": 121787486317416,
+        "rss_bytes": 1416339456,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121788485780372,
+        "rss_bytes": 1416339456,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.8,
+        "monotonic_ns": 121789499830103,
+        "rss_bytes": 1416339456,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 774.6999999999999,
+        "monotonic_ns": 121790551047903,
+        "rss_bytes": 1416347648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2039.8,
+        "monotonic_ns": 121791491906217,
+        "rss_bytes": 1416347648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.800000000000001,
+        "monotonic_ns": 121792502627916,
+        "rss_bytes": 1416347648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121793494831976,
+        "rss_bytes": 1416347648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121794491592852,
+        "rss_bytes": 1416347648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2055.7,
+        "monotonic_ns": 121795504874702,
+        "rss_bytes": 1414352896,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 504.9,
+        "monotonic_ns": 121796488977462,
+        "rss_bytes": 1414352896,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.4,
+        "monotonic_ns": 121797512852131,
+        "rss_bytes": 1414356992,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121798503055982,
+        "rss_bytes": 1414369280,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2077.2,
+        "monotonic_ns": 121799494386760,
+        "rss_bytes": 1415237632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.6,
+        "monotonic_ns": 121800514933623,
+        "rss_bytes": 1415237632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121801495431264,
+        "rss_bytes": 1415249920,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 153.2,
+        "monotonic_ns": 121802501664858,
+        "rss_bytes": 1415254016,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2365.8,
+        "monotonic_ns": 121803492361172,
+        "rss_bytes": 1415557120,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121804494500887,
+        "rss_bytes": 1415557120,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121805504595071,
+        "rss_bytes": 1415585792,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1017.6,
+        "monotonic_ns": 121806520298406,
+        "rss_bytes": 1415626752,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1622.9,
+        "monotonic_ns": 121807493840207,
+        "rss_bytes": 1415626752,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.8,
+        "monotonic_ns": 121808512474788,
+        "rss_bytes": 1415639040,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 597.7,
+        "monotonic_ns": 121809537451373,
+        "rss_bytes": 1415647232,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1944.7,
+        "monotonic_ns": 121810495321342,
+        "rss_bytes": 1415835648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121811504275755,
+        "rss_bytes": 1415835648,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 121812513321566,
+        "rss_bytes": 1415872512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.1,
+        "monotonic_ns": 121813492913587,
+        "rss_bytes": 1415921664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1779.6,
+        "monotonic_ns": 121814498839881,
+        "rss_bytes": 1416507392,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 946.8,
+        "monotonic_ns": 121815498099023,
+        "rss_bytes": 1416507392,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.5,
+        "monotonic_ns": 121816496782497,
+        "rss_bytes": 1416507392,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.9,
+        "monotonic_ns": 121817512021737,
+        "rss_bytes": 1416507392,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.2,
+        "monotonic_ns": 121818499037744,
+        "rss_bytes": 1416511488,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1163.7,
+        "monotonic_ns": 121819508410097,
+        "rss_bytes": 1416536064,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1653.0,
+        "monotonic_ns": 121820496563459,
+        "rss_bytes": 1450188800,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.8,
+        "monotonic_ns": 121821496707172,
+        "rss_bytes": 1450188800,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.0,
+        "monotonic_ns": 121822494296690,
+        "rss_bytes": 1450188800,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121823495861438,
+        "rss_bytes": 1450201088,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 121824498032509,
+        "rss_bytes": 1450201088,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1702.8,
+        "monotonic_ns": 121825563079159,
+        "rss_bytes": 1449824256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1250.0,
+        "monotonic_ns": 121826507252096,
+        "rss_bytes": 1449824256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.399999999999999,
+        "monotonic_ns": 121827509617396,
+        "rss_bytes": 1449824256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121828510197887,
+        "rss_bytes": 1449828352,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121829500943789,
+        "rss_bytes": 1449844736,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121830501799021,
+        "rss_bytes": 1449885696,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1709.3,
+        "monotonic_ns": 121831598589312,
+        "rss_bytes": 1450479616,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1400.5,
+        "monotonic_ns": 121832503174970,
+        "rss_bytes": 1450483712,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.300000000000001,
+        "monotonic_ns": 121833518982957,
+        "rss_bytes": 1450483712,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 121834511304739,
+        "rss_bytes": 1450496000,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121835524349717,
+        "rss_bytes": 1450508288,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.2,
+        "monotonic_ns": 121836502879725,
+        "rss_bytes": 1450516480,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1716.8,
+        "monotonic_ns": 121837535810125,
+        "rss_bytes": 1450532864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1345.9,
+        "monotonic_ns": 121838499283545,
+        "rss_bytes": 1450532864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.2,
+        "monotonic_ns": 121839514199887,
+        "rss_bytes": 1450532864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.0,
+        "monotonic_ns": 121840500426261,
+        "rss_bytes": 1450532864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.8,
+        "monotonic_ns": 121841527385004,
+        "rss_bytes": 1450532864,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.2,
+        "monotonic_ns": 121842502743322,
+        "rss_bytes": 1450536960,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1234.4,
+        "monotonic_ns": 121843514556442,
+        "rss_bytes": 1450561536,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1614.1,
+        "monotonic_ns": 121844502127190,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121845509208107,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.0,
+        "monotonic_ns": 121846522091796,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121847508936924,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.8,
+        "monotonic_ns": 121848516730826,
+        "rss_bytes": 1455476736,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1643.0,
+        "monotonic_ns": 121849525119439,
+        "rss_bytes": 1453948928,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1189.0,
+        "monotonic_ns": 121850504666975,
+        "rss_bytes": 1453948928,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.4,
+        "monotonic_ns": 121851509338747,
+        "rss_bytes": 1453948928,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121852521034099,
+        "rss_bytes": 1453948928,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121853507136543,
+        "rss_bytes": 1453957120,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121854506200915,
+        "rss_bytes": 1453998080,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1711.3,
+        "monotonic_ns": 121855533561608,
+        "rss_bytes": 1455337472,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1078.4,
+        "monotonic_ns": 121856505562810,
+        "rss_bytes": 1455341568,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2.4,
+        "monotonic_ns": 121857507924101,
+        "rss_bytes": 1455341568,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121858508927799,
+        "rss_bytes": 1455341568,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.0,
+        "monotonic_ns": 121859507752634,
+        "rss_bytes": 1455341568,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121860509555549,
+        "rss_bytes": 1455345664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1274.2,
+        "monotonic_ns": 121861526887946,
+        "rss_bytes": 1455431680,
+        "vram_mib": 1910
+      },
+      {
+        "cpu_percent": 1517.5,
+        "monotonic_ns": 121862506336950,
+        "rss_bytes": 1455443968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.7,
+        "monotonic_ns": 121863507186337,
+        "rss_bytes": 1455443968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.0,
+        "monotonic_ns": 121864521105124,
+        "rss_bytes": 1455443968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121865509063491,
+        "rss_bytes": 1455443968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121866518693877,
+        "rss_bytes": 1455443968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 429.5,
+        "monotonic_ns": 121867509970919,
+        "rss_bytes": 1455456256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2300.0,
+        "monotonic_ns": 121868512867580,
+        "rss_bytes": 1455579136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 127.5,
+        "monotonic_ns": 121869511149700,
+        "rss_bytes": 1455579136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.8,
+        "monotonic_ns": 121870516968835,
+        "rss_bytes": 1455579136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121871510432129,
+        "rss_bytes": 1455579136,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 98.9,
+        "monotonic_ns": 121872514094338,
+        "rss_bytes": 1455616000,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2376.5,
+        "monotonic_ns": 121873515218855,
+        "rss_bytes": 1455681536,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121874521838723,
+        "rss_bytes": 1455681536,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 121875508881266,
+        "rss_bytes": 1455681536,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1999.6,
+        "monotonic_ns": 121876513415983,
+        "rss_bytes": 1454198784,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 450.4,
+        "monotonic_ns": 121877511222058,
+        "rss_bytes": 1454198784,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.6,
+        "monotonic_ns": 121878527895205,
+        "rss_bytes": 1454198784,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 395.4,
+        "monotonic_ns": 121879541356496,
+        "rss_bytes": 1454575616,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2155.9,
+        "monotonic_ns": 121880518584145,
+        "rss_bytes": 1454751744,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 121881517227010,
+        "rss_bytes": 1454751744,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121882513512087,
+        "rss_bytes": 1454751744,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2270.1,
+        "monotonic_ns": 121883515529364,
+        "rss_bytes": 1454821376,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121884601940842,
+        "rss_bytes": 1454821376,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.2,
+        "monotonic_ns": 121885519542289,
+        "rss_bytes": 1454821376,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121886518249561,
+        "rss_bytes": 1454829568,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 2213.8,
+        "monotonic_ns": 121887553544694,
+        "rss_bytes": 1455120384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.8,
+        "monotonic_ns": 121888522831957,
+        "rss_bytes": 1455120384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.0,
+        "monotonic_ns": 121889516022408,
+        "rss_bytes": 1455124480,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.8,
+        "monotonic_ns": 121890531108069,
+        "rss_bytes": 1455124480,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 739.6999999999999,
+        "monotonic_ns": 121891555111999,
+        "rss_bytes": 1455132672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1911.1,
+        "monotonic_ns": 121892526061772,
+        "rss_bytes": 1455132672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.3,
+        "monotonic_ns": 121893518592102,
+        "rss_bytes": 1455132672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.8,
+        "monotonic_ns": 121894537670755,
+        "rss_bytes": 1455132672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 771.8,
+        "monotonic_ns": 121895527657865,
+        "rss_bytes": 1455149056,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1971.5,
+        "monotonic_ns": 121896521232872,
+        "rss_bytes": 1455149056,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121897545235736,
+        "rss_bytes": 1455149056,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.2,
+        "monotonic_ns": 121898520705757,
+        "rss_bytes": 1455149056,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1447.0,
+        "monotonic_ns": 121899551382967,
+        "rss_bytes": 1455296512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1147.7,
+        "monotonic_ns": 121900524210334,
+        "rss_bytes": 1455296512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.6,
+        "monotonic_ns": 121901530336341,
+        "rss_bytes": 1455296512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121902520799348,
+        "rss_bytes": 1455296512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1624.3,
+        "monotonic_ns": 121903556197543,
+        "rss_bytes": 1455308800,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 997.8,
+        "monotonic_ns": 121904540231010,
+        "rss_bytes": 1455308800,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.9,
+        "monotonic_ns": 121905525618026,
+        "rss_bytes": 1455308800,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1328.8,
+        "monotonic_ns": 121906551290312,
+        "rss_bytes": 1454784512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1137.4,
+        "monotonic_ns": 121907527236444,
+        "rss_bytes": 1454784512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.0,
+        "monotonic_ns": 121908530563892,
+        "rss_bytes": 1454784512,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.8,
+        "monotonic_ns": 121909551398896,
+        "rss_bytes": 1454788608,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.2,
+        "monotonic_ns": 121910532492828,
+        "rss_bytes": 1454882816,
+        "vram_mib": 1942
+      },
+      {
+        "cpu_percent": 2367.9,
+        "monotonic_ns": 121911542775490,
+        "rss_bytes": 1455706112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 422.6,
+        "monotonic_ns": 121912525334298,
+        "rss_bytes": 1455706112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 121913546949755,
+        "rss_bytes": 1455706112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121914527828506,
+        "rss_bytes": 1455706112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121915530219655,
+        "rss_bytes": 1455726592,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1584.5,
+        "monotonic_ns": 121916530574830,
+        "rss_bytes": 1455755264,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1201.6,
+        "monotonic_ns": 121917522752334,
+        "rss_bytes": 1455804416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2.6,
+        "monotonic_ns": 121918528463374,
+        "rss_bytes": 1455804416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121919526870826,
+        "rss_bytes": 1455804416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121920534485710,
+        "rss_bytes": 1455804416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.2,
+        "monotonic_ns": 121921524033525,
+        "rss_bytes": 1455812608,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1841.8,
+        "monotonic_ns": 121922544878147,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1058.4,
+        "monotonic_ns": 121923529335537,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2.5,
+        "monotonic_ns": 121924528694137,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121925542194337,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121926551758243,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.2,
+        "monotonic_ns": 121927527049975,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2179.9,
+        "monotonic_ns": 121928531140596,
+        "rss_bytes": 1456156672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 650.7,
+        "monotonic_ns": 121929529295810,
+        "rss_bytes": 1456156672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.800000000000001,
+        "monotonic_ns": 121930533983623,
+        "rss_bytes": 1456156672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121931543641618,
+        "rss_bytes": 1456156672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 17.0,
+        "monotonic_ns": 121932535900041,
+        "rss_bytes": 1453740032,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 59.3,
+        "monotonic_ns": 121933535614435,
+        "rss_bytes": 1453973504,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 2383.1,
+        "monotonic_ns": 121934566520565,
+        "rss_bytes": 1455906816,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 415.20000000000005,
+        "monotonic_ns": 121935530576101,
+        "rss_bytes": 1455906816,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.9000000000000004,
+        "monotonic_ns": 121936532305180,
+        "rss_bytes": 1455906816,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121937544728953,
+        "rss_bytes": 1455910912,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 16.0,
+        "monotonic_ns": 121938540466109,
+        "rss_bytes": 1455910912,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 180.3,
+        "monotonic_ns": 121939539360025,
+        "rss_bytes": 1455923200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2272.6,
+        "monotonic_ns": 121940600264467,
+        "rss_bytes": 1456046080,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 494.7,
+        "monotonic_ns": 121941531750472,
+        "rss_bytes": 1456046080,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.5999999999999996,
+        "monotonic_ns": 121942545681476,
+        "rss_bytes": 1456046080,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 121943544642306,
+        "rss_bytes": 1456046080,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121944531656336,
+        "rss_bytes": 1456054272,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 93.6,
+        "monotonic_ns": 121945536615955,
+        "rss_bytes": 1456062464,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 2183.8,
+        "monotonic_ns": 121946534563268,
+        "rss_bytes": 1456099328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 700.4,
+        "monotonic_ns": 121947531512227,
+        "rss_bytes": 1456099328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.300000000000001,
+        "monotonic_ns": 121948531252979,
+        "rss_bytes": 1456099328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 121949534799887,
+        "rss_bytes": 1456099328,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 18.8,
+        "monotonic_ns": 121950543062081,
+        "rss_bytes": 1456103424,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.1,
+        "monotonic_ns": 121951532034129,
+        "rss_bytes": 1456103424,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1813.0,
+        "monotonic_ns": 121952553208452,
+        "rss_bytes": 1456168960,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1355.6,
+        "monotonic_ns": 121953529565857,
+        "rss_bytes": 1456185344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.4,
+        "monotonic_ns": 121954541177439,
+        "rss_bytes": 1456185344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.0,
+        "monotonic_ns": 121955552164013,
+        "rss_bytes": 1456185344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.2,
+        "monotonic_ns": 121956531962659,
+        "rss_bytes": 1456185344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.9,
+        "monotonic_ns": 121957548521153,
+        "rss_bytes": 1456185344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 972.2,
+        "monotonic_ns": 121958538324680,
+        "rss_bytes": 1454469120,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1835.5,
+        "monotonic_ns": 121959530565721,
+        "rss_bytes": 1455685632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121960566750179,
+        "rss_bytes": 1455685632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.4,
+        "monotonic_ns": 121961549425103,
+        "rss_bytes": 1455685632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.2,
+        "monotonic_ns": 121962531072727,
+        "rss_bytes": 1455685632,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 121963545404966,
+        "rss_bytes": 1455693824,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 523.7,
+        "monotonic_ns": 121964535077156,
+        "rss_bytes": 1456168960,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2330.3,
+        "monotonic_ns": 121965533846516,
+        "rss_bytes": 1456242688,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2.0,
+        "monotonic_ns": 121966535569253,
+        "rss_bytes": 1456242688,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.8,
+        "monotonic_ns": 121967544491453,
+        "rss_bytes": 1456242688,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 121968545250938,
+        "rss_bytes": 1456246784,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 247.0,
+        "monotonic_ns": 121969537143760,
+        "rss_bytes": 1456308224,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2259.9,
+        "monotonic_ns": 121970535235654,
+        "rss_bytes": 1456316416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.3,
+        "monotonic_ns": 121971542139574,
+        "rss_bytes": 1456316416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 30.9,
+        "monotonic_ns": 121972545446041,
+        "rss_bytes": 1456336896,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 2113.3,
+        "monotonic_ns": 121973563079904,
+        "rss_bytes": 1456357376,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 294.40000000000003,
+        "monotonic_ns": 121974536684579,
+        "rss_bytes": 1456357376,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.1,
+        "monotonic_ns": 121975549766087,
+        "rss_bytes": 1456357376,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 324.3,
+        "monotonic_ns": 121976539163703,
+        "rss_bytes": 1456377856,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2300.3,
+        "monotonic_ns": 121977536796668,
+        "rss_bytes": 1456410624,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.8,
+        "monotonic_ns": 121978559245775,
+        "rss_bytes": 1456410624,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 121979541199309,
+        "rss_bytes": 1456414720,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2190.2,
+        "monotonic_ns": 121980537677706,
+        "rss_bytes": 1456435200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 587.8,
+        "monotonic_ns": 121981552419782,
+        "rss_bytes": 1456435200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 121982543834202,
+        "rss_bytes": 1456467968,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.1,
+        "monotonic_ns": 121983539030488,
+        "rss_bytes": 1456472064,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2166.6,
+        "monotonic_ns": 121984589362426,
+        "rss_bytes": 1456513024,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 121985535733546,
+        "rss_bytes": 1456513024,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.0,
+        "monotonic_ns": 121986537009875,
+        "rss_bytes": 1453817856,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 121987538262821,
+        "rss_bytes": 1453821952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1010.1,
+        "monotonic_ns": 121988576191460,
+        "rss_bytes": 1454739456,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1647.9,
+        "monotonic_ns": 121989547158076,
+        "rss_bytes": 1455292416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.4,
+        "monotonic_ns": 121990544867299,
+        "rss_bytes": 1455292416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121991538882670,
+        "rss_bytes": 1455292416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1205.2,
+        "monotonic_ns": 121992561665830,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1456.9,
+        "monotonic_ns": 121993537612503,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.5,
+        "monotonic_ns": 121994542716314,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 121995549677280,
+        "rss_bytes": 1455468544,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1853.0,
+        "monotonic_ns": 121996566621147,
+        "rss_bytes": 1455566848,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1039.0,
+        "monotonic_ns": 121997547875023,
+        "rss_bytes": 1455566848,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.7,
+        "monotonic_ns": 121998557130279,
+        "rss_bytes": 1455566848,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.2,
+        "monotonic_ns": 121999542274343,
+        "rss_bytes": 1455603712,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1901.5,
+        "monotonic_ns": 122000541225342,
+        "rss_bytes": 1455628288,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 28.2,
+        "monotonic_ns": 122001559646622,
+        "rss_bytes": 1455628288,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.2,
+        "monotonic_ns": 122002545133667,
+        "rss_bytes": 1455640576,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1233.1,
+        "monotonic_ns": 122003547152768,
+        "rss_bytes": 1455644672,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 905.2,
+        "monotonic_ns": 122004545596528,
+        "rss_bytes": 1455673344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.2,
+        "monotonic_ns": 122005549797271,
+        "rss_bytes": 1455673344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 122006553885819,
+        "rss_bytes": 1455673344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.2,
+        "monotonic_ns": 122007545808885,
+        "rss_bytes": 1455673344,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1784.4,
+        "monotonic_ns": 122008546317280,
+        "rss_bytes": 1455996928,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 937.1,
+        "monotonic_ns": 122009545147397,
+        "rss_bytes": 1455996928,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.8,
+        "monotonic_ns": 122010556149812,
+        "rss_bytes": 1455996928,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 122011546437414,
+        "rss_bytes": 1456001024,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 122012544950259,
+        "rss_bytes": 1456005120,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 946.6,
+        "monotonic_ns": 122013580194635,
+        "rss_bytes": 1456021504,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 1839.8,
+        "monotonic_ns": 122014547361253,
+        "rss_bytes": 1454833664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 122015551007572,
+        "rss_bytes": 1454833664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 122016548153196,
+        "rss_bytes": 1454837760,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.8,
+        "monotonic_ns": 122017565975926,
+        "rss_bytes": 1454841856,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 122018554307900,
+        "rss_bytes": 1454882816,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1343.0,
+        "monotonic_ns": 122019586086287,
+        "rss_bytes": 1456914432,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1648.2,
+        "monotonic_ns": 122020546047062,
+        "rss_bytes": 1456914432,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.1,
+        "monotonic_ns": 122021549938740,
+        "rss_bytes": 1456914432,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.0,
+        "monotonic_ns": 122022550359620,
+        "rss_bytes": 1456914432,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 122023555462043,
+        "rss_bytes": 1456930816,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 122024547357589,
+        "rss_bytes": 1456939008,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1968.6,
+        "monotonic_ns": 122025550326673,
+        "rss_bytes": 1456947200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 870.1,
+        "monotonic_ns": 122026547875199,
+        "rss_bytes": 1456947200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 5.4,
+        "monotonic_ns": 122027557688427,
+        "rss_bytes": 1456947200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 122028565691132,
+        "rss_bytes": 1456947200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 122029560898026,
+        "rss_bytes": 1456955392,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.1,
+        "monotonic_ns": 122030546990390,
+        "rss_bytes": 1456963584,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2119.4,
+        "monotonic_ns": 122031551953476,
+        "rss_bytes": 1456992256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 625.9,
+        "monotonic_ns": 122032546024657,
+        "rss_bytes": 1456992256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 4.5,
+        "monotonic_ns": 122033557114517,
+        "rss_bytes": 1456992256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.0,
+        "monotonic_ns": 122034555914796,
+        "rss_bytes": 1456992256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 16.2,
+        "monotonic_ns": 122035547512795,
+        "rss_bytes": 1456992256,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 79.7,
+        "monotonic_ns": 122036556136990,
+        "rss_bytes": 1456996352,
+        "vram_mib": 1846
+      },
+      {
+        "cpu_percent": 2292.0,
+        "monotonic_ns": 122037553904477,
+        "rss_bytes": 1457008640,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 434.3,
+        "monotonic_ns": 122038550427876,
+        "rss_bytes": 1457008640,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.9000000000000004,
+        "monotonic_ns": 122039551399544,
+        "rss_bytes": 1457008640,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.8,
+        "monotonic_ns": 122040568861098,
+        "rss_bytes": 1457008640,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.0,
+        "monotonic_ns": 122041559301306,
+        "rss_bytes": 1454968832,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 114.9,
+        "monotonic_ns": 122042553359870,
+        "rss_bytes": 1455165440,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2446.8,
+        "monotonic_ns": 122043547961530,
+        "rss_bytes": 1456881664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 122044591296163,
+        "rss_bytes": 1456881664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 7.2,
+        "monotonic_ns": 122045565958249,
+        "rss_bytes": 1456881664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 122046560197512,
+        "rss_bytes": 1456889856,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.2,
+        "monotonic_ns": 122047551668958,
+        "rss_bytes": 1456902144,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 159.4,
+        "monotonic_ns": 122048562355459,
+        "rss_bytes": 1456914432,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2343.9,
+        "monotonic_ns": 122049578384053,
+        "rss_bytes": 1457033216,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 337.0,
+        "monotonic_ns": 122050555452365,
+        "rss_bytes": 1457033216,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.399999999999999,
+        "monotonic_ns": 122051558855970,
+        "rss_bytes": 1457033216,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 122052560460497,
+        "rss_bytes": 1457041408,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 15.0,
+        "monotonic_ns": 122053569856540,
+        "rss_bytes": 1457045504,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.2,
+        "monotonic_ns": 122054548892748,
+        "rss_bytes": 1457045504,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2027.5,
+        "monotonic_ns": 122055552625305,
+        "rss_bytes": 1457057792,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 801.5,
+        "monotonic_ns": 122056549493405,
+        "rss_bytes": 1457057792,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.1,
+        "monotonic_ns": 122057574253769,
+        "rss_bytes": 1457057792,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 122058571050394,
+        "rss_bytes": 1457057792,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 17.2,
+        "monotonic_ns": 122059556076286,
+        "rss_bytes": 1457057792,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.0,
+        "monotonic_ns": 122060555133595,
+        "rss_bytes": 1457057792,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1404.1000000000001,
+        "monotonic_ns": 122061608616915,
+        "rss_bytes": 1457086464,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1485.8999999999999,
+        "monotonic_ns": 122062572484455,
+        "rss_bytes": 1457086464,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 8.2,
+        "monotonic_ns": 122063586794815,
+        "rss_bytes": 1457086464,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 122064582848168,
+        "rss_bytes": 1457086464,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 12.2,
+        "monotonic_ns": 122065577611305,
+        "rss_bytes": 1457086464,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1098.8,
+        "monotonic_ns": 122066593505271,
+        "rss_bytes": 1456250880,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1545.3,
+        "monotonic_ns": 122067571429022,
+        "rss_bytes": 1456250880,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.3,
+        "monotonic_ns": 122068576272045,
+        "rss_bytes": 1456250880,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 717.2,
+        "monotonic_ns": 122069573594635,
+        "rss_bytes": 1456271360,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1696.5,
+        "monotonic_ns": 122070573100390,
+        "rss_bytes": 1456275456,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 122071579065021,
+        "rss_bytes": 1456275456,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 11.0,
+        "monotonic_ns": 122072575567320,
+        "rss_bytes": 1456275456,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1162.9,
+        "monotonic_ns": 122073571757975,
+        "rss_bytes": 1456291840,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1390.6,
+        "monotonic_ns": 122074578871575,
+        "rss_bytes": 1456308224,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.6,
+        "monotonic_ns": 122075575448795,
+        "rss_bytes": 1456308224,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 122076573908955,
+        "rss_bytes": 1456316416,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1483.8000000000002,
+        "monotonic_ns": 122077611031139,
+        "rss_bytes": 1456369664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1141.7,
+        "monotonic_ns": 122078570917538,
+        "rss_bytes": 1456369664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.3,
+        "monotonic_ns": 122079584260802,
+        "rss_bytes": 1456369664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 18.1,
+        "monotonic_ns": 122080578274643,
+        "rss_bytes": 1456369664,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1621.6,
+        "monotonic_ns": 122081603610902,
+        "rss_bytes": 1456885760,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1085.9,
+        "monotonic_ns": 122082580114302,
+        "rss_bytes": 1456885760,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 3.2,
+        "monotonic_ns": 122083579582063,
+        "rss_bytes": 1456885760,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.0,
+        "monotonic_ns": 122084579524262,
+        "rss_bytes": 1456885760,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 150.6,
+        "monotonic_ns": 122085597037005,
+        "rss_bytes": 1456889856,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2476.0,
+        "monotonic_ns": 122086576139891,
+        "rss_bytes": 1456893952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 122087573303434,
+        "rss_bytes": 1456893952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 6.0,
+        "monotonic_ns": 122088578236541,
+        "rss_bytes": 1456893952,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 100.3,
+        "monotonic_ns": 122089588632097,
+        "rss_bytes": 1456902144,
+        "vram_mib": 1942
+      },
+      {
+        "cpu_percent": 2347.3,
+        "monotonic_ns": 122090574725889,
+        "rss_bytes": 1456947200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 9.3,
+        "monotonic_ns": 122091580053664,
+        "rss_bytes": 1456947200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.8,
+        "monotonic_ns": 122092598936078,
+        "rss_bytes": 1456947200,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 627.9,
+        "monotonic_ns": 122093593121482,
+        "rss_bytes": 1456963584,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2241.7,
+        "monotonic_ns": 122094577361720,
+        "rss_bytes": 1455194112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 2.2,
+        "monotonic_ns": 122095588163622,
+        "rss_bytes": 1455194112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 14.2,
+        "monotonic_ns": 122096574871593,
+        "rss_bytes": 1455194112,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 789.3,
+        "monotonic_ns": 122097605164789,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1887.0,
+        "monotonic_ns": 122098578149016,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 13.6,
+        "monotonic_ns": 122099581487994,
+        "rss_bytes": 1456144384,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 507.0,
+        "monotonic_ns": 122100582105422,
+        "rss_bytes": 1456336896,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 1996.7,
+        "monotonic_ns": 122101576973249,
+        "rss_bytes": 1456349184,
+        "vram_mib": 1814
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 122102507216924,
+        "rss_bytes": 1456349184,
+        "vram_mib": 1814
+      }
+    ],
+    "scope": "bridge_process_tree_and_filtered_gpu",
+    "stability": {
+      "minimum_duration_seconds": 60.0,
+      "minimum_samples": 20,
+      "rss_baseline_bytes": 1331474432,
+      "rss_final_bytes": 1456885760,
+      "rss_growth_bytes": 125411328,
+      "rss_growth_limit_bytes": 268435456,
+      "sample_count": 525,
+      "vram_baseline_mib": 1814.0,
+      "vram_final_mib": 1814.0,
+      "vram_growth_limit_mib": 256,
+      "vram_growth_mib": 0.0,
+      "window_fraction": 0.1,
+      "window_sample_count": 53
+    },
+    "violations": [],
+    "vram_mib_peak": 1942,
+    "within_limits": true
+  },
+  "runtime": {
+    "bridge_sha256": "eda42141227e136fb5dfec62178432eb5a5aaddeeb34a4d24abfd94c2289e61d",
+    "harness_sha256": "a546ee6784e200b4e1b81d2d278d895a14c6eaa5678056629f1028939cea7faf",
+    "measurement_uncertainty_ms": 20,
+    "startup_ready_ms": 4695.552676
+  },
+  "schema_version": "translator.task7-e2e.v1",
+  "simultaneous": true
+}

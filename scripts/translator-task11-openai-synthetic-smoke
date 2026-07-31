@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from collections import Counter
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import sys
+from threading import Barrier, Thread
+import time
+from typing import Any
+from uuid import uuid4
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SIDECAR = ROOT / "sidecar"
+if str(SIDECAR) not in sys.path:
+    sys.path.insert(0, str(SIDECAR))
+
+from translator_sidecar.local.model_manifest import (  # noqa: E402
+    ManifestError,
+    ModelManifest,
+    load_manifest,
+)
+from translator_sidecar.local.tts import (  # noqa: E402
+    PiperTts,
+    PiperVoiceRegistry,
+    TtsUnavailable,
+    TtsUnsupported,
+)
+from translator_sidecar.openai_provider import (  # noqa: E402
+    OPENAI_REALTIME_TRANSLATION_ENDPOINT,
+    OPENAI_REALTIME_TRANSLATION_MODEL,
+    build_input_audio_append_event,
+    build_session_close_event,
+    build_session_update_event,
+)
+from translator_sidecar.provider_contract import (  # noqa: E402
+    AudioDirection,
+    Language,
+    OpenProviderSession,
+    PcmFormat,
+    ProviderId,
+    SampleFormat,
+    TranslationMode,
+    VoiceEngine,
+    VoiceGender,
+    VoiceProfile,
+)
+
+
+REPORT_PATH = ROOT / "docs/benchmarks/task11-openai-adapter-preflight.json"
+MANIFEST_PATH = ROOT / "models/manifest.json"
+FRAME_DURATION_MS = 20
+SAMPLE_RATE_HZ = 24_000
+OPENAI_SAFETY_IDENTIFIER = "translator-task11-openai-synthetic-smoke"
+CONNECT_TIMEOUT_SECONDS = 10
+SESSION_UPDATE_WAIT_SECONDS = 3
+OUTPUT_WAIT_SECONDS = 8
+SESSION_CLOSE_WAIT_SECONDS = 2
+MAX_SPEECH_MS = 4_000
+TAIL_SILENCE_MS = 400
+SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+
+VOICE_MODELS = {
+    (Language.RU, VoiceGender.MALE): "piper-ru-dmitri-medium",
+    (Language.EN, VoiceGender.MALE): "piper-en-ryan-medium",
+}
+
+DIRECTION_CONFIGS = {
+    "ru_to_en": {
+        "direction_id": AudioDirection.MICROPHONE,
+        "source_language": Language.RU,
+        "target_language": Language.EN,
+        "sample": "Проверка канала связи.",
+    },
+    "en_to_ru": {
+        "direction_id": AudioDirection.SPEAKER,
+        "source_language": Language.EN,
+        "target_language": Language.RU,
+        "sample": "Connection path check.",
+    },
+}
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def read_report() -> dict[str, Any]:
+    return json.loads(REPORT_PATH.read_text())
+
+
+def write_report(report: dict[str, Any]) -> None:
+    REPORT_PATH.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def safe_token(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if SAFE_TOKEN_RE.fullmatch(token):
+        return token
+    return "provider_error"
+
+
+def request(config: dict[str, Any]) -> OpenProviderSession:
+    return OpenProviderSession(
+        session_id=uuid4(),
+        provider_id=ProviderId.OPENAI,
+        direction_id=config["direction_id"],
+        source_language=config["source_language"],
+        target_language=config["target_language"],
+        mode=TranslationMode.STREAMING_FIRST,
+        requested_input_format=PcmFormat(
+            sample_rate_hz=SAMPLE_RATE_HZ,
+            channels=1,
+            sample_format=SampleFormat.S16LE,
+            frame_duration_ms=FRAME_DURATION_MS,
+        ),
+        requested_output_format=PcmFormat(
+            sample_rate_hz=SAMPLE_RATE_HZ,
+            channels=1,
+            sample_format=SampleFormat.S16LE,
+            frame_duration_ms=FRAME_DURATION_MS,
+        ),
+        voice_profile=VoiceProfile(
+            language=config["target_language"],
+            gender=VoiceGender.MALE,
+            engine=VoiceEngine.OPENAI,
+        ),
+        debug_text_enabled=False,
+    )
+
+
+def primary_model_file(manifest: ModelManifest, model_id: str) -> Path:
+    model = manifest.models[model_id]
+    for model_file in model.files:
+        if model_file.path.endswith(".onnx"):
+            return manifest.resolve_runtime_file(model.id, model_file.path)
+    raise ManifestError("runtime model file is missing")
+
+
+def voice_profile(language: Language) -> VoiceProfile:
+    return VoiceProfile(
+        language=language,
+        gender=VoiceGender.MALE,
+        engine=VoiceEngine.PIPER,
+    )
+
+
+def build_tts() -> PiperTts:
+    manifest = load_manifest(MANIFEST_PATH)
+    voice_paths = {
+        profile: primary_model_file(manifest, model_id)
+        for profile, model_id in VOICE_MODELS.items()
+    }
+    registry = PiperVoiceRegistry(voice_paths)
+    return PiperTts(registry)
+
+
+def synthesize_frames(tts: PiperTts, config: dict[str, Any]) -> list[bytes]:
+    source_language = config["source_language"]
+    frames = list(
+        tts.synthesize_frames(
+            config["sample"],
+            target_language=source_language,
+            voice_profile=voice_profile(source_language),
+            mode=TranslationMode.STREAMING_FIRST,
+            output_sample_rate_hz=SAMPLE_RATE_HZ,
+            output_channels=1,
+            frame_duration_ms=FRAME_DURATION_MS,
+        )
+    )
+    if not frames:
+        raise TtsUnavailable("synthetic speech emitted no frames")
+    max_frames = max(1, MAX_SPEECH_MS // FRAME_DURATION_MS)
+    tail_frames = TAIL_SILENCE_MS // FRAME_DURATION_MS
+    frame_bytes = SAMPLE_RATE_HZ * 2 * FRAME_DURATION_MS // 1000
+    return frames[:max_frames] + [b"\x00" * frame_bytes for _ in range(tail_frames)]
+
+
+def drain_websocket(
+    ws: Any,
+    metrics: dict[str, Any],
+    deadline: float,
+    first_input_ns: int | None,
+    phase: str,
+) -> None:
+    import websocket
+
+    while time.monotonic() < deadline:
+        remaining = max(0.001, min(0.05, deadline - time.monotonic()))
+        ws.settimeout(remaining)
+        try:
+            raw = ws.recv()
+        except websocket.WebSocketTimeoutException:
+            return
+        except Exception:
+            if metrics["safe_error_code"] is None:
+                metrics["safe_error_code"] = "websocket_receive_failed"
+            return
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            if metrics["safe_error_code"] is None:
+                metrics["safe_error_code"] = "invalid_event"
+            continue
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            if metrics["safe_error_code"] is None:
+                metrics["safe_error_code"] = "invalid_event"
+            continue
+        metrics["event_type_counts"][event_type] += 1
+        if event_type == "session.updated":
+            metrics["session_updated"] = True
+        elif event_type == "session.closed":
+            metrics["session_closed"] = True
+        elif event_type == "session.output_audio.delta":
+            if isinstance(event.get("delta"), str) and first_input_ns is not None:
+                now_ns = time.perf_counter_ns()
+                elapsed_ms = (now_ns - first_input_ns) // 1_000_000
+                if metrics["first_output_audio_delta_ms"] is None:
+                    metrics["first_output_audio_delta_ms"] = elapsed_ms
+                metrics["last_output_audio_delta_ms"] = elapsed_ms
+                metrics["output_audio_delta_count"] += 1
+        elif event_type == "error":
+            error = event.get("error")
+            safe_error_type = None
+            if isinstance(error, dict):
+                safe_error_type = (
+                    safe_token(error.get("type"))
+                    or safe_token(error.get("code"))
+                    or "provider_error"
+                )
+            metrics["provider_error_phase"] = phase
+            if phase == "close" and metrics["output_audio_delta_count"] > 0:
+                metrics["close_safe_error_code"] = "provider_error"
+                metrics["close_safe_error_type"] = safe_error_type
+                continue
+            metrics["safe_error_code"] = "provider_error"
+            metrics["safe_error_type"] = safe_error_type
+
+
+def direction_metrics(name: str, config: dict[str, Any], frames: list[bytes]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "source_language": config["source_language"].value,
+        "target_language": config["target_language"].value,
+        "sample_rate_hz": SAMPLE_RATE_HZ,
+        "frame_duration_ms": FRAME_DURATION_MS,
+        "planned_frame_count": len(frames),
+        "sent_frame_count": 0,
+        "sent_duration_ms": 0,
+        "stopped_after_first_output_audio_delta": False,
+        "connected": False,
+        "session_updated": False,
+        "session_closed": False,
+        "output_audio_delta_count": 0,
+        "first_output_audio_delta_ms": None,
+        "last_output_audio_delta_ms": None,
+        "event_type_counts": Counter(),
+        "safe_error_code": None,
+        "safe_error_type": None,
+        "provider_error_phase": None,
+        "close_safe_error_code": None,
+        "close_safe_error_type": None,
+        "status": "failed",
+    }
+
+
+def run_direction(
+    name: str,
+    config: dict[str, Any],
+    frames: list[bytes],
+    api_key: str,
+    start_barrier: Barrier,
+) -> dict[str, Any]:
+    import websocket
+
+    metrics = direction_metrics(name, config, frames)
+    session_request = request(config)
+    url = (
+        f"{OPENAI_REALTIME_TRANSLATION_ENDPOINT}"
+        f"?model={OPENAI_REALTIME_TRANSLATION_MODEL}"
+    )
+    headers = [
+        f"Authorization: Bearer {api_key}",
+        f"OpenAI-Safety-Identifier: {OPENAI_SAFETY_IDENTIFIER}",
+    ]
+    ws = websocket.WebSocket()
+    try:
+        ws.connect(url, header=headers, timeout=CONNECT_TIMEOUT_SECONDS)
+        metrics["connected"] = True
+        drain_websocket(ws, metrics, time.monotonic() + 1, None, "connect")
+        ws.send(json.dumps(build_session_update_event(session_request)))
+        drain_websocket(
+            ws,
+            metrics,
+            time.monotonic() + SESSION_UPDATE_WAIT_SECONDS,
+            None,
+            "session_update",
+        )
+        start_barrier.wait(timeout=CONNECT_TIMEOUT_SECONDS)
+        first_input_ns = time.perf_counter_ns()
+        for frame in frames:
+            ws.send(json.dumps(build_input_audio_append_event(frame)))
+            metrics["sent_frame_count"] += 1
+            metrics["sent_duration_ms"] = (
+                metrics["sent_frame_count"] * FRAME_DURATION_MS
+            )
+            drain_websocket(
+                ws,
+                metrics,
+                time.monotonic() + FRAME_DURATION_MS / 1000,
+                first_input_ns,
+                "send_audio",
+            )
+            if metrics["safe_error_code"] is not None:
+                break
+            time.sleep(FRAME_DURATION_MS / 1000)
+        deadline = time.monotonic() + OUTPUT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            drain_websocket(
+                ws,
+                metrics,
+                min(deadline, time.monotonic() + 0.25),
+                first_input_ns,
+                "post_send",
+            )
+            if (
+                metrics["output_audio_delta_count"] > 0
+                and metrics["last_output_audio_delta_ms"] is not None
+                and (time.perf_counter_ns() - first_input_ns) // 1_000_000
+                - metrics["last_output_audio_delta_ms"]
+                > 1_000
+            ):
+                break
+        try:
+            ws.send(json.dumps(build_session_close_event()))
+            drain_websocket(
+                ws,
+                metrics,
+                time.monotonic() + SESSION_CLOSE_WAIT_SECONDS,
+                first_input_ns,
+                "close",
+            )
+        except Exception:
+            if metrics["safe_error_code"] is None:
+                metrics["safe_error_code"] = "websocket_close_failed"
+    except Exception:
+        if metrics["safe_error_code"] is None:
+            metrics["safe_error_code"] = "websocket_failed"
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+    if metrics["output_audio_delta_count"] > 0 and metrics["safe_error_code"] is None:
+        metrics["status"] = "passed"
+    if metrics["output_audio_delta_count"] == 0 and metrics["safe_error_code"] is None:
+        metrics["safe_error_code"] = "no_output_audio_delta"
+    metrics["event_type_counts"] = dict(sorted(metrics["event_type_counts"].items()))
+    return metrics
+
+
+def blocked_comparison(status: str, safe_error_code: str) -> dict[str, Any]:
+    return {
+        "status": status,
+        "attempted_at": utc_now(),
+        "provider_id": "openai",
+        "model": OPENAI_REALTIME_TRANSLATION_MODEL,
+        "sample_count_per_direction": 0,
+        "simultaneous": False,
+        "directions": {},
+        "stored_audio": False,
+        "stored_transcript_or_translation": False,
+        "debug_text_enabled": False,
+        "plaintext_credential_persisted": False,
+        "safe_error_code": safe_error_code,
+    }
+
+
+def build_comparison(api_key: str) -> dict[str, Any]:
+    if not api_key:
+        return blocked_comparison("blocked_missing_credential", "provider_auth_failed")
+    try:
+        tts = build_tts()
+        frames = {
+            name: synthesize_frames(tts, config)
+            for name, config in DIRECTION_CONFIGS.items()
+        }
+    except (ManifestError, TtsUnavailable, TtsUnsupported):
+        return blocked_comparison(
+            "blocked_synthetic_speech_unavailable",
+            "synthetic_speech_fixture_unavailable",
+        )
+
+    start_barrier = Barrier(len(DIRECTION_CONFIGS))
+    results: dict[str, dict[str, Any]] = {}
+    threads = [
+        Thread(
+            target=lambda direction_name=name, direction_config=config: results.__setitem__(
+                direction_name,
+                run_direction(
+                    direction_name,
+                    direction_config,
+                    frames[direction_name],
+                    api_key,
+                    start_barrier,
+                ),
+            ),
+            daemon=True,
+        )
+        for name, config in DIRECTION_CONFIGS.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(CONNECT_TIMEOUT_SECONDS + OUTPUT_WAIT_SECONDS + 20)
+
+    for name, config in DIRECTION_CONFIGS.items():
+        if name not in results:
+            results[name] = direction_metrics(name, config, frames[name])
+            results[name]["safe_error_code"] = "direction_timeout"
+
+    passed = sum(1 for result in results.values() if result["status"] == "passed")
+    status = "passed" if passed == len(DIRECTION_CONFIGS) else "partial" if passed else "failed"
+    return {
+        "status": status,
+        "attempted_at": utc_now(),
+        "provider_id": "openai",
+        "model": OPENAI_REALTIME_TRANSLATION_MODEL,
+        "sample_count_per_direction": 1,
+        "simultaneous": True,
+        "input_fixture": {
+            "kind": "local_piper_synthetic_speech",
+            "sample_rate_hz": SAMPLE_RATE_HZ,
+            "channels": 1,
+            "sample_format": "s16le",
+            "stored_audio": False,
+            "stored_transcript_or_translation": False,
+        },
+        "directions": dict(sorted(results.items())),
+        "stored_audio": False,
+        "stored_transcript_or_translation": False,
+        "debug_text_enabled": False,
+        "plaintext_credential_persisted": False,
+        "safe_error_code": None if status == "passed" else "direction_failed",
+    }
+
+
+def apply_comparison(report: dict[str, Any], comparison: dict[str, Any]) -> dict[str, Any]:
+    report["generated_at"] = utc_now()
+    report["task11_completed"] = False
+    report["does_not_satisfy_task11_live_comparison"] = True
+    report["synthetic_speech_comparison"] = comparison
+    if comparison["status"] == "passed":
+        report["live_openai_comparison"] = {
+            "status": "passed_synthetic_speech_comparison",
+            "blocker": "credentialed real-app OpenAI route smoke is pending",
+        }
+        report["real_app_openai_smoke"] = {
+            "status": "pending_after_synthetic_speech_comparison",
+            "blocker": "credentialed real-app OpenAI route smoke is pending",
+        }
+        first_outputs = [
+            direction["first_output_audio_delta_ms"]
+            for direction in comparison["directions"].values()
+            if direction.get("first_output_audio_delta_ms") is not None
+        ]
+        report["combined_latency_gate"] = {
+            "status": "pending_real_app_openai_smoke",
+            "local_provider_latency_classification": report["combined_latency_gate"][
+                "local_provider_latency_classification"
+            ],
+            "at_least_one_provider_meets_usable_release_gate": None,
+            "openai_synthetic_first_output_audio_delta_ms_max": (
+                max(first_outputs) if first_outputs else None
+            ),
+            "synthetic_single_sample_not_release_gate": True,
+        }
+    else:
+        report["live_openai_comparison"] = {
+            "status": "pending_synthetic_speech_comparison",
+            "blocker": "synthetic speech comparison did not pass",
+        }
+    return report
+
+
+def main() -> int:
+    report = read_report()
+    comparison = build_comparison(os.environ.get("OPENAI_API_KEY", "").strip())
+    report = apply_comparison(report, comparison)
+    write_report(report)
+    print(
+        json.dumps(
+            {
+                "report": str(REPORT_PATH.relative_to(ROOT)),
+                "synthetic_speech_comparison_status": comparison["status"],
+                "directions": {
+                    name: {
+                        "status": result["status"],
+                        "output_audio_delta_count": result["output_audio_delta_count"],
+                        "first_output_audio_delta_ms": result[
+                            "first_output_audio_delta_ms"
+                        ],
+                        "safe_error_code": result["safe_error_code"],
+                    }
+                    for name, result in comparison.get("directions", {}).items()
+                },
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if comparison["status"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,102 @@
+{
+  "schema_version": "translator.task9-validation.v1",
+  "evidence_written_at": "2026-07-29T17:30:09+08:00",
+  "task": "Task 9: User-Level systemd And Desktop Run Mode",
+  "desktop_run_mode": {
+    "systemd_unit": "systemd/translator.service",
+    "lifecycle_script": "scripts/translator-desktop",
+    "smoke_script": "scripts/translator-task9-smoke",
+    "autostart_entry": "translator-ui.desktop generated under ${XDG_CONFIG_HOME:-$HOME/.config}/autostart",
+    "installed_user_unit": "/home/anton/.config/systemd/user/translator.service",
+    "installed_autostart_entry": "/home/anton/.config/autostart/translator-ui.desktop",
+    "installed_daemon_binary": "/home/anton/.local/bin/translator-daemon",
+    "installed_ui_binary": "/home/anton/.local/bin/translator-ui",
+    "daemon_lifecycle_owner": "systemd --user",
+    "tauri_lifecycle_owner": "control surface only"
+  },
+  "task7_debt_carried": {
+    "task7_complete": false,
+    "local_provider_latency_classification": "fails_usable_limit",
+    "requires_mvp_b_provider_comparison": true,
+    "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
+    "blocked_acceptance_item": "Graph-boundary latency target is not met: physical_mic_onset_to_returned_ru_first_audible_ms=5968 exceeds the 1000 ms target."
+  },
+  "validation": {
+    "focused_static_contract": {
+      "command": "python3 -m unittest tests/test_task9_desktop_run_mode.py",
+      "result": "passed",
+      "tests": 7
+    },
+    "route_crash_recovery": {
+      "command": "cargo test -p translator-audio --test routing_watcher fresh_watcher_reconcile_restores_crash_left_stream_to_original_sink",
+      "result": "passed"
+    },
+    "routing_watcher_suite": {
+      "command": "cargo test -p translator-audio --test routing_watcher",
+      "result": "passed",
+      "tests": 35
+    },
+    "rust_workspace": {
+      "command": "cargo test --workspace",
+      "result": "passed"
+    },
+    "tauri_unit_build": {
+      "command": "bun test src/*.test.ts && bun run build",
+      "cwd": "apps/translator-ui",
+      "result": "passed",
+      "tests": 9
+    },
+    "systemd_verify": {
+      "command": "systemd-analyze verify --user systemd/translator.service",
+      "result": "passed"
+    },
+    "systemd_user_smoke": {
+      "command": "scripts/translator-desktop install && scripts/translator-task9-smoke",
+      "result": "passed",
+      "final_unit_state": "enabled inactive dead",
+      "forced_kill_restart": "passed",
+      "token_rotation": "passed for start, forced-kill restart and explicit restart",
+      "post_kill_graph_recovery": "graph_available=true after systemd Restart=on-failure",
+      "runtime_journal_preservation": "RuntimeDirectoryPreserve=restart"
+    },
+    "audio_cleanup_smoke": {
+      "commands": [
+        "pactl list short sinks | rg 'translator_|Translator_' || true",
+        "pactl list short sources | rg 'translator_|Translator_' || true",
+        "pgrep -a -f 'translator-daemon|task7_benchmark_runtime|translator_sidecar|translator-ui' || true"
+      ],
+      "result": "passed",
+      "residual_translator_pulse_endpoints": 0,
+      "residual_translator_processes": 0,
+      "enforced_by_smoke_script": true
+    },
+    "repo_c4_scan": {
+      "command": "python3 /home/anton/.agents/skills/repo-c4-scan/scripts/generate_repo_c4.py /home/anton/Source/translator && python3 /home/anton/.agents/skills/repo-c4-scan/scripts/validate_repo_c4.py /home/anton/Source/translator/repo-c4.json",
+      "result": "passed",
+      "containers": 7,
+      "components": 43,
+      "internal_edges": 170
+    }
+  },
+  "live_smoke_status": {
+    "started_in_this_report": true,
+    "service_status": "systemd user service started, restarted and stopped by scripts/translator-task9-smoke",
+    "tauri_reconnect": "covered by Rust token-reread tests, frontend daemon-restart model tests and installed XDG autostart entry; no interactive window smoke was required for this source slice"
+  },
+  "privacy": {
+    "cloud_provider_started": false,
+    "debug_text_enabled": false,
+    "debug_capture_enabled": false,
+    "speech_content_persisted": false
+  },
+  "residual_risks": [
+    {
+      "severity": "P2",
+      "item": "systemd/translator.service still points LD_LIBRARY_PATH at the current workstation CUDA compatibility locations, including the existing uncle-freud-bot virtualenv. This is intentional for the current workstation source slice and should move to a project-owned packaged runtime or operator-local EnvironmentFile before distributable packaging."
+    },
+    {
+      "severity": "open_task7_debt",
+      "item": "Task 7 remains incomplete because the local provider live round-trip classification is fails_usable_limit. Task 9 does not reclassify or close that latency debt."
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": "translator.task7-aec-validation.v1",
+  "recorded_at": "2026-07-29T06:45:29+08:00",
+  "physical_pair": {
+    "source": "alsa_input.usb-Jieli_Technology_UACDemoV1.0-00.mono-fallback",
+    "source_port": "analog-input-mic",
+    "source_geometry": "not_recorded",
+    "sink": "alsa_output.pci-0000_00_1f.3.analog-stereo",
+    "sink_port": "analog-output-speaker",
+    "sink_geometry": "not_recorded",
+    "sink_volume_percent": 40
+  },
+  "graph_lifecycle": {
+    "module": "module-echo-cancel",
+    "method": "webrtc",
+    "rate_hz": 48000,
+    "channels": 1,
+    "owned_endpoint_inspection_passed": true,
+    "cleanup_passed": true,
+    "residual_modules": 0,
+    "residual_sources": 0,
+    "residual_sinks": 0
+  },
+  "acoustic_acceptance": {
+    "status": "not_run",
+    "fixture_dbfs": -20,
+    "far_end_fixture_seconds": 30,
+    "far_end_only_observation_seconds": 60,
+    "median_erle_db": null,
+    "required_median_erle_db": 15,
+    "outgoing_vad_triggers": null,
+    "provider_requests": null,
+    "reason": "Controlled source and sink geometry was not available."
+  },
+  "capability": "unavailable",
+  "open_speaker_enabled": false,
+  "required_fallback": "headphones"
+}

@@ -1,0 +1,20 @@
+{
+  "after": {
+    "active": "inactive",
+    "enabled": "enabled",
+    "properties": {
+      "ActiveState": "inactive",
+      "LoadState": "loaded",
+      "MainPID": "0",
+      "SubState": "dead"
+    }
+  },
+  "cleanup_command": {
+    "ok": true,
+    "safe_error": null
+  },
+  "stop_command": {
+    "ok": true,
+    "safe_error": null
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "acceptance": {
+    "zoom_incoming_translation": {
+      "reason": "superseded_by_live_duplex_confirmation",
+      "status": "passed"
+    },
+    "zoom_outgoing_translation": {
+      "reason": "superseded_by_live_duplex_confirmation",
+      "status": "passed"
+    },
+    "zoom_route_selection": {
+      "reason": "superseded_by_live_duplex_confirmation",
+      "status": "passed"
+    }
+  },
+  "audio_state": {
+    "errors": {
+      "pw_links": null,
+      "sink_inputs": null,
+      "sinks": null,
+      "sources": null
+    },
+    "pactl_available": true
+  },
+  "blockers": [],
+  "does_not_satisfy_task12_acceptance": false,
+  "generated_at": "2026-07-30T12:47:54.002918+00:00",
+  "privacy": {
+    "external_provider_started": false,
+    "meeting_link_recorded": false,
+    "speech_payload_recorded": false
+  },
+  "schema_version": "translator.task12-zoom-diagnostic.v1",
+  "task": "Task 12: Post-MVP Zoom Acceptance",
+  "task10_debt_carried": {
+    "canonical_evidence": "docs/benchmarks/task10-validation-report.json",
+    "completed": true,
+    "live_second_endpoint_status": "passed_by_live_user_confirmation",
+    "mvp_a_gate_satisfied": true
+  },
+  "task11_debt_carried": {
+    "blocker": "OpenAI sidecar runtime is wired; credentialed real-app OpenAI route smoke is pending",
+    "canonical_evidence": "docs/benchmarks/task11-openai-adapter-preflight.json",
+    "daemon_openai_launch_allowed": true,
+    "grpc_provider_dispatches_openai_sessions": true,
+    "live_openai_comparison_status": "passed_synthetic_speech_comparison",
+    "openai_sidecar_runtime_status": "wired_with_deterministic_fake_websocket_contract",
+    "real_app_openai_smoke_status": "pending_after_synthetic_speech_comparison",
+    "task11_completed": false
+  },
+  "task12_completed": true,
+  "task7_debt_carried": {
+    "blocked_acceptance_item": "Graph-boundary latency target is not met: physical_mic_onset_to_returned_ru_first_audible_ms=5968 exceeds the 1000 ms target.",
+    "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
+    "local_provider_latency_classification": "fails_usable_limit",
+    "requires_mvp_b_provider_comparison": true,
+    "task7_complete": false
+  },
+  "zoom_desktop": {
+    "app_key": "zoom_desktop",
+    "binary_state": {
+      "processes": [
+        {
+          "binary": "zoom",
+          "path_present": true,
+          "running": true
+        },
+        {
+          "binary": "ZoomWebviewHost",
+          "path_present": false,
+          "running": true
+        }
+      ]
+    },
+    "route_discovery": {
+      "call_like_candidate_count": 0,
+      "candidate_count": 1,
+      "candidates": [
+        {
+          "application_name": "ZOOM VoiceEngine",
+          "call_like": false,
+          "current_sink_name": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+          "media_role": null,
+          "node_name": "ZOOM VoiceEngine",
+          "on_translator_remote_in": false,
+          "pipewire_linked_to_translator_remote_in": false,
+          "process_binary": "zoom",
+          "stream_id": 225791
+        }
+      ]
+    },
+    "virtual_microphone": {
+      "expected_description": "Translator_Virtual_Mic",
+      "remote_outgoing_translation_confirmed": true,
+      "source_present": true,
+      "zoom_selection_confirmed": true
+    }
+  },
+  "zoom_setup_notes": {
+    "microphone": "Select Translator_Virtual_Mic in Zoom audio settings",
+    "selection": "Use manual route selection when multiple allowlisted app streams are active",
+    "speaker": "Keep Zoom playback on the normal physical sink; translator routes only the selected sink-input"
+  }
+}

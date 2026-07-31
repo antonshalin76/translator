@@ -1,0 +1,391 @@
+syntax = "proto3";
+
+package translator.provider.v1;
+
+service ProviderTransport {
+  rpc Stream(stream ProviderRequest) returns (stream ProviderEvent);
+  rpc Probe(ProviderProbeRequest) returns (ProviderProbeResponse);
+}
+
+enum AudioDirection {
+  AUDIO_DIRECTION_UNSPECIFIED = 0;
+  AUDIO_DIRECTION_MICROPHONE = 1;
+  AUDIO_DIRECTION_SPEAKER = 2;
+}
+
+enum TranslationMode {
+  TRANSLATION_MODE_UNSPECIFIED = 0;
+  TRANSLATION_MODE_QUALITY_FIRST = 1;
+  TRANSLATION_MODE_BALANCED = 2;
+  TRANSLATION_MODE_STREAMING_FIRST = 3;
+}
+
+enum Language {
+  LANGUAGE_UNSPECIFIED = 0;
+  LANGUAGE_RU = 1;
+  LANGUAGE_EN = 2;
+}
+
+enum VoiceGender {
+  VOICE_GENDER_UNSPECIFIED = 0;
+  VOICE_GENDER_MALE = 1;
+  VOICE_GENDER_FEMALE = 2;
+}
+
+enum VoiceEngine {
+  VOICE_ENGINE_UNSPECIFIED = 0;
+  VOICE_ENGINE_PIPER = 1;
+  VOICE_ENGINE_SILERO = 2;
+  VOICE_ENGINE_OPENAI = 3;
+}
+
+enum SampleFormat {
+  SAMPLE_FORMAT_UNSPECIFIED = 0;
+  SAMPLE_FORMAT_S16LE = 1;
+}
+
+enum CloseRequestReason {
+  CLOSE_REQUEST_REASON_UNSPECIFIED = 0;
+  CLOSE_REQUEST_REASON_USER_STOP = 1;
+  CLOSE_REQUEST_REASON_ROUTE_REMOVED = 2;
+  CLOSE_REQUEST_REASON_DEVICE_UNAVAILABLE = 3;
+  CLOSE_REQUEST_REASON_PROVIDER_SWITCH = 4;
+  CLOSE_REQUEST_REASON_DAEMON_SHUTDOWN = 5;
+}
+
+enum SessionCloseReason {
+  SESSION_CLOSE_REASON_UNSPECIFIED = 0;
+  SESSION_CLOSE_REASON_USER_STOP = 1;
+  SESSION_CLOSE_REASON_ROUTE_REMOVED = 2;
+  SESSION_CLOSE_REASON_DEVICE_UNAVAILABLE = 3;
+  SESSION_CLOSE_REASON_PROVIDER_SWITCH = 4;
+  SESSION_CLOSE_REASON_DAEMON_SHUTDOWN = 5;
+  SESSION_CLOSE_REASON_PROVIDER_FAILURE = 6;
+  SESSION_CLOSE_REASON_CLOSE_TIMEOUT = 7;
+}
+
+enum CancelReason {
+  CANCEL_REASON_UNSPECIFIED = 0;
+  CANCEL_REASON_LATENCY_POLICY = 1;
+  CANCEL_REASON_ROUTE_REMOVED = 2;
+  CANCEL_REASON_USER_INTERRUPT = 3;
+  CANCEL_REASON_QUEUE_OVERFLOW = 4;
+}
+
+enum UtteranceOutcome {
+  UTTERANCE_OUTCOME_UNSPECIFIED = 0;
+  UTTERANCE_OUTCOME_COMPLETED = 1;
+  UTTERANCE_OUTCOME_CANCELLED = 2;
+  UTTERANCE_OUTCOME_DROPPED = 3;
+}
+
+enum ProviderId {
+  PROVIDER_ID_UNSPECIFIED = 0;
+  PROVIDER_ID_LOCAL = 1;
+  PROVIDER_ID_OPENAI = 2;
+}
+
+enum ProviderState {
+  PROVIDER_STATE_UNSPECIFIED = 0;
+  PROVIDER_STATE_STARTING = 1;
+  PROVIDER_STATE_READY = 2;
+  PROVIDER_STATE_DEGRADED = 3;
+  PROVIDER_STATE_BACKPRESSURE = 4;
+  PROVIDER_STATE_RESTARTING = 5;
+  PROVIDER_STATE_UNAVAILABLE = 6;
+  PROVIDER_STATE_CLOSED = 7;
+}
+
+enum ModelKind {
+  MODEL_KIND_UNSPECIFIED = 0;
+  MODEL_KIND_ASR = 1;
+  MODEL_KIND_MT = 2;
+  MODEL_KIND_TTS = 3;
+  MODEL_KIND_SPEECH_TO_SPEECH = 4;
+}
+
+enum ModelState {
+  MODEL_STATE_UNSPECIFIED = 0;
+  MODEL_STATE_NOT_LOADED = 1;
+  MODEL_STATE_LOADING = 2;
+  MODEL_STATE_READY = 3;
+  MODEL_STATE_FAILED = 4;
+}
+
+enum ComputeDevice {
+  COMPUTE_DEVICE_UNSPECIFIED = 0;
+  COMPUTE_DEVICE_CUDA = 1;
+  COMPUTE_DEVICE_CPU = 2;
+  COMPUTE_DEVICE_CLOUD = 3;
+}
+
+enum SafeErrorCode {
+  SAFE_ERROR_CODE_UNSPECIFIED = 0;
+  SAFE_ERROR_CODE_PROVIDER_UNAVAILABLE = 1;
+  SAFE_ERROR_CODE_MODEL_NOT_LOADED = 2;
+  SAFE_ERROR_CODE_UNSUPPORTED_LANGUAGE_PAIR = 3;
+  SAFE_ERROR_CODE_QUEUE_OVERFLOW = 4;
+  SAFE_ERROR_CODE_CANCELLED = 5;
+  SAFE_ERROR_CODE_CLOUD_NOT_ENABLED = 6;
+  SAFE_ERROR_CODE_PROVIDER_AUTH_FAILED = 7;
+  SAFE_ERROR_CODE_NO_SPEECH = 8;
+}
+
+message PcmFormat {
+  uint32 sample_rate_hz = 1;
+  uint32 channels = 2;
+  SampleFormat sample_format = 3;
+  uint32 frame_duration_ms = 4;
+}
+
+message VoiceProfile {
+  Language language = 1;
+  VoiceGender gender = 2;
+  VoiceEngine engine = 3;
+  optional string model_path = 4;
+  optional string provider_voice_id = 5;
+}
+
+message OpenProviderSession {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  Language source_language = 4;
+  Language target_language = 5;
+  TranslationMode mode = 6;
+  PcmFormat requested_input_format = 7;
+  PcmFormat requested_output_format = 8;
+  VoiceProfile voice_profile = 9;
+  bool debug_text_enabled = 10;
+  ProviderId provider_id = 11;
+}
+
+message ProviderCapabilities {
+  bool audio_output = 1;
+  bool transcript_delta = 2;
+  bool translation_delta = 3;
+  bool cancellation = 4;
+  bool cloud_egress = 5;
+}
+
+message ProviderSessionOpened {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  PcmFormat negotiated_input_format = 4;
+  PcmFormat negotiated_output_format = 5;
+  ProviderCapabilities capabilities = 6;
+  uint64 event_sequence = 7;
+}
+
+message ProviderProbeRequest {
+  string schema_version = 1;
+}
+
+message ProviderProbeResponse {
+  string schema_version = 1;
+  string generation_id = 2;
+  bool provider_ready = 3;
+}
+
+message CloseProviderSession {
+  string schema_version = 1;
+  string session_id = 2;
+  CloseRequestReason reason = 3;
+}
+
+message CancelUtterance {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  string utterance_id = 4;
+  CancelReason reason = 5;
+}
+
+message UpdateDebugText {
+  string schema_version = 1;
+  string session_id = 2;
+  bool enabled = 3;
+}
+
+message ProviderInputFrame {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  string stream_id = 4;
+  string utterance_id = 5;
+  uint64 sequence = 6;
+  uint64 capture_monotonic_ns = 7;
+  uint32 sample_rate_hz = 8;
+  uint32 channels = 9;
+  SampleFormat sample_format = 10;
+  uint32 frame_duration_ms = 11;
+  Language source_language = 12;
+  Language target_language = 13;
+  TranslationMode mode = 14;
+  bytes pcm = 15;
+  bool end_of_utterance = 16;
+}
+
+message ProviderAudioDelta {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  string stream_id = 4;
+  string utterance_id = 5;
+  uint64 sequence = 6;
+  uint64 event_sequence = 7;
+  uint64 provider_monotonic_ns = 8;
+  uint32 sample_rate_hz = 9;
+  uint32 channels = 10;
+  SampleFormat sample_format = 11;
+  uint32 frame_duration_ms = 12;
+  bytes pcm = 13;
+}
+
+message ProviderTranscriptDelta {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  string stream_id = 4;
+  string utterance_id = 5;
+  uint64 event_sequence = 6;
+  string text = 7;
+  bool is_final = 8;
+}
+
+message ProviderTranslationDelta {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  string stream_id = 4;
+  string utterance_id = 5;
+  uint64 event_sequence = 6;
+  string text = 7;
+  bool stable_prefix = 8;
+  bool is_final = 9;
+}
+
+message ProviderUtteranceFinal {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  string stream_id = 4;
+  string utterance_id = 5;
+  uint64 event_sequence = 6;
+  optional uint64 final_audio_sequence = 7;
+  UtteranceOutcome outcome = 8;
+}
+
+message ProviderSessionClosed {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  uint64 event_sequence = 4;
+  SessionCloseReason reason = 5;
+}
+
+message ModelHealth {
+  ModelKind kind = 1;
+  string id = 2;
+  ModelState state = 3;
+  optional ComputeDevice device = 4;
+  optional string safe_error_code = 5;
+}
+
+message ProviderQueues {
+  uint32 provider_input_buffered_ms = 1;
+  uint32 provider_output_buffered_ms = 2;
+  uint32 queue_lag_ms = 3;
+}
+
+message ProviderRetry {
+  uint32 attempt = 1;
+  uint32 next_retry_after_ms = 2;
+  string reason_code = 3;
+}
+
+message SafeErrorSummary {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message ProviderHealth {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  uint64 event_sequence = 4;
+  ProviderId provider_id = 5;
+  string provider_name = 6;
+  ProviderState state = 7;
+  repeated ModelHealth models = 8;
+  ProviderQueues queues = 9;
+  optional ProviderRetry retry = 10;
+  optional SafeErrorSummary safe_error = 11;
+}
+
+message ProviderLatency {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  string stream_id = 4;
+  uint64 event_sequence = 5;
+  optional string utterance_id = 6;
+  optional uint32 asr_first_text_ms = 7;
+  optional uint32 asr_final_text_ms = 8;
+  optional uint32 mt_first_text_ms = 9;
+  optional uint32 tts_first_audio_ms = 10;
+  optional uint32 provider_total_ms = 11;
+}
+
+message ProviderError {
+  string schema_version = 1;
+  string session_id = 2;
+  AudioDirection direction_id = 3;
+  optional string stream_id = 4;
+  uint64 event_sequence = 5;
+  SafeErrorCode code = 6;
+  bool retryable = 7;
+  string safe_message = 8;
+  optional string utterance_id = 9;
+}
+
+message LatencyPolicyState {
+  AudioDirection direction_id = 1;
+  TranslationMode current_mode = 2;
+  uint32 rolling_window_seconds = 3;
+  uint32 minimum_samples = 4;
+  uint32 degrade_after_consecutive_windows = 5;
+  uint32 recover_after_consecutive_windows = 6;
+  uint32 cooldown_seconds_after_change = 7;
+  uint32 p95_first_audio_ms = 8;
+  uint32 p95_last_audio_ms = 9;
+  uint32 p95_queue_lag_ms = 10;
+  optional string last_mode_change_at = 11;
+  optional string reason = 12;
+}
+
+message ProviderRequest {
+  oneof request {
+    OpenProviderSession open_session = 1;
+    ProviderInputFrame input_frame = 2;
+    CancelUtterance cancel_utterance = 3;
+    CloseProviderSession close_session = 4;
+    UpdateDebugText update_debug_text = 5;
+  }
+}
+
+message ProviderEvent {
+  oneof event {
+    ProviderSessionOpened session_opened = 1;
+    ProviderAudioDelta audio_delta = 2;
+    ProviderTranscriptDelta transcript_delta = 3;
+    ProviderTranslationDelta translation_delta = 4;
+    ProviderUtteranceFinal utterance_final = 5;
+    ProviderSessionClosed session_closed = 6;
+    ProviderHealth health = 7;
+    ProviderLatency latency = 8;
+    ProviderError error = 9;
+  }
+}

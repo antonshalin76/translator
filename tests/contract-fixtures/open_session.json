@@ -1,0 +1,28 @@
+{
+  "schema_version": "translator.provider.open_session.v1",
+  "session_id": "8ec8cb30-6881-4896-b413-7649b58cdfb2",
+  "provider_id": "local",
+  "direction_id": "microphone",
+  "source_language": "ru",
+  "target_language": "en",
+  "mode": "streaming_first",
+  "requested_input_format": {
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "sample_format": "s16le",
+    "frame_duration_ms": 40
+  },
+  "requested_output_format": {
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "sample_format": "s16le",
+    "frame_duration_ms": 40
+  },
+  "voice_profile": {
+    "language": "en",
+    "gender": "male",
+    "engine": "piper",
+    "model_path": "models/en_US-lessac-medium.onnx"
+  },
+  "debug_text_enabled": false
+}

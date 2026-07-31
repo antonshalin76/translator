@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import datetime as dt
+import json
+import sys
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SIDECAR = ROOT / "sidecar"
+if str(SIDECAR) not in sys.path:
+    sys.path.insert(0, str(SIDECAR))
+
+from translator_sidecar.openai_provider import (  # noqa: E402
+    OpenAIRealtimeAdapter,
+    OpenAIRealtimeConfig,
+    build_input_audio_append_event,
+    build_session_close_event,
+    build_session_update_event,
+)
+from translator_sidecar.provider_contract import (  # noqa: E402
+    AudioDirection,
+    Language,
+    OpenProviderSession,
+    PcmFormat,
+    ProviderId,
+    SampleFormat,
+    TranslationMode,
+    VoiceEngine,
+    VoiceGender,
+    VoiceProfile,
+)
+
+
+DEFAULT_REPORT = ROOT / "docs/benchmarks/task11-openai-adapter-preflight.json"
+SCHEMA_VERSION = "translator.task11-openai-adapter-preflight.v1"
+SYNTHETIC_COMPARISON_STATUSES = {
+    "pending_after_websocket_smoke",
+    "passed",
+    "partial",
+    "failed",
+    "blocked_synthetic_speech_unavailable",
+    "blocked_missing_credential",
+}
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def read_json(path: str) -> dict[str, Any]:
+    return json.loads((ROOT / path).read_text())
+
+
+def read_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def request(direction: AudioDirection) -> OpenProviderSession:
+    source, target = (
+        (Language.RU, Language.EN)
+        if direction is AudioDirection.MICROPHONE
+        else (Language.EN, Language.RU)
+    )
+    return OpenProviderSession(
+        session_id=uuid4(),
+        provider_id=ProviderId.OPENAI,
+        direction_id=direction,
+        source_language=source,
+        target_language=target,
+        mode=TranslationMode.STREAMING_FIRST,
+        requested_input_format=PcmFormat(
+            sample_rate_hz=16_000,
+            channels=1,
+            sample_format=SampleFormat.S16LE,
+            frame_duration_ms=20,
+        ),
+        requested_output_format=PcmFormat(
+            sample_rate_hz=16_000,
+            channels=1,
+            sample_format=SampleFormat.S16LE,
+            frame_duration_ms=20,
+        ),
+        voice_profile=VoiceProfile(
+            language=target,
+            gender=VoiceGender.MALE,
+            engine=VoiceEngine.OPENAI,
+        ),
+        debug_text_enabled=False,
+    )
+
+
+def safe_case(name: str, result) -> dict[str, Any]:
+    payload = result.safe_report()
+    payload["case"] = name
+    return payload
+
+
+def default_synthetic_speech_comparison(websocket_passed: bool) -> dict[str, Any]:
+    return {
+        "status": "pending_after_websocket_smoke",
+        "provider_id": "openai",
+        "model": "gpt-realtime-translate",
+        "blocker": (
+            "credential and realtime websocket smoke passed; synthetic speech comparison is pending"
+            if websocket_passed
+            else "realtime websocket smoke must pass before synthetic speech comparison"
+        ),
+        "sample_count_per_direction": 0,
+        "simultaneous": False,
+        "directions": {},
+        "stored_audio": False,
+        "stored_transcript_or_translation": False,
+        "debug_text_enabled": False,
+        "plaintext_credential_persisted": False,
+        "safe_error_code": None,
+    }
+
+
+def preserved_synthetic_speech_comparison(
+    previous_report: dict[str, Any] | None,
+    websocket_passed: bool,
+) -> dict[str, Any]:
+    synthetic = default_synthetic_speech_comparison(websocket_passed)
+    if not previous_report:
+        return synthetic
+    previous = previous_report.get("synthetic_speech_comparison")
+    if not isinstance(previous, dict):
+        return synthetic
+    if (
+        previous.get("provider_id") == "openai"
+        and previous.get("model") == "gpt-realtime-translate"
+        and previous.get("status") in SYNTHETIC_COMPARISON_STATUSES
+        and previous.get("stored_audio") is False
+        and previous.get("stored_transcript_or_translation") is False
+        and previous.get("debug_text_enabled") is False
+        and previous.get("plaintext_credential_persisted") is False
+    ):
+        return previous
+    return synthetic
+
+
+def build_report() -> dict[str, Any]:
+    task7 = read_json("docs/benchmarks/task7-live-human-round-trip.json")
+    task10 = read_json("docs/benchmarks/task10-validation-report.json")
+    previous_report = read_optional_json(DEFAULT_REPORT)
+    session = request(AudioDirection.MICROPHONE)
+
+    cloud_opt_in_required = OpenAIRealtimeAdapter(
+        OpenAIRealtimeConfig(cloud_opt_in=False),
+        environ={"OPENAI_API_KEY": "credential-present"},
+    ).preflight_open_session(session)
+    missing_credentials_safe_error = OpenAIRealtimeAdapter(
+        OpenAIRealtimeConfig(cloud_opt_in=True),
+        environ={},
+    ).preflight_open_session(session)
+    audio_leaves_machine_visible_before_session = OpenAIRealtimeAdapter(
+        OpenAIRealtimeConfig(cloud_opt_in=True),
+        environ={"OPENAI_API_KEY": "credential-present"},
+    ).preflight_open_session(session)
+
+    event_shapes = (
+        build_session_update_event(session)["type"],
+        build_input_audio_append_event(b"")["type"],
+        build_session_close_event()["type"],
+    )
+    preflight_cases = [
+        safe_case("cloud_opt_in_required", cloud_opt_in_required),
+        safe_case(
+            "missing_credentials_safe_error",
+            missing_credentials_safe_error,
+        ),
+        safe_case(
+            "audio_leaves_machine_visible_before_session",
+            audio_leaves_machine_visible_before_session,
+        ),
+    ]
+    preflight_contract_passed = (
+        preflight_cases[0]["safe_error_code"] == "cloud_not_enabled"
+        and preflight_cases[0]["network_session_started"] is False
+        and preflight_cases[1]["safe_error_code"] == "provider_auth_failed"
+        and preflight_cases[1]["network_session_started"] is False
+        and preflight_cases[2]["can_start"] is True
+        and preflight_cases[2]["audio_leaves_machine"] is True
+        and preflight_cases[2]["network_session_started"] is False
+    )
+    credential_model_probe = {
+        "status": "pending",
+        "model": "gpt-realtime-translate",
+        "plaintext_credential_persisted": False,
+        "safe_error_code": None,
+    }
+    realtime_websocket_smoke = {
+        "status": "pending",
+        "audio_input": "not_started",
+        "stored_audio": False,
+        "stored_transcript_or_translation": False,
+        "safe_error_code": None,
+    }
+    if previous_report:
+        previous_credential_probe = previous_report.get("credential_model_probe")
+        if previous_credential_probe and previous_credential_probe.get("status") == "passed":
+            credential_model_probe = previous_credential_probe
+        previous_websocket_smoke = previous_report.get("realtime_websocket_smoke")
+        if previous_websocket_smoke and previous_websocket_smoke.get("status") == "passed":
+            realtime_websocket_smoke = previous_websocket_smoke
+    websocket_passed = realtime_websocket_smoke["status"] == "passed"
+    synthetic_speech_comparison = preserved_synthetic_speech_comparison(
+        previous_report,
+        websocket_passed,
+    )
+    synthetic_passed = synthetic_speech_comparison["status"] == "passed"
+    live_openai_comparison = {
+        "status": (
+            "passed_synthetic_speech_comparison"
+            if synthetic_passed
+            else "pending_synthetic_speech_comparison"
+            if websocket_passed
+            else "pending"
+        ),
+        "blocker": (
+            "OpenAI sidecar runtime is wired; credentialed real-app OpenAI route smoke is pending"
+            if synthetic_passed
+            else (
+            "credential and realtime websocket smoke passed; synthetic speech latency comparison is pending"
+            if websocket_passed
+            else "credentialed OpenAI run is pending"
+            )
+        ),
+    }
+    real_app_openai_smoke = {
+        "status": (
+            "pending_after_synthetic_speech_comparison"
+            if synthetic_passed
+            else "pending_after_websocket_smoke"
+            if websocket_passed
+            else "pending_after_mvp_a_gate"
+        ),
+        "blocker": (
+            "OpenAI sidecar runtime is wired; credentialed real-app OpenAI route smoke is pending"
+            if synthetic_passed
+            else (
+            "credentialed real-app OpenAI smoke is pending after websocket smoke"
+            if websocket_passed
+            else "credentialed real-app OpenAI smoke is pending"
+            )
+        ),
+    }
+    combined_latency_gate = {
+        "status": (
+            "pending_real_app_openai_smoke"
+            if synthetic_passed
+            else "pending_provider_comparison"
+        ),
+        "local_provider_latency_classification": task7["classification"],
+        "at_least_one_provider_meets_usable_release_gate": None,
+    }
+    if synthetic_passed:
+        directions = synthetic_speech_comparison.get("directions", {})
+        first_output_ms = [
+            direction["first_output_audio_delta_ms"]
+            for direction in directions.values()
+            if isinstance(direction, dict)
+            and isinstance(direction.get("first_output_audio_delta_ms"), int)
+        ]
+        combined_latency_gate.update(
+            {
+                "openai_synthetic_first_output_audio_delta_ms_max": (
+                    max(first_output_ms) if first_output_ms else None
+                ),
+                "synthetic_single_sample_not_release_gate": True,
+            }
+        )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "task": "Task 11: MVP-B OpenAI Realtime Translation Adapter",
+        "generated_at": utc_now(),
+        "preflight_contract_passed": preflight_contract_passed,
+        "task11_completed": False,
+        "does_not_satisfy_task11_live_comparison": True,
+        "preflight_cases": preflight_cases,
+        "event_shapes_checked": event_shapes,
+        "openai_docs_basis": {
+            "transport": "websocket_realtime_translations_24khz_pcm16",
+            "endpoint_family": "v1_realtime_translations",
+            "model": "gpt-realtime-translate",
+            "session_update_target_language": True,
+            "source_transcription_configured": False,
+            "source_transcript_events_auto": True,
+            "close_event": "session.close",
+        },
+        "live_openai_comparison": live_openai_comparison,
+        "credential_model_probe": credential_model_probe,
+        "realtime_websocket_smoke": realtime_websocket_smoke,
+        "synthetic_speech_comparison": synthetic_speech_comparison,
+        "openai_sidecar_runtime": {
+            "status": "wired_with_deterministic_fake_websocket_contract",
+            "daemon_openai_launch_allowed": True,
+            "grpc_provider_dispatches_openai_sessions": True,
+            "runtime_loads_credential_from_env_only": True,
+            "runtime_websocket_payloads_exclude_credential": True,
+            "runtime_debug_text_default_suppressed": True,
+            "daemon_provider_pcm_format": "16000hz_mono_s16le_20ms",
+            "openai_wire_pcm_format": "24000hz_mono_s16le",
+            "resamples_daemon_input_to_openai_wire": True,
+            "resamples_openai_output_to_daemon_contract": True,
+            "utterance_final_strategy": "idle_final_heuristic_pending_real_app_validation",
+        },
+        "real_app_openai_smoke": real_app_openai_smoke,
+        "combined_latency_gate": combined_latency_gate,
+        "task7_debt_carried": {
+            "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
+            "task7_complete": task7["acceptance"]["task7_complete"],
+            "local_provider_latency_classification": task7["classification"],
+            "requires_mvp_b_provider_comparison": task7["acceptance"][
+                "requires_mvp_b_provider_comparison"
+            ],
+            "blocked_acceptance_item": task7["acceptance"]["blocked_acceptance_item"],
+        },
+        "task10_debt_carried": {
+            "canonical_evidence": "docs/benchmarks/task10-validation-report.json",
+            "mvp_a_gate_satisfied": task10["mvp_a_gate_satisfied"],
+            "live_second_endpoint_status": task10["live_second_endpoint"]["status"],
+            "completed": task10["completed"],
+        },
+        "provider_session_contract": {
+            "open_provider_session_provider_id": "required",
+            "protobuf_field": "OpenProviderSession.provider_id",
+            "daemon_open_request_carries_provider_id": True,
+            "cloud_egress_bound_to_provider_identity": True,
+            "local_provider_rejects_openai_sessions": True,
+            "openai_adapter_rejects_local_sessions": True,
+            "sidecar_openai_runtime_accepts_openai_sessions": True,
+            "daemon_openai_runtime_launch_allowed": True,
+            "openai_runtime_resamples_16k_24k_without_audio_persistence": True,
+        },
+    }
+
+
+def main() -> int:
+    report = build_report()
+    DEFAULT_REPORT.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+    print(DEFAULT_REPORT.relative_to(ROOT))
+    return 0 if report["preflight_contract_passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

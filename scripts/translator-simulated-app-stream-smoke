@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import struct
+import subprocess
+import tempfile
+import time
+import wave
+from pathlib import Path
+from typing import Any, NamedTuple
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_REPORT = ROOT / "docs/benchmarks/task10-simulated-app-streams-report.json"
+TASK10_SCRIPT = ROOT / "scripts/translator-task10-real-app-smoke"
+REPORT_KIND = "simulated_app_streams"
+
+
+class Case(NamedTuple):
+    app_key: str
+    display_name: str
+    task_scope: str
+    stream_kind: str
+    application_name: str
+    process_binary: str
+    media_name: str
+    counts_toward_task10_mvp_a: bool
+
+
+CASES = (
+    Case(
+        app_key="telegram_desktop",
+        display_name="Telegram Desktop",
+        task_scope="task10_synthetic_diagnostic",
+        stream_kind="pulse_property_stream",
+        application_name="Telegram Desktop",
+        process_binary="telegram-desktop",
+        media_name="Telegram Call Synthetic Silence",
+        counts_toward_task10_mvp_a=True,
+    ),
+    Case(
+        app_key="google_meet_browser",
+        display_name="Google Meet via isolated browser audio",
+        task_scope="task10_synthetic_diagnostic",
+        stream_kind="browser_web_audio",
+        application_name="Google Chrome",
+        process_binary="google-chrome",
+        media_name="Meet Browser Synthetic Silence",
+        counts_toward_task10_mvp_a=True,
+    ),
+    Case(
+        app_key="zoom_desktop",
+        display_name="Zoom Desktop",
+        task_scope="task12_diagnostic",
+        stream_kind="pulse_property_stream",
+        application_name="Zoom",
+        process_binary="zoom",
+        media_name="Zoom Call Synthetic Silence",
+        counts_toward_task10_mvp_a=False,
+    ),
+)
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def load_task10_module() -> Any:
+    loader = importlib.machinery.SourceFileLoader("task10_real_app_smoke", str(TASK10_SCRIPT))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("task10_module_spec_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def command_json(args: list[str], timeout: float = 10.0) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return [], error.__class__.__name__
+    if completed.returncode != 0:
+        return [], "command_failed"
+    try:
+        payload = json.loads(completed.stdout.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return [], "json_parse_failed"
+    if not isinstance(payload, list):
+        return [], "unexpected_json_shape"
+    return [item for item in payload if isinstance(item, dict)], None
+
+
+def props(stream: dict[str, Any]) -> dict[str, str]:
+    raw = stream.get("properties")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+def sink_names() -> dict[int, str]:
+    sinks, _ = command_json(["pactl", "--format=json", "list", "sinks"])
+    return {
+        int(item["index"]): item.get("name", "")
+        for item in sinks
+        if "index" in item and isinstance(item.get("name"), str)
+    }
+
+
+def sink_inputs() -> list[dict[str, Any]]:
+    inputs, _ = command_json(["pactl", "--format=json", "list", "sink-inputs"])
+    return inputs
+
+
+def write_silence(path: Path, seconds: float) -> None:
+    sample_rate = 48_000
+    frames = max(1, int(sample_rate * seconds))
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        silence_frame = struct.pack("<h", 0)
+        chunk = silence_frame * min(frames, sample_rate)
+        remaining = frames
+        while remaining > 0:
+            count = min(remaining, sample_rate)
+            output.writeframes(chunk[: count * 2])
+            remaining -= count
+
+
+def process_snapshot() -> list[dict[str, Any]]:
+    names = ("telegram-desktop", "firefox", "google-chrome", "zoom", "ZoomWebviewHost")
+    snapshot: list[dict[str, Any]] = []
+    for name in names:
+        result = subprocess.run(
+            ["pgrep", "-x", name],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+        pids = [
+            value
+            for value in result.stdout.decode("utf-8", errors="replace").splitlines()
+            if value.strip().isdigit()
+        ]
+        snapshot.append({"binary": name, "running": bool(pids), "pid_count": len(pids)})
+    return snapshot
+
+
+def find_stream_by_marker(
+    marker: str,
+    baseline_ids: set[int],
+    process_binaries: set[str],
+    timeout_seconds: float,
+) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        names = sink_names()
+        for stream in sink_inputs():
+            stream_id = int(stream.get("index", 0) or 0)
+            properties = props(stream)
+            haystack = " ".join(
+                [
+                    properties.get("application.name", ""),
+                    properties.get("media.name", ""),
+                    properties.get("stream.description", ""),
+                    properties.get("node.name", ""),
+                ]
+            )
+            binary = properties.get("application.process.binary", "")
+            if marker in haystack or (
+                stream_id not in baseline_ids and binary in process_binaries
+            ):
+                sink_index = int(stream.get("sink", 0) or 0)
+                return {
+                    "stream_id": stream_id,
+                    "sink_id": sink_index,
+                    "sink_name": names.get(sink_index, ""),
+                    "application_name": properties.get("application.name", ""),
+                    "process_binary": binary,
+                    "media_role": properties.get("media.role"),
+                    "media_name": properties.get("media.name"),
+                }
+        time.sleep(0.2)
+    return None
+
+
+def terminate_owned(process: subprocess.Popen[Any] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def default_playback_sink() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["pactl", "get-default-sink"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    candidate = completed.stdout.decode("utf-8", errors="replace").strip()
+    if candidate and not candidate.startswith("translator_"):
+        return candidate
+    for sink_name in sink_names().values():
+        if sink_name and not sink_name.startswith("translator_"):
+            return sink_name
+    return None
+
+
+def start_pulse_property_stream(
+    case: Case,
+    wav_path: Path,
+    playback_sink: str | None,
+) -> subprocess.Popen[Any]:
+    command = [
+        "paplay",
+        "--volume=1",
+        f"--client-name={case.application_name}",
+        f"--stream-name={case.media_name}",
+        f"--property=application.name={case.application_name}",
+        f"--property=application.process.binary={case.process_binary}",
+        "--property=media.role=communication",
+        f"--property=media.name={case.media_name}",
+    ]
+    if playback_sink:
+        command.append(f"--device={playback_sink}")
+    command.append(str(wav_path))
+    return subprocess.Popen(
+        command,
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def browser_binary() -> str | None:
+    for name in ("google-chrome", "chromium", "chromium-browser", "firefox"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def start_browser_stream(case: Case, temp_dir: Path) -> tuple[subprocess.Popen[Any] | None, str | None]:
+    binary = browser_binary()
+    if binary is None:
+        return None, "browser_binary_unavailable"
+    html = temp_dir / "task10-meet-browser-audio.html"
+    html.write_text(
+        """
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Task10 Meet Synthetic Audio</title></head>
+  <body>
+    <script>
+      const context = new AudioContext();
+      const oscillator = new OscillatorNode(context, { frequency: 440 });
+      const gain = new GainNode(context, { gain: 0.001 });
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start();
+      setTimeout(() => oscillator.stop(), 15000);
+    </script>
+  </body>
+</html>
+""".strip()
+        + "\n"
+    )
+    profile = temp_dir / "browser-profile"
+    command = [
+        binary,
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--autoplay-policy=no-user-gesture-required",
+        "--disable-background-timer-throttling",
+        f"--app={html.as_uri()}",
+    ]
+    return (
+        subprocess.Popen(
+            command,
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        ),
+        None,
+    )
+
+
+def direct_manual_route(task10: Any, stream_id: int) -> dict[str, Any]:
+    response = task10.daemon_request(
+        "/v1/routes/manual-override",
+        method="POST",
+        payload={"stream_id": stream_id},
+    )
+    snapshot = response.get("json") if isinstance(response.get("json"), dict) else {}
+    routes = snapshot.get("routes") if isinstance(snapshot.get("routes"), dict) else {}
+    active = routes.get("active_route") if isinstance(routes.get("active_route"), dict) else {}
+    route_bound = (
+        response["ok"]
+        and active.get("stream_id") == stream_id
+        and active.get("target_sink_name") == "translator_remote_in"
+    )
+    return {
+        "attempted": True,
+        "status": "passed" if route_bound else "blocked" if response["ok"] else "failed",
+        "stream_id": stream_id,
+        "http_status": response.get("status"),
+        "route_resolution": routes.get("resolution"),
+        "safe_error": None
+        if route_bound
+        else response.get("safe_error") or "manual_route_response_not_bound_to_stream",
+    }
+
+
+def run_case(
+    case: Case,
+    task10: Any,
+    wav_path: Path,
+    temp_dir: Path,
+    settle_seconds: float,
+    playback_sink: str | None,
+) -> tuple[dict[str, Any], subprocess.Popen[Any] | None]:
+    baseline_ids = {int(stream.get("index", 0) or 0) for stream in sink_inputs()}
+    process: subprocess.Popen[Any] | None = None
+    start_error: str | None = None
+    if case.stream_kind == "browser_web_audio":
+        process, start_error = start_browser_stream(case, temp_dir)
+        marker = "Task10 Meet Synthetic Audio"
+        binaries = {"google-chrome", "chrome", "chromium", "chromium-browser", "firefox"}
+    else:
+        process = start_pulse_property_stream(case, wav_path, playback_sink)
+        marker = case.media_name
+        binaries = {case.process_binary}
+    stream = (
+        None
+        if start_error
+        else find_stream_by_marker(marker, baseline_ids, binaries, settle_seconds)
+    )
+    route_attempt = {"attempted": False, "status": "blocked", "safe_error": "stream_not_found"}
+    after_route_stream = None
+    task10_candidate = None
+    if stream is not None:
+        stream_id = int(stream["stream_id"])
+        confirmed_meet_stream_id = stream_id if case.app_key == "google_meet_browser" else None
+        if case.app_key in {"telegram_desktop", "google_meet_browser"}:
+            before = task10.collect_audio_state(confirmed_meet_stream_id)
+            task10_candidate = next(
+                (
+                    candidate
+                    for candidate in before["task10_route_candidates"]
+                    if candidate["stream_id"] == stream_id
+                ),
+                None,
+            )
+            route_attempt = (
+                direct_manual_route(task10, stream_id)
+                if case.stream_kind == "browser_web_audio"
+                else task10.select_manual_route(stream_id, before)
+            )
+            after = task10.collect_audio_state(confirmed_meet_stream_id)
+            after_route_stream = next(
+                (
+                    candidate
+                    for candidate in after["task10_route_candidates"]
+                    if candidate["stream_id"] == stream_id
+                ),
+                None,
+            )
+        else:
+            route_attempt = direct_manual_route(task10, stream_id)
+            names = sink_names()
+            refreshed = next(
+                (
+                    item
+                    for item in sink_inputs()
+                    if int(item.get("index", 0) or 0) == stream_id
+                ),
+                None,
+            )
+            if refreshed is not None:
+                sink_index = int(refreshed.get("sink", 0) or 0)
+                after_route_stream = {
+                    "stream_id": stream_id,
+                    "current_sink_name": names.get(sink_index, ""),
+                    "on_translator_remote_in": names.get(sink_index, "") == "translator_remote_in",
+                }
+    return (
+        {
+            "app_key": case.app_key,
+            "display_name": case.display_name,
+            "task_scope": case.task_scope,
+            "stream_kind": case.stream_kind,
+            "counts_toward_task10_mvp_a": case.counts_toward_task10_mvp_a,
+            "synthetic_input": {
+                "audio_material": "silence",
+                "duration_seconds": None if case.stream_kind == "browser_web_audio" else 15,
+            },
+            "process_probe": {
+                "start_error": start_error,
+                "stream_found": stream is not None,
+                "stream": stream,
+            },
+            "task10_candidate": task10_candidate,
+            "route_attempt": route_attempt,
+            "after_route_stream": after_route_stream,
+            "diagnostic_result": classify_case_result(
+                case,
+                route_attempt,
+                after_route_stream,
+                task10_candidate,
+            ),
+        },
+        process,
+    )
+
+
+def classify_case_result(
+    case: Case,
+    route_attempt: dict[str, Any],
+    after_route_stream: dict[str, Any] | None,
+    task10_candidate: dict[str, Any] | None,
+) -> str:
+    if (
+        route_attempt.get("status") == "passed"
+        and after_route_stream is not None
+        and after_route_stream.get("on_translator_remote_in") is True
+    ):
+        if case.app_key in {"telegram_desktop", "google_meet_browser"} and not (
+            task10_candidate is not None and task10_candidate.get("call_like") is True
+        ):
+            return "browser_stream_move_passed_without_call_like_candidate"
+        return "synthetic_route_passed"
+    if case.app_key == "zoom_desktop":
+        return "blocked_until_real_zoom_stream"
+    return "synthetic_route_blocked"
+
+
+def load_task7_debt(task10: Any) -> dict[str, Any]:
+    return task10.task7_debt(task10.load_task7())
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run synthetic app stream route diagnostics.")
+    parser.add_argument("--output", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--start-service", action="store_true")
+    parser.add_argument("--stop-after", action="store_true")
+    parser.add_argument("--settle-seconds", type=float, default=8.0)
+    parser.add_argument("--case", choices=[case.app_key for case in CASES], action="append")
+    parser.add_argument("--require-task10-synthetic-routes", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    selected = set(args.case or [case.app_key for case in CASES])
+    task10 = load_task10_module()
+    playback_sink = default_playback_sink()
+    service, started_by_script = task10.ensure_service(args.start_service)
+    report: dict[str, Any]
+    stop_report = None
+    owned_processes: list[subprocess.Popen[Any]] = []
+    with tempfile.TemporaryDirectory(prefix="translator-simulated-app-streams.") as temp:
+        try:
+            temp_dir = Path(temp)
+            wav_path = temp_dir / "silence.wav"
+            write_silence(wav_path, 15)
+            cases = []
+            for case in CASES:
+                if case.app_key not in selected:
+                    continue
+                case_report, process = run_case(
+                    case,
+                    task10,
+                    wav_path,
+                    temp_dir,
+                    args.settle_seconds,
+                    playback_sink,
+                )
+                cases.append(case_report)
+                if process is not None:
+                    owned_processes.append(process)
+        finally:
+            stop_report = task10.stop_service_if_needed(started_by_script, args.stop_after)
+            for process in reversed(owned_processes):
+                terminate_owned(process)
+        task10_route_cases = [
+            case for case in cases if case["counts_toward_task10_mvp_a"]
+        ]
+        task10_synthetic_routes_passed = bool(task10_route_cases) and all(
+            case["diagnostic_result"] == "synthetic_route_passed"
+            for case in task10_route_cases
+        )
+        report = {
+            "schema_version": "translator.task10-simulated-app-streams.v1",
+            "report_kind": REPORT_KIND,
+            "generated_at": utc_now(),
+            "generated_by": "scripts/translator-simulated-app-stream-smoke",
+            "simulated_only": True,
+            "does_not_satisfy_task10_live_second_endpoint": True,
+            "task10_completed": False,
+            "task10_synthetic_routes_passed": task10_synthetic_routes_passed,
+            "canonical_live_report": "docs/benchmarks/task10-validation-report.json",
+            "task7_debt_carried": load_task7_debt(task10),
+            "service": service,
+            "playback_sink": playback_sink,
+            "process_snapshot": process_snapshot(),
+            "cases": cases,
+            "limitations": [
+                "No real second endpoint is present.",
+                "No receiving-side recording is present.",
+                "Telegram and Zoom streams are Pulse property simulations, not app-originated meeting audio.",
+                "Meet uses isolated browser-generated audio and stream-id confirmation, not a Google Meet room.",
+                "Zoom remains Task 12 diagnostic scope and does not count toward Task 10 MVP-A.",
+            ],
+        }
+        return_code = (
+            2
+            if args.require_task10_synthetic_routes and not task10_synthetic_routes_passed
+            else 0
+        )
+    if stop_report is not None:
+        report["service_stop"] = stop_report
+    write_json(args.output, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return return_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

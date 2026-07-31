@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "download_budget_bytes": 2147483648,
+    "post_download_free_floor_bytes": 21474836480,
+    "usage_mode": "personal_noncommercial",
+    "redistribution": false,
+    "certified_or_safety_critical": false,
+    "staging_path": "/home/anton/Source/translator/models/cache/.staging",
+    "redirect_hosts": [
+      "cdn-lfs.huggingface.co",
+      "cdn-lfs-us-1.hf.co",
+      "cdn-lfs-eu-1.hf.co",
+      "cas-bridge.xethub.hf.co",
+      "us.aws.cdn.hf.co"
+    ]
+  },
+  "models": [
+    {
+      "id": "faster-whisper-small",
+      "role": "asr",
+      "source": {
+        "repository": "Systran/faster-whisper-small",
+        "revision": "536b0662742c02347bc0e980a01041f333bce120",
+        "license": "MIT"
+      },
+      "languages": ["ru", "en"],
+      "cache_path": "/home/anton/.cache/huggingface/hub/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120",
+      "acquisition": "reuse",
+      "files": [
+        {
+          "path": "config.json",
+          "size_bytes": 2370,
+          "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828"
+        },
+        {
+          "path": "model.bin",
+          "size_bytes": 483546902,
+          "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"
+        },
+        {
+          "path": "tokenizer.json",
+          "size_bytes": 2203239,
+          "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+        },
+        {
+          "path": "vocabulary.txt",
+          "size_bytes": 459861,
+          "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+        }
+      ]
+    },
+    {
+      "id": "faster-whisper-large-v3",
+      "role": "asr",
+      "source": {
+        "repository": "Systran/faster-whisper-large-v3",
+        "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+        "license": "MIT"
+      },
+      "languages": ["ru", "en"],
+      "cache_path": "/home/anton/Source/uncle-freud-bot/.data/faster-whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478",
+      "acquisition": "reuse",
+      "files": [
+        {
+          "path": "config.json",
+          "size_bytes": 2394,
+          "sha256": "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9"
+        },
+        {
+          "path": "model.bin",
+          "size_bytes": 3087284237,
+          "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size_bytes": 340,
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+        },
+        {
+          "path": "tokenizer.json",
+          "size_bytes": 2480617,
+          "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"
+        },
+        {
+          "path": "vocabulary.json",
+          "size_bytes": 1068114,
+          "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+        }
+      ]
+    },
+    {
+      "id": "piper-ru-dmitri-medium",
+      "role": "tts",
+      "source": {
+        "repository": "rhasspy/piper-voices",
+        "revision": "0d907f158acc877ddeebcbf827659ee13bea8bcd",
+        "license": "MIT",
+        "dataset_license": "CC0"
+      },
+      "languages": ["ru"],
+      "cache_path": "/home/anton/Source/uncle-freud-bot/.data/piper-voices",
+      "acquisition": "reuse",
+      "files": [
+        {
+          "path": "ru_RU-dmitri-medium.onnx",
+          "size_bytes": 63201294,
+          "sha256": "f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb"
+        },
+        {
+          "path": "ru_RU-dmitri-medium.onnx.json",
+          "size_bytes": 4824,
+          "sha256": "667ef3117bc642c2892dff7690d8bdc8ca4228aeaa783b2dc1416df632855e0d"
+        }
+      ]
+    },
+    {
+      "id": "piper-en-ryan-medium",
+      "role": "tts",
+      "source": {
+        "repository": "rhasspy/piper-voices",
+        "revision": "0d907f158acc877ddeebcbf827659ee13bea8bcd",
+        "license": "MIT",
+        "dataset_license": "CC-BY-NC-SA-4.0"
+      },
+      "languages": ["en"],
+      "cache_path": "/home/anton/Source/uncle-freud-bot/.data/piper-voices",
+      "acquisition": "reuse",
+      "files": [
+        {
+          "path": "en_US-ryan-medium.onnx",
+          "size_bytes": 63201294,
+          "sha256": "abf4c274862564ed647ba0d2c47f8ee7c9b717d27bdad9219100eb310db4047a"
+        },
+        {
+          "path": "en_US-ryan-medium.onnx.json",
+          "size_bytes": 4883,
+          "sha256": "44034c056cb15681b2ad494307c7f3f2e4499d1253c700c711fa0a4607ffe78d"
+        }
+      ]
+    },
+    {
+      "id": "nllb-200-distilled-600m-ct2-int8",
+      "role": "mt",
+      "source": {
+        "repository": "mijuanlo/nllb-200-distilled-600M-ct2-int8",
+        "revision": "16bc5ff0482f9f1c0d35bdef950721ce58640789",
+        "license": "CC-BY-NC-4.0"
+      },
+      "languages": ["ru", "en"],
+      "cache_path": "/home/anton/Source/translator/models/cache/nllb-200-distilled-600M-ct2-int8",
+      "acquisition": "download",
+      "files": [
+        {
+          "path": "config.json",
+          "size_bytes": 1065,
+          "sha256": "bf8ade7c3f1683e5f13001bab18b04a1ccd1a6801208efd227ed13b2ff6f15e7",
+          "source_url": "https://huggingface.co/mijuanlo/nllb-200-distilled-600M-ct2-int8/resolve/16bc5ff0482f9f1c0d35bdef950721ce58640789/config.json",
+          "source_path": "config.json"
+        },
+        {
+          "path": "model.bin",
+          "size_bytes": 622596105,
+          "sha256": "398726640cc2a02cc6a35277fa3cf2159ce8a1a66b48aa1b6c8837a47e3dd00c",
+          "source_url": "https://huggingface.co/mijuanlo/nllb-200-distilled-600M-ct2-int8/resolve/16bc5ff0482f9f1c0d35bdef950721ce58640789/model.bin",
+          "source_path": "model.bin"
+        },
+        {
+          "path": "sentencepiece.bpe.model",
+          "size_bytes": 4852054,
+          "sha256": "14bb8dfb35c0ffdea7bc01e56cea38b9e3d5efcdcb9c251d6b40538e1aab555a",
+          "source_url": "https://huggingface.co/mijuanlo/nllb-200-distilled-600M-ct2-int8/resolve/16bc5ff0482f9f1c0d35bdef950721ce58640789/sentencepiece.bpe.model",
+          "source_path": "sentencepiece.bpe.model"
+        },
+        {
+          "path": "shared_vocabulary.json",
+          "size_bytes": 5921176,
+          "sha256": "af53bfd0e6f726209e7325e45b87ab3b14e5856f7d42d7b9be91de3287c45267",
+          "source_url": "https://huggingface.co/mijuanlo/nllb-200-distilled-600M-ct2-int8/resolve/16bc5ff0482f9f1c0d35bdef950721ce58640789/shared_vocabulary.json",
+          "source_path": "shared_vocabulary.json"
+        }
+      ]
+    },
+    {
+      "id": "piper-ru-irina-medium",
+      "role": "tts",
+      "source": {
+        "repository": "rhasspy/piper-voices",
+        "revision": "0d907f158acc877ddeebcbf827659ee13bea8bcd",
+        "license": "MIT",
+        "dataset_license": "Unknown",
+        "license_waiver": "PIPER_RU_IRINA_PERSONAL_LOCAL_V1"
+      },
+      "languages": ["ru"],
+      "cache_path": "/home/anton/Source/translator/models/cache/piper",
+      "acquisition": "download",
+      "files": [
+        {
+          "path": "ru_RU-irina-medium.onnx",
+          "size_bytes": 63201294,
+          "sha256": "8ff38212d23da300bbe3705c645e6e5b9475f0bfde01558eb17813e22acaaaaa",
+          "source_url": "https://huggingface.co/rhasspy/piper-voices/resolve/0d907f158acc877ddeebcbf827659ee13bea8bcd/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx",
+          "source_path": "ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx"
+        },
+        {
+          "path": "ru_RU-irina-medium.onnx.json",
+          "size_bytes": 4765,
+          "sha256": "c2ec28bb38e2b59e93b959b3e40348c1afebbd272f30fed5d41205d08e98a9d7",
+          "source_url": "https://huggingface.co/rhasspy/piper-voices/resolve/0d907f158acc877ddeebcbf827659ee13bea8bcd/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json",
+          "source_path": "ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json"
+        }
+      ]
+    },
+    {
+      "id": "piper-en-hfc-female-medium",
+      "role": "tts",
+      "source": {
+        "repository": "rhasspy/piper-voices",
+        "revision": "0d907f158acc877ddeebcbf827659ee13bea8bcd",
+        "license": "MIT",
+        "dataset_license": "CC-BY-NC-SA-4.0"
+      },
+      "languages": ["en"],
+      "cache_path": "/home/anton/Source/translator/models/cache/piper",
+      "acquisition": "download",
+      "files": [
+        {
+          "path": "en_US-hfc_female-medium.onnx",
+          "size_bytes": 63201294,
+          "sha256": "914c473788fc1fa8b63ace1cdcdb44588f4ae523d3ab37df1536616835a140b7",
+          "source_url": "https://huggingface.co/rhasspy/piper-voices/resolve/0d907f158acc877ddeebcbf827659ee13bea8bcd/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx",
+          "source_path": "en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx"
+        },
+        {
+          "path": "en_US-hfc_female-medium.onnx.json",
+          "size_bytes": 5033,
+          "sha256": "03f1fa0622b80463283592d97aca9f6e89aec345a5c56b7257723e0093c58b6c",
+          "source_url": "https://huggingface.co/rhasspy/piper-voices/resolve/0d907f158acc877ddeebcbf827659ee13bea8bcd/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx.json",
+          "source_path": "en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx.json"
+        }
+      ]
+    }
+  ]
+}

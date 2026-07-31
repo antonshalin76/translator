@@ -1,0 +1,238 @@
+{
+  "canonical_live_report": "docs/benchmarks/task10-validation-report.json",
+  "cases": [
+    {
+      "after_route_stream": {
+        "app_key": "telegram_desktop",
+        "application_name": "Telegram Desktop",
+        "call_like": true,
+        "current_sink_name": "translator_remote_in",
+        "media_role": "communication",
+        "meet_confirmed": true,
+        "on_translator_remote_in": true,
+        "process_binary": "telegram-desktop",
+        "stream_id": 25800
+      },
+      "app_key": "telegram_desktop",
+      "counts_toward_task10_mvp_a": true,
+      "diagnostic_result": "synthetic_route_passed",
+      "display_name": "Telegram Desktop",
+      "process_probe": {
+        "start_error": null,
+        "stream": {
+          "application_name": "Telegram Desktop",
+          "media_name": "Telegram Call Synthetic Silence",
+          "media_role": "communication",
+          "process_binary": "telegram-desktop",
+          "sink_id": 21785,
+          "sink_name": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+          "stream_id": 25800
+        },
+        "stream_found": true
+      },
+      "route_attempt": {
+        "attempted": true,
+        "candidate_app_key": "telegram_desktop",
+        "http_status": 200,
+        "safe_error": null,
+        "status": "passed",
+        "stream_id": 25800
+      },
+      "stream_kind": "pulse_property_stream",
+      "synthetic_input": {
+        "audio_material": "silence",
+        "duration_seconds": 15
+      },
+      "task10_candidate": {
+        "app_key": "telegram_desktop",
+        "application_name": "Telegram Desktop",
+        "call_like": true,
+        "current_sink_name": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+        "media_role": "communication",
+        "meet_confirmed": true,
+        "on_translator_remote_in": false,
+        "process_binary": "telegram-desktop",
+        "stream_id": 25800
+      },
+      "task_scope": "task10_synthetic_diagnostic"
+    },
+    {
+      "after_route_stream": {
+        "app_key": "google_meet_browser",
+        "application_name": "Google Meet via Firefox/Chromium/Chrome",
+        "call_like": false,
+        "current_sink_name": "translator_remote_in",
+        "media_role": null,
+        "meet_confirmed": true,
+        "on_translator_remote_in": true,
+        "process_binary": "chrome",
+        "stream_id": 25870
+      },
+      "app_key": "google_meet_browser",
+      "counts_toward_task10_mvp_a": true,
+      "diagnostic_result": "browser_stream_move_passed_without_call_like_candidate",
+      "display_name": "Google Meet via isolated browser audio",
+      "process_probe": {
+        "start_error": null,
+        "stream": {
+          "application_name": "Google Chrome",
+          "media_name": "Playback",
+          "media_role": null,
+          "process_binary": "chrome",
+          "sink_id": 21785,
+          "sink_name": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+          "stream_id": 25870
+        },
+        "stream_found": true
+      },
+      "route_attempt": {
+        "attempted": true,
+        "http_status": 200,
+        "route_resolution": "routed",
+        "safe_error": null,
+        "status": "passed",
+        "stream_id": 25870
+      },
+      "stream_kind": "browser_web_audio",
+      "synthetic_input": {
+        "audio_material": "silence",
+        "duration_seconds": null
+      },
+      "task10_candidate": {
+        "app_key": "google_meet_browser",
+        "application_name": "Google Meet via Firefox/Chromium/Chrome",
+        "call_like": false,
+        "current_sink_name": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+        "media_role": null,
+        "meet_confirmed": true,
+        "on_translator_remote_in": false,
+        "process_binary": "chrome",
+        "stream_id": 25870
+      },
+      "task_scope": "task10_synthetic_diagnostic"
+    },
+    {
+      "after_route_stream": {
+        "current_sink_name": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+        "on_translator_remote_in": false,
+        "stream_id": 25896
+      },
+      "app_key": "zoom_desktop",
+      "counts_toward_task10_mvp_a": false,
+      "diagnostic_result": "blocked_until_task12_allowlist_or_real_zoom_stream",
+      "display_name": "Zoom Desktop",
+      "process_probe": {
+        "start_error": null,
+        "stream": {
+          "application_name": "Zoom",
+          "media_name": "Zoom Call Synthetic Silence",
+          "media_role": "communication",
+          "process_binary": "zoom",
+          "sink_id": 21785,
+          "sink_name": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+          "stream_id": 25896
+        },
+        "stream_found": true
+      },
+      "route_attempt": {
+        "attempted": true,
+        "http_status": 409,
+        "route_resolution": null,
+        "safe_error": "http_error",
+        "status": "failed",
+        "stream_id": 25896
+      },
+      "stream_kind": "pulse_property_stream",
+      "synthetic_input": {
+        "audio_material": "silence",
+        "duration_seconds": 15
+      },
+      "task10_candidate": null,
+      "task_scope": "task12_diagnostic"
+    }
+  ],
+  "does_not_satisfy_task10_live_second_endpoint": true,
+  "generated_at": "2026-07-30T03:40:13.686675+00:00",
+  "generated_by": "scripts/translator-simulated-app-stream-smoke",
+  "limitations": [
+    "No real second endpoint is present.",
+    "No receiving-side recording is present.",
+    "Telegram and Zoom streams are Pulse property simulations, not app-originated meeting audio.",
+    "Meet uses isolated browser-generated audio and stream-id confirmation, not a Google Meet room.",
+    "Zoom remains Task 12 diagnostic scope and does not count toward Task 10 MVP-A."
+  ],
+  "playback_sink": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+  "process_snapshot": [
+    {
+      "binary": "telegram-desktop",
+      "pid_count": 0,
+      "running": false
+    },
+    {
+      "binary": "firefox",
+      "pid_count": 1,
+      "running": true
+    },
+    {
+      "binary": "google-chrome",
+      "pid_count": 0,
+      "running": false
+    },
+    {
+      "binary": "zoom",
+      "pid_count": 2,
+      "running": true
+    },
+    {
+      "binary": "ZoomWebviewHost",
+      "pid_count": 13,
+      "running": true
+    }
+  ],
+  "report_kind": "simulated_app_streams",
+  "schema_version": "translator.task10-simulated-app-streams.v1",
+  "service": {
+    "active": "active",
+    "enabled": "enabled",
+    "properties": {
+      "ActiveState": "active",
+      "LoadState": "loaded",
+      "MainPID": "1802697",
+      "SubState": "running"
+    },
+    "start_command": {
+      "ok": true,
+      "safe_error": null
+    }
+  },
+  "service_stop": {
+    "after": {
+      "active": "inactive",
+      "enabled": "enabled",
+      "properties": {
+        "ActiveState": "inactive",
+        "LoadState": "loaded",
+        "MainPID": "0",
+        "SubState": "dead"
+      }
+    },
+    "cleanup_command": {
+      "ok": true,
+      "safe_error": null
+    },
+    "stop_command": {
+      "ok": true,
+      "safe_error": null
+    }
+  },
+  "simulated_only": true,
+  "task10_completed": false,
+  "task10_synthetic_routes_passed": false,
+  "task7_debt_carried": {
+    "blocked_acceptance_item": "Graph-boundary latency target is not met: physical_mic_onset_to_returned_ru_first_audible_ms=5968 exceeds the 1000 ms target.",
+    "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
+    "local_provider_latency_classification": "fails_usable_limit",
+    "requires_mvp_b_provider_comparison": true,
+    "task7_complete": false
+  }
+}

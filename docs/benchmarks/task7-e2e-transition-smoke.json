@@ -1,0 +1,444 @@
+{
+  "directions": {
+    "en_to_ru": {
+      "capture_to_first_audio_ms": null,
+      "capture_to_last_audio_ms": null,
+      "dropped": true,
+      "provider_latency_ms": null,
+      "queue_lag_ms": 0.0,
+      "speech_onset_to_first_audible_ms": null
+    },
+    "ru_to_en": {
+      "capture_to_first_audio_ms": null,
+      "capture_to_last_audio_ms": null,
+      "dropped": true,
+      "provider_latency_ms": null,
+      "queue_lag_ms": 0.0,
+      "speech_onset_to_first_audible_ms": null
+    }
+  },
+  "evidence_scope": "production_pipeline_e2e_smoke",
+  "graph": {
+    "after": {
+      "required_endpoint_count": 0,
+      "task7_stream_count": 0
+    },
+    "before": {
+      "required_endpoint_count": 0,
+      "task7_stream_count": 0
+    },
+    "unchanged_after_cleanup": true
+  },
+  "pair_count": 8,
+  "pairs": [
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": 3269.982501,
+          "capture_to_last_audio_ms": 3302.154471,
+          "dropped": false,
+          "provider_latency_ms": 3300.0,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": 3357.966369
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": 3722.399093,
+          "capture_to_last_audio_ms": 3738.676084,
+          "dropped": false,
+          "provider_latency_ms": 3735.0,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": 3839.86537
+        }
+      },
+      "pair_index": 0
+    },
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": 3104.882071,
+          "capture_to_last_audio_ms": 3121.387912,
+          "dropped": false,
+          "provider_latency_ms": 3121.0,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": 3197.69652
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": 3283.61467,
+          "capture_to_last_audio_ms": 3289.478131,
+          "dropped": false,
+          "provider_latency_ms": 3289.0,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": 3359.67492
+        }
+      },
+      "pair_index": 1
+    },
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": 3961.806185,
+          "capture_to_last_audio_ms": 3979.225642,
+          "dropped": false,
+          "provider_latency_ms": 3978.0,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": 4031.764329
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": 3689.315162,
+          "capture_to_last_audio_ms": 3706.542183,
+          "dropped": false,
+          "provider_latency_ms": 3706.0,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": 3777.998589
+        }
+      },
+      "pair_index": 2
+    },
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        }
+      },
+      "pair_index": 3
+    },
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        }
+      },
+      "pair_index": 4
+    },
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        }
+      },
+      "pair_index": 5
+    },
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        }
+      },
+      "pair_index": 6
+    },
+    {
+      "directions": {
+        "en_to_ru": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        },
+        "ru_to_en": {
+          "capture_to_first_audio_ms": null,
+          "capture_to_last_audio_ms": null,
+          "dropped": true,
+          "provider_latency_ms": null,
+          "queue_lag_ms": 0.0,
+          "speech_onset_to_first_audible_ms": null
+        }
+      },
+      "pair_index": 7
+    }
+  ],
+  "quality_evidence": {
+    "corpus_id": "task6-v4",
+    "passes_thresholds": true,
+    "schema_version": "translator.task6-benchmark.v2",
+    "sha256": "a563b986db097e89236e3ad0b92b884bbbea56f562339d08cbba1d50cd7e98c6"
+  },
+  "release_eligible": false,
+  "resources": {
+    "cpu_percent_peak": 2020.1,
+    "observed_duration_seconds": 36.007387626,
+    "rss_bytes_peak": 2104160256,
+    "samples": [
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 111812902209860,
+        "rss_bytes": 1617838080,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 111813894605322,
+        "rss_bytes": 1617895424,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 239.1,
+        "monotonic_ns": 111814885131476,
+        "rss_bytes": 1709060096,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 483.2,
+        "monotonic_ns": 111815896956056,
+        "rss_bytes": 1819111424,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1472.0,
+        "monotonic_ns": 111816945100828,
+        "rss_bytes": 1856815104,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1521.1,
+        "monotonic_ns": 111817892557654,
+        "rss_bytes": 1860116480,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 111818885918663,
+        "rss_bytes": 1860124672,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 259.0,
+        "monotonic_ns": 111819886814895,
+        "rss_bytes": 1860145152,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 494.6,
+        "monotonic_ns": 111820890023862,
+        "rss_bytes": 1903763456,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1486.7,
+        "monotonic_ns": 111821891177890,
+        "rss_bytes": 1870839808,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1111.7,
+        "monotonic_ns": 111822896383939,
+        "rss_bytes": 1870848000,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 15.2,
+        "monotonic_ns": 111823883199121,
+        "rss_bytes": 1870917632,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 383.9,
+        "monotonic_ns": 111824889531869,
+        "rss_bytes": 1948778496,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 492.7,
+        "monotonic_ns": 111825896216995,
+        "rss_bytes": 2087022592,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1790.9,
+        "monotonic_ns": 111826895022739,
+        "rss_bytes": 1872953344,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 869.3,
+        "monotonic_ns": 111827904720651,
+        "rss_bytes": 1861070848,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 12.0,
+        "monotonic_ns": 111828906043567,
+        "rss_bytes": 1872715776,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 257.4,
+        "monotonic_ns": 111829901412396,
+        "rss_bytes": 1872732160,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 486.8,
+        "monotonic_ns": 111830908288303,
+        "rss_bytes": 1872748544,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1005.8,
+        "monotonic_ns": 111831954394991,
+        "rss_bytes": 1867173888,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1774.9,
+        "monotonic_ns": 111832900497933,
+        "rss_bytes": 1863172096,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 10.0,
+        "monotonic_ns": 111833895173711,
+        "rss_bytes": 1863176192,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 504.3,
+        "monotonic_ns": 111834894895743,
+        "rss_bytes": 1863249920,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 531.4,
+        "monotonic_ns": 111835907246450,
+        "rss_bytes": 1863270400,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 2020.1,
+        "monotonic_ns": 111836896696016,
+        "rss_bytes": 1890234368,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 756.7,
+        "monotonic_ns": 111837915804680,
+        "rss_bytes": 1890250752,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 248.7,
+        "monotonic_ns": 111838893950918,
+        "rss_bytes": 1890263040,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 530.8,
+        "monotonic_ns": 111839907104780,
+        "rss_bytes": 1890271232,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1176.7,
+        "monotonic_ns": 111840928035299,
+        "rss_bytes": 1884422144,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1670.3,
+        "monotonic_ns": 111841896786964,
+        "rss_bytes": 1907982336,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 170.7,
+        "monotonic_ns": 111842908339637,
+        "rss_bytes": 2097315840,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 406.4,
+        "monotonic_ns": 111843909123281,
+        "rss_bytes": 1907990528,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 495.8,
+        "monotonic_ns": 111844900692328,
+        "rss_bytes": 2104160256,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 1967.8,
+        "monotonic_ns": 111845898759871,
+        "rss_bytes": 1896325120,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 650.8,
+        "monotonic_ns": 111846891261500,
+        "rss_bytes": 1896325120,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 333.5,
+        "monotonic_ns": 111847900293270,
+        "rss_bytes": 1941561344,
+        "vram_mib": 188
+      },
+      {
+        "cpu_percent": 518.9,
+        "monotonic_ns": 111848909597486,
+        "rss_bytes": 1923997696,
+        "vram_mib": 188
+      }
+    ],
+    "scope": "bridge_process_tree_and_filtered_gpu",
+    "vram_mib_peak": 188,
+    "within_limits": true
+  },
+  "schema_version": "translator.task7-e2e-smoke.v1",
+  "simultaneous": true
+}

@@ -1,0 +1,33 @@
+[Unit]
+Description=Local full-duplex translation daemon
+Documentation=file:%h/.local/share/doc/translator/
+After=pipewire.service wireplumber.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Environment="LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:%h/Source/uncle-freud-bot/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib"
+EnvironmentFile=-%h/Source/translator/.env
+ExecStart=/usr/bin/env translator-daemon
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=15
+RuntimeDirectory=translator
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+StateDirectory=translator
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/translator %S/translator
+
+[Install]
+WantedBy=default.target

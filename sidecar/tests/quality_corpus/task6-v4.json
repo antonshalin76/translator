@@ -1,0 +1,175 @@
+{
+  "schema_version": "translator.quality-corpus.v4",
+  "corpus_id": "task6-v4",
+  "name_aliases": {
+    "Alex": {"ru": ["Alex", "Алекс", "Алексу"], "en": ["Alex"]},
+    "Maria": {"ru": ["Maria", "Мария", "Марии"], "en": ["Maria"]},
+    "Victor": {"ru": ["Victor", "Виктор", "Виктору"], "en": ["Victor"]},
+    "Nina": {"ru": ["Nina", "Нина", "Нине"], "en": ["Nina"]},
+    "Roman": {"ru": ["Roman", "Роман", "Роману"], "en": ["Roman"]},
+    "Elena": {"ru": ["Elena", "Елена", "Елене"], "en": ["Elena"]},
+    "Max": {"ru": ["Max", "Макс", "Максу"], "en": ["Max"]},
+    "Anna": {"ru": ["Anna", "Анна", "Анне"], "en": ["Anna"]},
+    "Igor": {"ru": ["Igor", "Игорь", "Игорю", "Игоря", "Игору"], "en": ["Igor"]},
+    "Sofia": {"ru": ["Sofia", "София", "Софии"], "en": ["Sofia"]},
+    "Alpha": {"ru": ["Alpha", "Альфа", "Альфу"], "en": ["Alpha"]},
+    "Bravo": {"ru": ["Bravo", "Браво"], "en": ["Bravo"]},
+    "Charlie": {"ru": ["Charlie", "Чарли"], "en": ["Charlie"]},
+    "Delta": {"ru": ["Delta", "Дельта", "Дельту"], "en": ["Delta"]},
+    "Echo": {"ru": ["Echo", "Эхо"], "en": ["Echo"]},
+    "Foxtrot": {"ru": ["Foxtrot", "Фокстрот", "Фокстроту"], "en": ["Foxtrot"]},
+    "Gamma": {"ru": ["Gamma", "Гамма", "Гамму"], "en": ["Gamma"]},
+    "Hotel": {"ru": ["Hotel", "Хотел", "Отель"], "en": ["Hotel"]},
+    "India": {"ru": ["India", "Индия", "Индию"], "en": ["India"]},
+    "Juliet": {"ru": ["Juliet", "Джульетта", "Джульетту"], "en": ["Juliet"]}
+  },
+  "warmups": [
+    {"ru": "Проверка микрофона.", "en": "Microphone check."},
+    {"ru": "Вы меня слышите?", "en": "Can you hear me?"},
+    {"ru": "Начинаем встречу.", "en": "We are starting the meeting."},
+    {"ru": "Одну минуту, пожалуйста.", "en": "One minute, please."},
+    {"ru": "Повторите последнюю фразу.", "en": "Please repeat the last phrase."},
+    {"ru": "Звук работает нормально.", "en": "The audio is working normally."},
+    {"ru": "Я включил перевод.", "en": "I enabled translation."},
+    {"ru": "Говорите немного медленнее.", "en": "Please speak a little slower."},
+    {"ru": "Сейчас продолжим.", "en": "We will continue now."},
+    {"ru": "Спасибо за ожидание.", "en": "Thank you for waiting."}
+  ],
+  "templates": [
+    {
+      "id": "order-number",
+      "ru": "Я подтверждаю заказ номер {value}.",
+      "en": "I confirm order number {value}.",
+      "critical": ["number"],
+      "number_semantics": "identifier",
+      "number_role_anchors": {
+        "ru": ["номер заказа", "заказ номер"],
+        "en": ["order number"]
+      },
+      "scenarios": ["short"],
+      "values": ["104", "215", "326", "437", "548", "659", "760", "871", "982", "1093"]
+    },
+    {
+      "id": "do-not-mute",
+      "ru": "Не отключайте микрофон до {value}.",
+      "en": "Do not mute the microphone until {value}.",
+      "critical": ["negation", "number"],
+      "negation_anchors": {
+        "ru": [
+          "отключайте",
+          "выключайте",
+          "отключать",
+          "выключать",
+          "заглушайте",
+          "заглушай",
+          "заглушать"
+        ],
+        "en": ["mute", "disable", "turn off"]
+      },
+      "number_semantics": "time",
+      "scenarios": ["short"],
+      "values": ["09:10", "09:20", "09:30", "09:40", "09:50", "10:00", "10:10", "10:20", "10:30", "10:40"]
+    },
+    {
+      "id": "send-file",
+      "ru": "Передайте файл пользователю {value}.",
+      "en": "Send the file to {value}.",
+      "critical": ["name"],
+      "name_sentence_initials": {
+        "ru": ["передайте", "отправьте", "отправи"],
+        "en": ["send", "pass", "give", "forward"]
+      },
+      "scenarios": ["short"],
+      "values": ["Alex", "Maria", "Victor", "Nina", "Roman", "Elena", "Max", "Anna", "Igor", "Sofia"]
+    },
+    {
+      "id": "participants",
+      "ru": "В комнате {value} участников.",
+      "en": "There are {value} participants in the room.",
+      "critical": ["number"],
+      "number_semantics": "count",
+      "scenarios": ["short"],
+      "values": ["2", "3", "4", "5", "6", "7", "8", "9", "10", "12"]
+    },
+    {
+      "id": "scheduled",
+      "ru": "Моя встреча назначена на {value}, но я подключусь на пять минут раньше.",
+      "en": "My meeting is scheduled for {value}, but I will join five minutes early.",
+      "critical": ["number"],
+      "number_semantics": "time",
+      "scenarios": ["long"],
+      "values": ["11:00", "11:15", "11:30", "11:45", "12:00", "12:15", "12:30", "12:45", "13:00", "13:15"]
+    },
+    {
+      "id": "access-code",
+      "ru": "Код доступа {value}; не отправляйте его в общий чат.",
+      "en": "The access code is {value}; do not send it to the public chat.",
+      "critical": ["number", "negation"],
+      "negation_anchors": {
+        "ru": ["отправляйте", "отправлять"],
+        "en": ["send"]
+      },
+      "number_semantics": "identifier",
+      "number_role_anchors": {
+        "ru": ["код доступа"],
+        "en": ["access code"]
+      },
+      "scenarios": ["long"],
+      "values": ["1204", "2315", "3426", "4537", "5648", "6759", "7860", "8971", "9082", "0193"]
+    },
+    {
+      "id": "disagree",
+      "ru": "Я не согласен с вариантом {value}, потому что он увеличивает задержку.",
+      "en": "I do not agree with option {value} because it increases latency.",
+      "critical": ["negation", "number"],
+      "negation_anchors": {
+        "ru": ["согласен", "согласна", "согласиться"],
+        "en": ["agree"]
+      },
+      "number_semantics": "count",
+      "scenarios": ["long"],
+      "values": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+    },
+    {
+      "id": "call-person",
+      "ru": "Позвоните {value} после встречи и подтвердите результат.",
+      "en": "Call {value} after the meeting and confirm the result.",
+      "critical": ["name"],
+      "name_sentence_initials": {
+        "ru": ["позвоните", "позвони"],
+        "en": ["call"]
+      },
+      "scenarios": ["short"],
+      "values": ["Alex", "Maria", "Victor", "Nina", "Roman", "Elena", "Max", "Anna", "Igor", "Sofia"]
+    },
+    {
+      "id": "latency",
+      "ru": "Во время теста канал {value} воспроизводит входящую фразу одновременно с моей исходящей репликой.",
+      "en": "During the test, channel {value} plays the incoming phrase at the same time as my outgoing turn.",
+      "critical": ["number"],
+      "number_semantics": "identifier",
+      "number_role_anchors": {
+        "ru": ["канал"],
+        "en": ["channel"]
+      },
+      "scenarios": ["duplex_overlap", "long"],
+      "values": ["420", "510", "600", "690", "780", "870", "960", "1050", "1140", "1230"]
+    },
+    {
+      "id": "open-document",
+      "ru": "Пожалуйста, откройте документ {value}, проверьте последнюю страницу, сравните итоговые цифры с протоколом встречи и не меняйте исходный файл до моего подтверждения.",
+      "en": "Please open document {value}, check the last page, compare the final figures with the meeting record, and do not modify the original file until I confirm.",
+      "critical": ["name", "negation"],
+      "name_sentence_initials": {
+        "ru": ["пожалуйста"],
+        "en": ["please"]
+      },
+      "negation_anchors": {
+        "ru": ["меняйте", "изменяйте", "менять", "изменять"],
+        "en": ["modify", "change"]
+      },
+      "scenarios": ["long"],
+      "values": ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Gamma", "Hotel", "India", "Juliet"]
+    }
+  ]
+}

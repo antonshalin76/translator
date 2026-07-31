@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+project_root="$(cd -- "$(dirname -- "${script_path}")/.." && pwd)"
+unit_source="${project_root}/systemd/translator.service"
+config_root="${XDG_CONFIG_HOME:-"$HOME/.config"}"
+systemd_user_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user"
+autostart_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/autostart"
+unit_target="${systemd_user_dir}/translator.service"
+autostart_target="${autostart_dir}/translator-ui.desktop"
+user_bin_dir="${HOME}/.local/bin"
+command_target="${user_bin_dir}/translator"
+script_target="${project_root}/scripts/translator-desktop"
+ui_binary_source="${project_root}/target/release/translator-ui"
+ui_binary_target="${user_bin_dir}/translator-ui"
+daemon_binary_source="${project_root}/target/release/translator-daemon"
+daemon_binary_target="${user_bin_dir}/translator-daemon"
+ui_project_dir="${project_root}/apps/translator-ui"
+
+usage() {
+  printf 'usage: %s {install|up|start|stop|down|restart|status|logs|disable|uninstall}\n' "${0##*/}" >&2
+}
+
+write_autostart() {
+  install -d -m 700 "${autostart_dir}"
+  temporary="$(mktemp "${autostart_dir}/.translator-ui.desktop.XXXXXX")"
+  chmod 600 "${temporary}"
+  {
+    printf '%s\n' '[Desktop Entry]'
+    printf '%s\n' 'Type=Application'
+    printf '%s\n' 'Name=Translator'
+    printf '%s\n' 'Comment=Translator tray and status UI'
+    printf '%s\n' 'Exec=translator-ui'
+    printf '%s\n' 'TryExec=translator-ui'
+    printf '%s\n' 'Terminal=false'
+    printf '%s\n' 'X-GNOME-Autostart-enabled=true'
+  } >"${temporary}"
+  mv "${temporary}" "${autostart_target}"
+}
+
+install_command() {
+  install -d -m 700 "${user_bin_dir}"
+
+  if [ -e "${command_target}" ] || [ -L "${command_target}" ]; then
+    existing_target="$(readlink -f -- "${command_target}" 2>/dev/null || true)"
+    if [ "${existing_target}" != "${script_target}" ]; then
+      printf '%s\n' "refusing to overwrite existing translator command: ${command_target}" >&2
+      exit 73
+    fi
+  fi
+
+  ln -sfn -- "${script_target}" "${command_target}"
+}
+
+build_ui_binary_if_available() {
+  if [ ! -f "${ui_project_dir}/package.json" ]; then
+    return 1
+  fi
+
+  if ! command -v bun >/dev/null 2>&1; then
+    return 1
+  fi
+
+  (cd "${ui_project_dir}" && bun run tauri build --no-bundle >/dev/null)
+}
+
+install_ui_binary_if_available() {
+  if ! build_ui_binary_if_available; then
+    printf '%s\n' 'translator-ui install skipped: tauri build is unavailable or failed' >&2
+    return 0
+  fi
+  if [ ! -x "${ui_binary_source}" ]; then
+    printf '%s\n' "translator-ui install skipped: ${ui_binary_source} was not produced" >&2
+    return 0
+  fi
+
+  install -d -m 700 "${user_bin_dir}"
+  temporary="$(mktemp "${user_bin_dir}/.translator-ui.XXXXXX")"
+  if ! install -m 755 "${ui_binary_source}" "${temporary}"; then
+    [ ! -e "${temporary}" ] || unlink "${temporary}"
+    printf '%s\n' "translator-ui install skipped: failed to copy ${ui_binary_source}" >&2
+    return 0
+  fi
+  mv "${temporary}" "${ui_binary_target}"
+}
+
+install_daemon_binary_if_available() {
+  if [ ! -x "${daemon_binary_source}" ]; then
+    return 0
+  fi
+
+  install -d -m 700 "${user_bin_dir}"
+  temporary="$(mktemp "${user_bin_dir}/.translator-daemon.XXXXXX")"
+  if ! install -m 755 "${daemon_binary_source}" "${temporary}"; then
+    [ ! -e "${temporary}" ] || unlink "${temporary}"
+    printf '%s\n' "translator-daemon install skipped: failed to copy ${daemon_binary_source}" >&2
+    return 0
+  fi
+  mv "${temporary}" "${daemon_binary_target}"
+}
+
+remove_command_if_owned() {
+  if [ -L "${command_target}" ]; then
+    existing_target="$(readlink -f -- "${command_target}" 2>/dev/null || true)"
+    if [ "${existing_target}" = "${script_target}" ]; then
+      rm -f -- "${command_target}"
+    fi
+  fi
+}
+
+install_unit() {
+  test -f "${unit_source}"
+  install_command
+  install_daemon_binary_if_available
+  install_ui_binary_if_available
+  install -d -m 700 "${systemd_user_dir}"
+  install -m 600 "${unit_source}" "${unit_target}"
+  write_autostart
+  systemctl --user daemon-reload
+  systemctl --user enable translator.service
+}
+
+unit_file_loaded() {
+  systemctl --user list-unit-files translator.service --no-legend 2>/dev/null | grep -q '^translator\.service'
+}
+
+start_unit_installing_if_needed() {
+  install_command
+  install_daemon_binary_if_available
+  install_ui_binary_if_available
+  if ! unit_file_loaded; then
+    install_unit
+  fi
+  systemctl --user start translator.service
+}
+
+wait_for_daemon_api() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 0
+  fi
+
+  attempt=0
+  while [ "${attempt}" -lt 50 ]; do
+    if curl -sS -m 0.5 -o /dev/null http://127.0.0.1:47681/v1/status >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+
+  printf '%s\n' 'daemon API did not become ready before UI launch; continuing' >&2
+}
+
+ensure_ui_running() {
+  if pgrep -u "$(id -u)" -x translator-ui >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ -x "${ui_binary_target}" ]; then
+    ui_command="${ui_binary_target}"
+  elif ui_command="$(command -v translator-ui 2>/dev/null)"; then
+    :
+  else
+    printf '%s\n' 'translator-ui is not in PATH; desktop UI launch skipped' >&2
+    return 0
+  fi
+
+  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    printf '%s\n' 'no DISPLAY or WAYLAND_DISPLAY; desktop UI launch skipped' >&2
+    return 0
+  fi
+
+  if ! setsid -f "${ui_command}" >/dev/null 2>&1; then
+    printf '%s\n' 'translator-ui launch failed; daemon remains running' >&2
+  fi
+}
+
+cleanup_audio_graph() {
+  if command -v translator-daemon >/dev/null 2>&1; then
+    translator-daemon --audio-graph-cleanup >/dev/null || true
+  else
+    printf '%s\n' 'translator-daemon is not in PATH; audio graph cleanup skipped' >&2
+  fi
+}
+
+stop_unit_and_cleanup() {
+  if unit_file_loaded; then
+    systemctl --user stop translator.service
+  else
+    printf '%s\n' 'translator.service is not installed; only audio graph cleanup will run' >&2
+  fi
+  cleanup_audio_graph
+}
+
+print_service_summary() {
+  systemctl --user show translator.service \
+    --property=LoadState \
+    --property=ActiveState \
+    --property=SubState \
+    --property=MainPID \
+    --property=Result \
+    --no-pager
+}
+
+stop_unit_if_loaded() {
+  if unit_file_loaded; then
+    systemctl --user stop translator.service || true
+  fi
+}
+
+disable_unit_if_loaded() {
+  if unit_file_loaded; then
+    systemctl --user disable translator.service || true
+  fi
+}
+
+case "${1:-}" in
+  install)
+    install_unit
+    ;;
+  up)
+    start_unit_installing_if_needed
+    wait_for_daemon_api
+    ensure_ui_running
+    print_service_summary
+    ;;
+  start)
+    start_unit_installing_if_needed
+    wait_for_daemon_api
+    ensure_ui_running
+    ;;
+  stop)
+    stop_unit_and_cleanup
+    ;;
+  down)
+    stop_unit_and_cleanup
+    print_service_summary
+    ;;
+  restart)
+    stop_unit_if_loaded
+    cleanup_audio_graph
+    start_unit_installing_if_needed
+    wait_for_daemon_api
+    ensure_ui_running
+    print_service_summary
+    ;;
+  status)
+    print_service_summary
+    systemctl --user status translator.service --no-pager
+    ;;
+  logs)
+    log_lines="${2:-80}"
+    case "${log_lines}" in
+      ''|*[!0-9]*)
+        printf '%s\n' 'logs line count must be a positive integer' >&2
+        exit 64
+        ;;
+    esac
+    journalctl --user-unit translator.service --no-pager -n "${log_lines}"
+    ;;
+  disable)
+    stop_unit_if_loaded
+    systemctl --user disable translator.service
+    ;;
+  uninstall)
+    stop_unit_if_loaded
+    disable_unit_if_loaded
+    remove_command_if_owned
+    rm -f -- "${unit_target}" "${autostart_target}"
+    systemctl --user daemon-reload
+    systemctl --user reset-failed translator.service || true
+    cleanup_audio_graph
+    ;;
+  *)
+    usage
+    exit 64
+    ;;
+esac

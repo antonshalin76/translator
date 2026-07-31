@@ -1,0 +1,48 @@
+# Secrets and local configuration
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Rust, Python and frontend build output
+/target/
+**/target/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.py[cod]
+**/node_modules/
+**/dist/
+**/gen/schemas/
+*.egg-info/
+.mypy_cache/
+.coverage
+coverage/
+
+# Local model assets and caches
+/models/*
+!/models/manifest.json
+/.cache/
+**/.model-cache/
+*.onnx
+*.pt
+*.safetensors
+
+# Runtime state
+*.sock
+/run/
+/runtime/
+/debug-captures/
+/output/
+/.playwright-cli/
+*.log
+
+# Local editor and operating-system state
+.idea/
+.vscode/
+.DS_Store

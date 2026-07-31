@@ -1,0 +1,67 @@
+{
+  "schema_version": "translator.task10-telegram-live-duplex-check.v1",
+  "task": "Task 10: Real-App MVP-A Smokes Telegram And Meet",
+  "generated_at": "2026-07-30T08:46:39Z",
+  "application": {
+    "name": "Telegram Desktop",
+    "process_binary": "Telegram",
+    "playback_stream_id": 59045,
+    "capture_stream_id": 59062
+  },
+  "runtime": {
+    "translation_running": true,
+    "provider_id": "local",
+    "directions": [
+      {
+        "direction_id": "microphone",
+        "source_language": "ru",
+        "target_language": "en"
+      },
+      {
+        "direction_id": "speaker",
+        "source_language": "ru",
+        "target_language": "en"
+      }
+    ]
+  },
+  "routing": {
+    "telegram_playback_target": "translator_remote_in",
+    "telegram_capture_source": "translator_virtual_mic",
+    "incoming_capture_source": "translator_remote_in",
+    "outgoing_capture_source": "alsa_input.usb-Jieli_Technology_UACDemoV1.0-00.mono-fallback",
+    "incoming_translation_playback_sink": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+    "outgoing_translation_playback_sink": "translator_mic_out"
+  },
+  "mix_levels": {
+    "microphone_original_percent": 60,
+    "microphone_translation_percent": 100,
+    "speaker_original_percent": 60,
+    "speaker_translation_percent": 100
+  },
+  "observed_daemon_events": {
+    "microphone_completed_utterances": true,
+    "speaker_completed_utterances": true,
+    "spoken_content_logged": false
+  },
+  "user_confirmation": {
+    "status": "confirmed_by_user",
+    "incoming_and_outgoing_translation_worked": true,
+    "call_stopped_after_check": true,
+    "content_recorded": false
+  },
+  "privacy": {
+    "debug_capture_enabled": false,
+    "debug_text_enabled": false,
+    "external_provider_started": false,
+    "speech_payload_recorded": false
+  },
+  "post_call_state": {
+    "telegram_sink_input_present": false,
+    "telegram_source_output_present": false
+  },
+  "acceptance": {
+    "telegram_incoming_translation": "passed",
+    "telegram_outgoing_translation": "passed",
+    "receiving_side_confirmation": "confirmed_by_user"
+  }
+}

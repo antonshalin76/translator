@@ -1,0 +1,94 @@
+{
+  "acceptance": {
+    "zoom_incoming_translation": {
+      "reason": "user_confirmed_ru_to_en_translation_audible_in_physical_headphones",
+      "status": "passed"
+    },
+    "zoom_outgoing_translation": {
+      "reason": "user_confirmed_duplex_zoom_translation_after microphone and speaker routing fixes",
+      "status": "passed"
+    },
+    "zoom_route_selection": {
+      "reason": "zoom_pipewire_links_bound_to_translator_remote_in",
+      "status": "passed"
+    }
+  },
+  "blockers": [],
+  "cleanup": {
+    "translator_pipewire_links_absent_after_cleanup": true,
+    "translator_service_active_state_after_cleanup": "inactive",
+    "translator_systemd_headphone_sink_override_unset": true,
+    "translation_stop_http_status": 200,
+    "zoom_microphone_restored_to_physical_source": true,
+    "zoom_playback_restored_to_physical_sink": true
+  },
+  "does_not_satisfy_task12_acceptance": false,
+  "generated_at": "2026-07-30T07:29:04Z",
+  "live_zoom_translation": {
+    "audio_leaves_machine": false,
+    "debug_capture_enabled": false,
+    "debug_text_enabled": false,
+    "direction": {
+      "runtime_direction_id": "speaker",
+      "source_language": "ru",
+      "target_language": "en"
+    },
+    "physical_headphones_sink": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo",
+    "pipewire_node_name": "ZOOM VoiceEngine",
+    "provider_id": "local",
+    "route_method": "pipe_wire_links",
+    "target_sink_name": "translator_remote_in",
+    "translation_running_during_check": true,
+    "user_confirmation": {
+      "content_recorded": false,
+      "duplex_translation_worked": true,
+      "incoming_translation_audible": true,
+      "status": "confirmed_by_user"
+    },
+    "zoom_stream_id": 41014
+  },
+  "privacy": {
+    "debug_capture_enabled": false,
+    "debug_text_enabled": false,
+    "external_provider_started": false,
+    "meeting_link_recorded": false,
+    "pcm_persisted": false,
+    "speech_payload_recorded": false
+  },
+  "runtime_adjustments": {
+    "headphone_sink_override_unset_after_cleanup": true,
+    "headphone_sink_override_used": true,
+    "incoming_playback_volume_after_fix": "100%",
+    "incoming_playback_volume_before_fix": "0%",
+    "original_zoom_audio_left_direct_to_physical_sink": true,
+    "outgoing_capture_muted_during_incoming_only_check": true,
+    "translator_incoming_playback_sink_input_id": 41369,
+    "translator_outgoing_capture_source_output_id": 41370
+  },
+  "schema_version": "translator.task12-zoom-live-translation-check.v1",
+  "task": "Task 12: Post-MVP Zoom Acceptance",
+  "task10_debt_carried": {
+    "canonical_evidence": "docs/benchmarks/task10-validation-report.json",
+    "completed": true,
+    "live_second_endpoint_status": "passed_by_live_user_confirmation",
+    "mvp_a_gate_satisfied": true
+  },
+  "task11_debt_carried": {
+    "canonical_evidence": "docs/benchmarks/task11-openai-adapter-preflight.json",
+    "blocker": "credentialed real-app OpenAI route smoke is pending",
+    "openai_sidecar_runtime_status": "wired_with_deterministic_fake_websocket_contract",
+    "daemon_openai_launch_allowed": true,
+    "grpc_provider_dispatches_openai_sessions": true,
+    "live_openai_comparison_status": "passed_synthetic_speech_comparison",
+    "real_app_openai_smoke_status": "pending_after_synthetic_speech_comparison",
+    "task11_completed": false
+  },
+  "task12_completed": true,
+  "task7_debt_carried": {
+    "blocked_acceptance_item": "Graph-boundary latency target is not met: physical_mic_onset_to_returned_ru_first_audible_ms=5968 exceeds the 1000 ms target.",
+    "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
+    "local_provider_latency_classification": "fails_usable_limit",
+    "requires_mvp_b_provider_comparison": true,
+    "task7_complete": false
+  }
+}

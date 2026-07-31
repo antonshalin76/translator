@@ -1,0 +1,4036 @@
+{
+  "directions": {
+    "en_to_ru": {
+      "capture_to_first_audio_ms": {
+        "p50": 458.967506,
+        "p95": 683.85739
+      },
+      "capture_to_last_audio_ms": {
+        "p50": 542.191764,
+        "p95": 770.789384
+      },
+      "direction": "en_to_ru",
+      "drop_count": 0,
+      "drop_rate": 0.0,
+      "final_mode": "quality_first",
+      "provider_latency_ms": {
+        "p50": 458.967506,
+        "p95": 683.85739
+      },
+      "quality_passed": true,
+      "queue_lag_ms": {
+        "p50": 20.070177,
+        "p95": 30.285582
+      },
+      "restart_count": 0,
+      "samples": [
+        {
+          "capture_to_first_audio_ms": 446.574287,
+          "capture_to_last_audio_ms": 526.666826,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 10,
+          "provider_latency_ms": 446.574287,
+          "quality_passed": true,
+          "queue_lag_ms": 16.092539,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 462.666826,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 492.082549,
+          "capture_to_last_audio_ms": 581.565824,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 11,
+          "provider_latency_ms": 492.082549,
+          "quality_passed": true,
+          "queue_lag_ms": 25.483275,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 517.565824,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 590.945334,
+          "capture_to_last_audio_ms": 670.004868,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 12,
+          "provider_latency_ms": 590.945334,
+          "quality_passed": true,
+          "queue_lag_ms": 15.059534,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 606.004868,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 458.967506,
+          "capture_to_last_audio_ms": 542.191764,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 13,
+          "provider_latency_ms": 458.967506,
+          "quality_passed": true,
+          "queue_lag_ms": 19.224258,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 478.191764,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 406.435797,
+          "capture_to_last_audio_ms": 482.80302,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 14,
+          "provider_latency_ms": 406.435797,
+          "quality_passed": true,
+          "queue_lag_ms": 12.367223,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 418.80302,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 451.707059,
+          "capture_to_last_audio_ms": 529.828791,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 15,
+          "provider_latency_ms": 451.707059,
+          "quality_passed": true,
+          "queue_lag_ms": 14.121732,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 465.828791,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 398.861967,
+          "capture_to_last_audio_ms": 484.725204,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 16,
+          "provider_latency_ms": 398.861967,
+          "quality_passed": true,
+          "queue_lag_ms": 21.863237,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 420.725204,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 471.775469,
+          "capture_to_last_audio_ms": 559.345739,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 17,
+          "provider_latency_ms": 471.775469,
+          "quality_passed": true,
+          "queue_lag_ms": 23.57027,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 495.345739,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 468.199691,
+          "capture_to_last_audio_ms": 558.897404,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 18,
+          "provider_latency_ms": 468.199691,
+          "quality_passed": true,
+          "queue_lag_ms": 26.697713,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 494.897404,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 446.824405,
+          "capture_to_last_audio_ms": 521.222806,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 19,
+          "provider_latency_ms": 446.824405,
+          "quality_passed": true,
+          "queue_lag_ms": 10.398401,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 457.222806,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 402.986461,
+          "capture_to_last_audio_ms": 490.047386,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 20,
+          "provider_latency_ms": 402.986461,
+          "quality_passed": true,
+          "queue_lag_ms": 23.060925,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 426.047386,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 406.502978,
+          "capture_to_last_audio_ms": 489.75054,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 21,
+          "provider_latency_ms": 406.502978,
+          "quality_passed": true,
+          "queue_lag_ms": 19.247562,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 425.75054,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 416.811507,
+          "capture_to_last_audio_ms": 494.431534,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 22,
+          "provider_latency_ms": 416.811507,
+          "quality_passed": true,
+          "queue_lag_ms": 13.620027,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 430.431534,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 452.893356,
+          "capture_to_last_audio_ms": 537.483976,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 23,
+          "provider_latency_ms": 452.893356,
+          "quality_passed": true,
+          "queue_lag_ms": 20.59062,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 473.483976,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 723.665802,
+          "capture_to_last_audio_ms": 801.243212,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 24,
+          "provider_latency_ms": 723.665802,
+          "quality_passed": true,
+          "queue_lag_ms": 13.57741,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 737.243212,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 445.406897,
+          "capture_to_last_audio_ms": 521.623378,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 25,
+          "provider_latency_ms": 445.406897,
+          "quality_passed": true,
+          "queue_lag_ms": 12.216481,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 457.623378,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 424.474298,
+          "capture_to_last_audio_ms": 510.957543,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 26,
+          "provider_latency_ms": 424.474298,
+          "quality_passed": true,
+          "queue_lag_ms": 22.483245,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 446.957543,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 478.204281,
+          "capture_to_last_audio_ms": 557.795139,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 27,
+          "provider_latency_ms": 478.204281,
+          "quality_passed": true,
+          "queue_lag_ms": 15.590858,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 493.795139,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 475.881892,
+          "capture_to_last_audio_ms": 561.796912,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 28,
+          "provider_latency_ms": 475.881892,
+          "quality_passed": true,
+          "queue_lag_ms": 21.91502,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 497.796912,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 477.417086,
+          "capture_to_last_audio_ms": 560.376478,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 29,
+          "provider_latency_ms": 477.417086,
+          "quality_passed": true,
+          "queue_lag_ms": 18.959392,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 496.376478,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 479.17037,
+          "capture_to_last_audio_ms": 562.39228,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 30,
+          "provider_latency_ms": 479.17037,
+          "quality_passed": true,
+          "queue_lag_ms": 19.22191,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 498.39228,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 467.110783,
+          "capture_to_last_audio_ms": 548.983077,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 31,
+          "provider_latency_ms": 467.110783,
+          "quality_passed": true,
+          "queue_lag_ms": 17.872294,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 484.983077,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 351.029484,
+          "capture_to_last_audio_ms": 434.86021,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 32,
+          "provider_latency_ms": 351.029484,
+          "quality_passed": true,
+          "queue_lag_ms": 19.830726,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 370.86021,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 388.636953,
+          "capture_to_last_audio_ms": 472.007815,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 33,
+          "provider_latency_ms": 388.636953,
+          "quality_passed": true,
+          "queue_lag_ms": 19.370862,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 408.007815,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 457.451361,
+          "capture_to_last_audio_ms": 536.213521,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 34,
+          "provider_latency_ms": 457.451361,
+          "quality_passed": true,
+          "queue_lag_ms": 14.76216,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 472.213521,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 442.817188,
+          "capture_to_last_audio_ms": 540.925641,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 35,
+          "provider_latency_ms": 442.817188,
+          "quality_passed": true,
+          "queue_lag_ms": 34.108453,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 476.925641,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 683.85739,
+          "capture_to_last_audio_ms": 768.076663,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 36,
+          "provider_latency_ms": 683.85739,
+          "quality_passed": true,
+          "queue_lag_ms": 20.219273,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 704.076663,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 407.150314,
+          "capture_to_last_audio_ms": 489.42597,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 37,
+          "provider_latency_ms": 407.150314,
+          "quality_passed": true,
+          "queue_lag_ms": 18.275656,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 425.42597,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 556.799617,
+          "capture_to_last_audio_ms": 644.286239,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 38,
+          "provider_latency_ms": 556.799617,
+          "quality_passed": true,
+          "queue_lag_ms": 23.486622,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 580.286239,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 475.886044,
+          "capture_to_last_audio_ms": 570.171626,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 39,
+          "provider_latency_ms": 475.886044,
+          "quality_passed": true,
+          "queue_lag_ms": 30.285582,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 506.171626,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 420.600357,
+          "capture_to_last_audio_ms": 505.216978,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 40,
+          "provider_latency_ms": 420.600357,
+          "quality_passed": true,
+          "queue_lag_ms": 20.616621,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 441.216978,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 451.881924,
+          "capture_to_last_audio_ms": 539.789867,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 41,
+          "provider_latency_ms": 451.881924,
+          "quality_passed": true,
+          "queue_lag_ms": 23.907943,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 475.789867,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 496.710277,
+          "capture_to_last_audio_ms": 575.89594,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 42,
+          "provider_latency_ms": 496.710277,
+          "quality_passed": true,
+          "queue_lag_ms": 15.185663,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 511.89594,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 482.281296,
+          "capture_to_last_audio_ms": 558.328075,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 43,
+          "provider_latency_ms": 482.281296,
+          "quality_passed": true,
+          "queue_lag_ms": 12.046779,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 494.328075,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 433.612824,
+          "capture_to_last_audio_ms": 517.634969,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 44,
+          "provider_latency_ms": 433.612824,
+          "quality_passed": true,
+          "queue_lag_ms": 20.022145,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 453.634969,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 448.365289,
+          "capture_to_last_audio_ms": 528.283753,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 45,
+          "provider_latency_ms": 448.365289,
+          "quality_passed": true,
+          "queue_lag_ms": 15.918464,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 464.283753,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 504.185239,
+          "capture_to_last_audio_ms": 584.982958,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 46,
+          "provider_latency_ms": 504.185239,
+          "quality_passed": true,
+          "queue_lag_ms": 16.797719,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 520.982958,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 921.583687,
+          "capture_to_last_audio_ms": 1007.874231,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 47,
+          "provider_latency_ms": 921.583687,
+          "quality_passed": true,
+          "queue_lag_ms": 22.290544,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 943.874231,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 453.030034,
+          "capture_to_last_audio_ms": 532.002831,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 48,
+          "provider_latency_ms": 453.030034,
+          "quality_passed": true,
+          "queue_lag_ms": 14.972797,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 468.002831,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 501.193019,
+          "capture_to_last_audio_ms": 583.432683,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 49,
+          "provider_latency_ms": 501.193019,
+          "quality_passed": true,
+          "queue_lag_ms": 18.239664,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 519.432683,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 502.198467,
+          "capture_to_last_audio_ms": 590.011026,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 50,
+          "provider_latency_ms": 502.198467,
+          "quality_passed": true,
+          "queue_lag_ms": 23.812559,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 526.011026,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 439.142676,
+          "capture_to_last_audio_ms": 533.193328,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 51,
+          "provider_latency_ms": 439.142676,
+          "quality_passed": true,
+          "queue_lag_ms": 30.050652,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 469.193328,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 450.133065,
+          "capture_to_last_audio_ms": 533.317751,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 52,
+          "provider_latency_ms": 450.133065,
+          "quality_passed": true,
+          "queue_lag_ms": 19.184686,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 469.317751,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 442.424776,
+          "capture_to_last_audio_ms": 534.382293,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 53,
+          "provider_latency_ms": 442.424776,
+          "quality_passed": true,
+          "queue_lag_ms": 27.957517,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 470.382293,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 537.942927,
+          "capture_to_last_audio_ms": 629.767329,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 54,
+          "provider_latency_ms": 537.942927,
+          "quality_passed": true,
+          "queue_lag_ms": 27.824402,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 565.767329,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 389.103724,
+          "capture_to_last_audio_ms": 486.836405,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 55,
+          "provider_latency_ms": 389.103724,
+          "quality_passed": true,
+          "queue_lag_ms": 33.732681,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 422.836405,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 480.759816,
+          "capture_to_last_audio_ms": 562.538022,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 56,
+          "provider_latency_ms": 480.759816,
+          "quality_passed": true,
+          "queue_lag_ms": 17.778206,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 498.538022,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 708.613586,
+          "capture_to_last_audio_ms": 797.251186,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 57,
+          "provider_latency_ms": 708.613586,
+          "quality_passed": true,
+          "queue_lag_ms": 24.6376,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 733.251186,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 681.47393,
+          "capture_to_last_audio_ms": 770.789384,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 58,
+          "provider_latency_ms": 681.47393,
+          "quality_passed": true,
+          "queue_lag_ms": 25.315454,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 706.789384,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 562.357115,
+          "capture_to_last_audio_ms": 650.507935,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 59,
+          "provider_latency_ms": 562.357115,
+          "quality_passed": true,
+          "queue_lag_ms": 24.15082,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 586.507935,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 557.019226,
+          "capture_to_last_audio_ms": 639.86626,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 60,
+          "provider_latency_ms": 557.019226,
+          "quality_passed": true,
+          "queue_lag_ms": 18.847034,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 575.86626,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 503.921047,
+          "capture_to_last_audio_ms": 600.961618,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 61,
+          "provider_latency_ms": 503.921047,
+          "quality_passed": true,
+          "queue_lag_ms": 33.040571,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 536.961618,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 516.572361,
+          "capture_to_last_audio_ms": 606.783927,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 62,
+          "provider_latency_ms": 516.572361,
+          "quality_passed": true,
+          "queue_lag_ms": 26.211566,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 542.783927,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 485.329074,
+          "capture_to_last_audio_ms": 580.532432,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 63,
+          "provider_latency_ms": 485.329074,
+          "quality_passed": true,
+          "queue_lag_ms": 31.203358,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 516.532432,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 521.685622,
+          "capture_to_last_audio_ms": 595.613153,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 64,
+          "provider_latency_ms": 521.685623,
+          "quality_passed": true,
+          "queue_lag_ms": 9.927531,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 531.613153,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 430.700286,
+          "capture_to_last_audio_ms": 519.177331,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 65,
+          "provider_latency_ms": 430.700286,
+          "quality_passed": true,
+          "queue_lag_ms": 24.477045,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 455.177331,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 428.762961,
+          "capture_to_last_audio_ms": 512.833138,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 66,
+          "provider_latency_ms": 428.762961,
+          "quality_passed": true,
+          "queue_lag_ms": 20.070177,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 448.833138,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 499.503539,
+          "capture_to_last_audio_ms": 584.838266,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 67,
+          "provider_latency_ms": 499.503539,
+          "quality_passed": true,
+          "queue_lag_ms": 21.334727,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 520.838266,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 425.824348,
+          "capture_to_last_audio_ms": 507.041976,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 68,
+          "provider_latency_ms": 425.824348,
+          "quality_passed": true,
+          "queue_lag_ms": 17.217628,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 443.041976,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 431.568985,
+          "capture_to_last_audio_ms": 509.361096,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 69,
+          "provider_latency_ms": 431.568985,
+          "quality_passed": true,
+          "queue_lag_ms": 13.792111,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 445.361096,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 469.01698,
+          "capture_to_last_audio_ms": 545.257303,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 70,
+          "provider_latency_ms": 469.01698,
+          "quality_passed": true,
+          "queue_lag_ms": 12.240323,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 481.257303,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 472.504272,
+          "capture_to_last_audio_ms": 555.218375,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 71,
+          "provider_latency_ms": 472.504272,
+          "quality_passed": true,
+          "queue_lag_ms": 18.714103,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 491.218375,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 982.437087,
+          "capture_to_last_audio_ms": 1075.967178,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 72,
+          "provider_latency_ms": 982.437087,
+          "quality_passed": true,
+          "queue_lag_ms": 29.530091,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 1011.967178,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 502.120682,
+          "capture_to_last_audio_ms": 587.503384,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 73,
+          "provider_latency_ms": 502.120682,
+          "quality_passed": true,
+          "queue_lag_ms": 21.382702,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 523.503384,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 425.85382,
+          "capture_to_last_audio_ms": 504.45835,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 74,
+          "provider_latency_ms": 425.85382,
+          "quality_passed": true,
+          "queue_lag_ms": 14.60453,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 440.45835,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 505.669399,
+          "capture_to_last_audio_ms": 600.005457,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 75,
+          "provider_latency_ms": 505.669399,
+          "quality_passed": true,
+          "queue_lag_ms": 30.336058,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 536.005457,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 460.512545,
+          "capture_to_last_audio_ms": 539.143424,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 76,
+          "provider_latency_ms": 460.512545,
+          "quality_passed": true,
+          "queue_lag_ms": 14.630879,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 475.143424,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 452.829091,
+          "capture_to_last_audio_ms": 534.934099,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 77,
+          "provider_latency_ms": 452.829091,
+          "quality_passed": true,
+          "queue_lag_ms": 18.105008,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 470.934099,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 410.832612,
+          "capture_to_last_audio_ms": 494.799661,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 78,
+          "provider_latency_ms": 410.832612,
+          "quality_passed": true,
+          "queue_lag_ms": 19.967049,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 430.799661,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 405.089346,
+          "capture_to_last_audio_ms": 486.89221,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 79,
+          "provider_latency_ms": 405.089346,
+          "quality_passed": true,
+          "queue_lag_ms": 17.802864,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 422.89221,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 412.603535,
+          "capture_to_last_audio_ms": 501.449741,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 80,
+          "provider_latency_ms": 412.603535,
+          "quality_passed": true,
+          "queue_lag_ms": 24.846206,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 437.449741,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 467.748862,
+          "capture_to_last_audio_ms": 543.788626,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 81,
+          "provider_latency_ms": 467.748862,
+          "quality_passed": true,
+          "queue_lag_ms": 12.039764,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 479.788626,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 460.441044,
+          "capture_to_last_audio_ms": 547.716816,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 82,
+          "provider_latency_ms": 460.441044,
+          "quality_passed": true,
+          "queue_lag_ms": 23.275772,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 483.716816,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 819.684852,
+          "capture_to_last_audio_ms": 903.750307,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 83,
+          "provider_latency_ms": 819.684852,
+          "quality_passed": true,
+          "queue_lag_ms": 20.065455,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 839.750307,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 454.290805,
+          "capture_to_last_audio_ms": 543.32315,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 84,
+          "provider_latency_ms": 454.290805,
+          "quality_passed": true,
+          "queue_lag_ms": 25.032345,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 479.32315,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 474.17025,
+          "capture_to_last_audio_ms": 558.563068,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 85,
+          "provider_latency_ms": 474.17025,
+          "quality_passed": true,
+          "queue_lag_ms": 20.392818,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 494.563068,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 450.619167,
+          "capture_to_last_audio_ms": 522.88218,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 86,
+          "provider_latency_ms": 450.619167,
+          "quality_passed": true,
+          "queue_lag_ms": 8.263013,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 458.88218,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 483.823091,
+          "capture_to_last_audio_ms": 560.094979,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 87,
+          "provider_latency_ms": 483.823091,
+          "quality_passed": true,
+          "queue_lag_ms": 12.271888,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 496.094979,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 463.748025,
+          "capture_to_last_audio_ms": 545.386668,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 88,
+          "provider_latency_ms": 463.748025,
+          "quality_passed": true,
+          "queue_lag_ms": 17.638643,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 481.386668,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 458.40946,
+          "capture_to_last_audio_ms": 537.562325,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 89,
+          "provider_latency_ms": 458.40946,
+          "quality_passed": true,
+          "queue_lag_ms": 15.152865,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 473.562325,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 438.374576,
+          "capture_to_last_audio_ms": 521.351913,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 90,
+          "provider_latency_ms": 438.374576,
+          "quality_passed": true,
+          "queue_lag_ms": 18.977337,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 457.351913,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 440.766203,
+          "capture_to_last_audio_ms": 529.045758,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 91,
+          "provider_latency_ms": 440.766203,
+          "quality_passed": true,
+          "queue_lag_ms": 24.279555,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 465.045758,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 424.082638,
+          "capture_to_last_audio_ms": 515.621843,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 92,
+          "provider_latency_ms": 424.082638,
+          "quality_passed": true,
+          "queue_lag_ms": 27.539205,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 451.621843,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 453.688596,
+          "capture_to_last_audio_ms": 543.812991,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 93,
+          "provider_latency_ms": 453.688596,
+          "quality_passed": true,
+          "queue_lag_ms": 26.124395,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 479.812991,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 528.413483,
+          "capture_to_last_audio_ms": 612.71476,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 94,
+          "provider_latency_ms": 528.413483,
+          "quality_passed": true,
+          "queue_lag_ms": 20.301277,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 548.71476,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 638.922695,
+          "capture_to_last_audio_ms": 725.748969,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 95,
+          "provider_latency_ms": 638.922695,
+          "quality_passed": true,
+          "queue_lag_ms": 22.826274,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 661.748969,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 397.504328,
+          "capture_to_last_audio_ms": 486.35583,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 96,
+          "provider_latency_ms": 397.504328,
+          "quality_passed": true,
+          "queue_lag_ms": 24.851502,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 422.35583,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 463.866672,
+          "capture_to_last_audio_ms": 538.100695,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 97,
+          "provider_latency_ms": 463.866672,
+          "quality_passed": true,
+          "queue_lag_ms": 10.234023,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 474.100695,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 482.413306,
+          "capture_to_last_audio_ms": 558.334664,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 98,
+          "provider_latency_ms": 482.413306,
+          "quality_passed": true,
+          "queue_lag_ms": 11.921358,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 494.334664,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 475.033193,
+          "capture_to_last_audio_ms": 564.178317,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 99,
+          "provider_latency_ms": 475.033193,
+          "quality_passed": true,
+          "queue_lag_ms": 25.145124,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 500.178317,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 566.285426,
+          "capture_to_last_audio_ms": 649.579655,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 100,
+          "provider_latency_ms": 566.285426,
+          "quality_passed": true,
+          "queue_lag_ms": 19.294229,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 585.579655,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 583.590549,
+          "capture_to_last_audio_ms": 674.009551,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 101,
+          "provider_latency_ms": 583.590549,
+          "quality_passed": true,
+          "queue_lag_ms": 26.419002,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 610.009551,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 474.104047,
+          "capture_to_last_audio_ms": 558.9725,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 102,
+          "provider_latency_ms": 474.104047,
+          "quality_passed": true,
+          "queue_lag_ms": 20.868453,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 494.9725,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 424.857212,
+          "capture_to_last_audio_ms": 518.519301,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 103,
+          "provider_latency_ms": 424.857212,
+          "quality_passed": true,
+          "queue_lag_ms": 29.662089,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 454.519301,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 386.504556,
+          "capture_to_last_audio_ms": 468.684814,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 104,
+          "provider_latency_ms": 386.504556,
+          "quality_passed": true,
+          "queue_lag_ms": 18.180258,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 404.684814,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 385.921074,
+          "capture_to_last_audio_ms": 473.299494,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 105,
+          "provider_latency_ms": 385.921074,
+          "quality_passed": true,
+          "queue_lag_ms": 23.37842,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 409.299494,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 412.517736,
+          "capture_to_last_audio_ms": 496.948197,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 106,
+          "provider_latency_ms": 412.517736,
+          "quality_passed": true,
+          "queue_lag_ms": 20.430461,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 432.948197,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 387.947462,
+          "capture_to_last_audio_ms": 474.841233,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 107,
+          "provider_latency_ms": 387.947462,
+          "quality_passed": true,
+          "queue_lag_ms": 22.893771,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 410.841233,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 386.923778,
+          "capture_to_last_audio_ms": 471.218815,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 108,
+          "provider_latency_ms": 386.923778,
+          "quality_passed": true,
+          "queue_lag_ms": 20.295037,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 407.218815,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 438.729453,
+          "capture_to_last_audio_ms": 524.220417,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 109,
+          "provider_latency_ms": 438.729453,
+          "quality_passed": true,
+          "queue_lag_ms": 21.490964,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 460.220417,
+          "timed_out": false
+        }
+      ],
+      "speech_onset_to_first_audible_ms": {
+        "p50": 478.191764,
+        "p95": 706.789384
+      },
+      "timeout_count": 0,
+      "timeout_rate": 0.0,
+      "transitions": []
+    },
+    "ru_to_en": {
+      "capture_to_first_audio_ms": {
+        "p50": 400.239138,
+        "p95": 569.273185
+      },
+      "capture_to_last_audio_ms": {
+        "p50": 482.765958,
+        "p95": 656.342013
+      },
+      "direction": "ru_to_en",
+      "drop_count": 0,
+      "drop_rate": 0.0,
+      "final_mode": "quality_first",
+      "provider_latency_ms": {
+        "p50": 400.239138,
+        "p95": 569.273185
+      },
+      "quality_passed": true,
+      "queue_lag_ms": {
+        "p50": 20.96298,
+        "p95": 30.77991
+      },
+      "restart_count": 0,
+      "samples": [
+        {
+          "capture_to_first_audio_ms": 391.157621,
+          "capture_to_last_audio_ms": 481.011401,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 10,
+          "provider_latency_ms": 391.157621,
+          "quality_passed": true,
+          "queue_lag_ms": 25.85378,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 417.011401,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 419.859037,
+          "capture_to_last_audio_ms": 506.361854,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 11,
+          "provider_latency_ms": 419.859037,
+          "quality_passed": true,
+          "queue_lag_ms": 22.502817,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 442.361854,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 557.42111,
+          "capture_to_last_audio_ms": 646.585308,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 12,
+          "provider_latency_ms": 557.42111,
+          "quality_passed": true,
+          "queue_lag_ms": 25.164198,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 582.585308,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 404.679701,
+          "capture_to_last_audio_ms": 497.277075,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 13,
+          "provider_latency_ms": 404.679701,
+          "quality_passed": true,
+          "queue_lag_ms": 28.597374,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 433.277075,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 347.513706,
+          "capture_to_last_audio_ms": 425.393597,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 14,
+          "provider_latency_ms": 347.513706,
+          "quality_passed": true,
+          "queue_lag_ms": 13.879891,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 361.393597,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 416.485069,
+          "capture_to_last_audio_ms": 495.614737,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 15,
+          "provider_latency_ms": 416.485069,
+          "quality_passed": true,
+          "queue_lag_ms": 15.129668,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 431.614737,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 361.657036,
+          "capture_to_last_audio_ms": 438.590829,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 16,
+          "provider_latency_ms": 361.657036,
+          "quality_passed": true,
+          "queue_lag_ms": 12.933793,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 374.590829,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 406.534007,
+          "capture_to_last_audio_ms": 498.581882,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 17,
+          "provider_latency_ms": 406.534007,
+          "quality_passed": true,
+          "queue_lag_ms": 28.047875,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 434.581882,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 421.05061,
+          "capture_to_last_audio_ms": 508.623596,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 18,
+          "provider_latency_ms": 421.05061,
+          "quality_passed": true,
+          "queue_lag_ms": 23.572986,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 444.623596,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 396.333319,
+          "capture_to_last_audio_ms": 473.303112,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 19,
+          "provider_latency_ms": 396.333319,
+          "quality_passed": true,
+          "queue_lag_ms": 12.969793,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 409.303112,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 348.554779,
+          "capture_to_last_audio_ms": 426.387725,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 20,
+          "provider_latency_ms": 348.554779,
+          "quality_passed": true,
+          "queue_lag_ms": 13.832946,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 362.387725,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 353.694389,
+          "capture_to_last_audio_ms": 429.480807,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 21,
+          "provider_latency_ms": 353.694389,
+          "quality_passed": true,
+          "queue_lag_ms": 11.786418,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 365.480807,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 360.036946,
+          "capture_to_last_audio_ms": 441.077836,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 22,
+          "provider_latency_ms": 360.036946,
+          "quality_passed": true,
+          "queue_lag_ms": 17.04089,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 377.077836,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 386.699154,
+          "capture_to_last_audio_ms": 479.620129,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 23,
+          "provider_latency_ms": 386.699154,
+          "quality_passed": true,
+          "queue_lag_ms": 28.920975,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 415.620129,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 455.604675,
+          "capture_to_last_audio_ms": 530.335376,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 24,
+          "provider_latency_ms": 455.604675,
+          "quality_passed": true,
+          "queue_lag_ms": 10.730701,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 466.335376,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 359.691716,
+          "capture_to_last_audio_ms": 437.203666,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 25,
+          "provider_latency_ms": 359.691716,
+          "quality_passed": true,
+          "queue_lag_ms": 13.51195,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 373.203666,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 379.985682,
+          "capture_to_last_audio_ms": 459.724315,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 26,
+          "provider_latency_ms": 379.985682,
+          "quality_passed": true,
+          "queue_lag_ms": 15.738633,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 395.724315,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 400.239138,
+          "capture_to_last_audio_ms": 484.343196,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 27,
+          "provider_latency_ms": 400.239138,
+          "quality_passed": true,
+          "queue_lag_ms": 20.104058,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 420.343196,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 400.044093,
+          "capture_to_last_audio_ms": 494.280167,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 28,
+          "provider_latency_ms": 400.044093,
+          "quality_passed": true,
+          "queue_lag_ms": 30.236074,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 430.280167,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 413.118229,
+          "capture_to_last_audio_ms": 496.561072,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 29,
+          "provider_latency_ms": 413.118229,
+          "quality_passed": true,
+          "queue_lag_ms": 19.442843,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 432.561072,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 388.299458,
+          "capture_to_last_audio_ms": 478.673755,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 30,
+          "provider_latency_ms": 388.299458,
+          "quality_passed": true,
+          "queue_lag_ms": 26.374297,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 414.673755,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 440.668489,
+          "capture_to_last_audio_ms": 516.921108,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 31,
+          "provider_latency_ms": 440.668489,
+          "quality_passed": true,
+          "queue_lag_ms": 12.252619,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 452.921108,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 320.050159,
+          "capture_to_last_audio_ms": 402.229284,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 32,
+          "provider_latency_ms": 320.050159,
+          "quality_passed": true,
+          "queue_lag_ms": 18.179125,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 338.229284,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 333.857938,
+          "capture_to_last_audio_ms": 420.664181,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 33,
+          "provider_latency_ms": 333.857938,
+          "quality_passed": true,
+          "queue_lag_ms": 22.806243,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 356.664181,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 383.110044,
+          "capture_to_last_audio_ms": 473.249829,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 34,
+          "provider_latency_ms": 383.110044,
+          "quality_passed": true,
+          "queue_lag_ms": 26.139785,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 409.249829,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 384.18174,
+          "capture_to_last_audio_ms": 470.753871,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 35,
+          "provider_latency_ms": 384.18174,
+          "quality_passed": true,
+          "queue_lag_ms": 22.572131,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 406.753871,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 569.273185,
+          "capture_to_last_audio_ms": 653.417112,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 36,
+          "provider_latency_ms": 569.273185,
+          "quality_passed": true,
+          "queue_lag_ms": 20.143927,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 589.417112,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 391.247248,
+          "capture_to_last_audio_ms": 466.098002,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 37,
+          "provider_latency_ms": 391.247248,
+          "quality_passed": true,
+          "queue_lag_ms": 10.850754,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 402.098002,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 505.569877,
+          "capture_to_last_audio_ms": 591.914628,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 38,
+          "provider_latency_ms": 505.569877,
+          "quality_passed": true,
+          "queue_lag_ms": 22.344751,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 527.914628,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 394.577807,
+          "capture_to_last_audio_ms": 482.765958,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 39,
+          "provider_latency_ms": 394.577807,
+          "quality_passed": true,
+          "queue_lag_ms": 24.188151,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 418.765958,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 373.095292,
+          "capture_to_last_audio_ms": 462.071453,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 40,
+          "provider_latency_ms": 373.095292,
+          "quality_passed": true,
+          "queue_lag_ms": 24.976161,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 398.071453,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 389.18741,
+          "capture_to_last_audio_ms": 482.312539,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 41,
+          "provider_latency_ms": 389.18741,
+          "quality_passed": true,
+          "queue_lag_ms": 29.125129,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 418.312539,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 434.569236,
+          "capture_to_last_audio_ms": 519.402644,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 42,
+          "provider_latency_ms": 434.569236,
+          "quality_passed": true,
+          "queue_lag_ms": 20.833408,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 455.402644,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 401.249469,
+          "capture_to_last_audio_ms": 477.27751,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 43,
+          "provider_latency_ms": 401.249469,
+          "quality_passed": true,
+          "queue_lag_ms": 12.028041,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 413.27751,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 379.227808,
+          "capture_to_last_audio_ms": 470.348326,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 44,
+          "provider_latency_ms": 379.227808,
+          "quality_passed": true,
+          "queue_lag_ms": 27.120518,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 406.348326,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 380.268263,
+          "capture_to_last_audio_ms": 465.766529,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 45,
+          "provider_latency_ms": 380.268263,
+          "quality_passed": true,
+          "queue_lag_ms": 21.498266,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 401.766529,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 442.476856,
+          "capture_to_last_audio_ms": 525.01609,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 46,
+          "provider_latency_ms": 442.476856,
+          "quality_passed": true,
+          "queue_lag_ms": 18.539234,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 461.01609,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 935.394553,
+          "capture_to_last_audio_ms": 1023.65389,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 47,
+          "provider_latency_ms": 935.394553,
+          "quality_passed": true,
+          "queue_lag_ms": 24.259337,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 959.65389,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 402.289829,
+          "capture_to_last_audio_ms": 484.391147,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 48,
+          "provider_latency_ms": 402.289829,
+          "quality_passed": true,
+          "queue_lag_ms": 18.101318,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 420.391147,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 419.44652,
+          "capture_to_last_audio_ms": 505.03985,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 49,
+          "provider_latency_ms": 419.44652,
+          "quality_passed": true,
+          "queue_lag_ms": 21.59333,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 441.03985,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 485.568744,
+          "capture_to_last_audio_ms": 573.464217,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 50,
+          "provider_latency_ms": 485.568744,
+          "quality_passed": true,
+          "queue_lag_ms": 23.895473,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 509.464217,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 382.242527,
+          "capture_to_last_audio_ms": 479.907908,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 51,
+          "provider_latency_ms": 382.242527,
+          "quality_passed": true,
+          "queue_lag_ms": 33.665381,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 415.907908,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 382.083794,
+          "capture_to_last_audio_ms": 467.991171,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 52,
+          "provider_latency_ms": 382.083794,
+          "quality_passed": true,
+          "queue_lag_ms": 21.907377,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 403.991171,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 367.123666,
+          "capture_to_last_audio_ms": 454.032675,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 53,
+          "provider_latency_ms": 367.123666,
+          "quality_passed": true,
+          "queue_lag_ms": 22.909009,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 390.032675,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 471.506386,
+          "capture_to_last_audio_ms": 566.429984,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 54,
+          "provider_latency_ms": 471.506386,
+          "quality_passed": true,
+          "queue_lag_ms": 30.923598,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 502.429984,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 355.945736,
+          "capture_to_last_audio_ms": 439.915669,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 55,
+          "provider_latency_ms": 355.945736,
+          "quality_passed": true,
+          "queue_lag_ms": 19.969933,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 375.915669,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 481.79638,
+          "capture_to_last_audio_ms": 556.372303,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 56,
+          "provider_latency_ms": 481.79638,
+          "quality_passed": true,
+          "queue_lag_ms": 10.575923,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 492.372303,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 568.678065,
+          "capture_to_last_audio_ms": 656.342013,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 57,
+          "provider_latency_ms": 568.678065,
+          "quality_passed": true,
+          "queue_lag_ms": 23.663948,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 592.342013,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 606.235982,
+          "capture_to_last_audio_ms": 684.769282,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 58,
+          "provider_latency_ms": 606.235982,
+          "quality_passed": true,
+          "queue_lag_ms": 14.5333,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 620.769282,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 462.769421,
+          "capture_to_last_audio_ms": 543.550721,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 59,
+          "provider_latency_ms": 462.769421,
+          "quality_passed": true,
+          "queue_lag_ms": 16.7813,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 479.550721,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 509.041638,
+          "capture_to_last_audio_ms": 601.818709,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 60,
+          "provider_latency_ms": 509.041638,
+          "quality_passed": true,
+          "queue_lag_ms": 28.777071,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 537.818709,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 469.104631,
+          "capture_to_last_audio_ms": 555.893605,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 61,
+          "provider_latency_ms": 469.104631,
+          "quality_passed": true,
+          "queue_lag_ms": 22.788974,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 491.893605,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 417.902647,
+          "capture_to_last_audio_ms": 498.539307,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 62,
+          "provider_latency_ms": 417.902647,
+          "quality_passed": true,
+          "queue_lag_ms": 16.63666,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 434.539307,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 432.431586,
+          "capture_to_last_audio_ms": 516.74095,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 63,
+          "provider_latency_ms": 432.431586,
+          "quality_passed": true,
+          "queue_lag_ms": 20.309364,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 452.74095,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 487.147411,
+          "capture_to_last_audio_ms": 572.101112,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 64,
+          "provider_latency_ms": 487.147411,
+          "quality_passed": true,
+          "queue_lag_ms": 20.953701,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 508.101112,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 373.259167,
+          "capture_to_last_audio_ms": 459.134842,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 65,
+          "provider_latency_ms": 373.259167,
+          "quality_passed": true,
+          "queue_lag_ms": 21.875675,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 395.134842,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 340.716144,
+          "capture_to_last_audio_ms": 432.133173,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 66,
+          "provider_latency_ms": 340.716144,
+          "quality_passed": true,
+          "queue_lag_ms": 27.417029,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 368.133173,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 451.295854,
+          "capture_to_last_audio_ms": 543.707979,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 67,
+          "provider_latency_ms": 451.295854,
+          "quality_passed": true,
+          "queue_lag_ms": 28.412125,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 479.707979,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 398.817831,
+          "capture_to_last_audio_ms": 486.806677,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 68,
+          "provider_latency_ms": 398.817831,
+          "quality_passed": true,
+          "queue_lag_ms": 23.988846,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 422.806677,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 384.757002,
+          "capture_to_last_audio_ms": 463.187153,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 69,
+          "provider_latency_ms": 384.757002,
+          "quality_passed": true,
+          "queue_lag_ms": 14.430151,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 399.187153,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 398.314404,
+          "capture_to_last_audio_ms": 482.607536,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 70,
+          "provider_latency_ms": 398.314404,
+          "quality_passed": true,
+          "queue_lag_ms": 20.293132,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 418.607536,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 416.341944,
+          "capture_to_last_audio_ms": 494.057333,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 71,
+          "provider_latency_ms": 416.341944,
+          "quality_passed": true,
+          "queue_lag_ms": 13.715389,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 430.057333,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 931.571493,
+          "capture_to_last_audio_ms": 1013.746167,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 72,
+          "provider_latency_ms": 931.571493,
+          "quality_passed": true,
+          "queue_lag_ms": 18.174674,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 949.746167,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 444.842457,
+          "capture_to_last_audio_ms": 539.622367,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 73,
+          "provider_latency_ms": 444.842457,
+          "quality_passed": true,
+          "queue_lag_ms": 30.77991,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 475.622367,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 380.361121,
+          "capture_to_last_audio_ms": 466.604033,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 74,
+          "provider_latency_ms": 380.361121,
+          "quality_passed": true,
+          "queue_lag_ms": 22.242912,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 402.604033,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 417.609843,
+          "capture_to_last_audio_ms": 518.236791,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 75,
+          "provider_latency_ms": 417.609843,
+          "quality_passed": true,
+          "queue_lag_ms": 36.626948,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 454.236791,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 414.413379,
+          "capture_to_last_audio_ms": 501.309522,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 76,
+          "provider_latency_ms": 414.413379,
+          "quality_passed": true,
+          "queue_lag_ms": 22.896143,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 437.309522,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 411.720322,
+          "capture_to_last_audio_ms": 501.119247,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 77,
+          "provider_latency_ms": 411.720322,
+          "quality_passed": true,
+          "queue_lag_ms": 25.398925,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 437.119247,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 379.215106,
+          "capture_to_last_audio_ms": 461.563566,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 78,
+          "provider_latency_ms": 379.215106,
+          "quality_passed": true,
+          "queue_lag_ms": 18.34846,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 397.563566,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 343.871217,
+          "capture_to_last_audio_ms": 426.912975,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 79,
+          "provider_latency_ms": 343.871217,
+          "quality_passed": true,
+          "queue_lag_ms": 19.041758,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 362.912975,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 356.113245,
+          "capture_to_last_audio_ms": 447.313152,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 80,
+          "provider_latency_ms": 356.113245,
+          "quality_passed": true,
+          "queue_lag_ms": 27.199907,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 383.313152,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 447.334943,
+          "capture_to_last_audio_ms": 525.375177,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 81,
+          "provider_latency_ms": 447.334943,
+          "quality_passed": true,
+          "queue_lag_ms": 14.040234,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 461.375177,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 407.588404,
+          "capture_to_last_audio_ms": 484.227501,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 82,
+          "provider_latency_ms": 407.588404,
+          "quality_passed": true,
+          "queue_lag_ms": 12.639097,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 420.227501,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 587.143665,
+          "capture_to_last_audio_ms": 677.624191,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 83,
+          "provider_latency_ms": 587.143665,
+          "quality_passed": true,
+          "queue_lag_ms": 26.480526,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 613.624191,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 438.164361,
+          "capture_to_last_audio_ms": 522.43973,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 84,
+          "provider_latency_ms": 438.164361,
+          "quality_passed": true,
+          "queue_lag_ms": 20.275369,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 458.43973,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 396.733192,
+          "capture_to_last_audio_ms": 482.01574,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 85,
+          "provider_latency_ms": 396.733192,
+          "quality_passed": true,
+          "queue_lag_ms": 21.282548,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 418.01574,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 380.885517,
+          "capture_to_last_audio_ms": 469.474473,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 86,
+          "provider_latency_ms": 380.885517,
+          "quality_passed": true,
+          "queue_lag_ms": 24.588956,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 405.474473,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 409.766994,
+          "capture_to_last_audio_ms": 500.625732,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 87,
+          "provider_latency_ms": 409.766994,
+          "quality_passed": true,
+          "queue_lag_ms": 26.858738,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 436.625732,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 403.435729,
+          "capture_to_last_audio_ms": 480.851205,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 88,
+          "provider_latency_ms": 403.435729,
+          "quality_passed": true,
+          "queue_lag_ms": 13.415476,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 416.851205,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 413.941806,
+          "capture_to_last_audio_ms": 498.904786,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 89,
+          "provider_latency_ms": 413.941806,
+          "quality_passed": true,
+          "queue_lag_ms": 20.96298,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 434.904786,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 402.264999,
+          "capture_to_last_audio_ms": 476.136704,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 90,
+          "provider_latency_ms": 402.264999,
+          "quality_passed": true,
+          "queue_lag_ms": 9.871705,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 412.136704,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 384.417209,
+          "capture_to_last_audio_ms": 461.202861,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 91,
+          "provider_latency_ms": 384.417209,
+          "quality_passed": true,
+          "queue_lag_ms": 12.785652,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 397.202861,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 350.834918,
+          "capture_to_last_audio_ms": 435.212368,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 92,
+          "provider_latency_ms": 350.834918,
+          "quality_passed": true,
+          "queue_lag_ms": 20.37745,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 371.212368,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 390.103804,
+          "capture_to_last_audio_ms": 479.326072,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 93,
+          "provider_latency_ms": 390.103804,
+          "quality_passed": true,
+          "queue_lag_ms": 25.222268,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 415.326072,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 453.067925,
+          "capture_to_last_audio_ms": 545.167765,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 94,
+          "provider_latency_ms": 453.067925,
+          "quality_passed": true,
+          "queue_lag_ms": 28.09984,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 481.167765,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 515.553322,
+          "capture_to_last_audio_ms": 601.625376,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 95,
+          "provider_latency_ms": 515.553322,
+          "quality_passed": true,
+          "queue_lag_ms": 22.072054,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 537.625376,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 356.610342,
+          "capture_to_last_audio_ms": 454.338973,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 96,
+          "provider_latency_ms": 356.610342,
+          "quality_passed": true,
+          "queue_lag_ms": 33.728631,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 390.338973,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 372.797936,
+          "capture_to_last_audio_ms": 450.236872,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 97,
+          "provider_latency_ms": 372.797936,
+          "quality_passed": true,
+          "queue_lag_ms": 13.438936,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 386.236872,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 397.98942,
+          "capture_to_last_audio_ms": 479.568984,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 98,
+          "provider_latency_ms": 397.98942,
+          "quality_passed": true,
+          "queue_lag_ms": 17.579564,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 415.568984,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 423.587896,
+          "capture_to_last_audio_ms": 504.790103,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 99,
+          "provider_latency_ms": 423.587896,
+          "quality_passed": true,
+          "queue_lag_ms": 17.202207,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 440.790103,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 600.993157,
+          "capture_to_last_audio_ms": 684.046481,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 100,
+          "provider_latency_ms": 600.993157,
+          "quality_passed": true,
+          "queue_lag_ms": 19.053324,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 620.046481,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 525.098405,
+          "capture_to_last_audio_ms": 616.979343,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 101,
+          "provider_latency_ms": 525.098406,
+          "quality_passed": true,
+          "queue_lag_ms": 27.880938,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 552.979343,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 431.586576,
+          "capture_to_last_audio_ms": 516.020559,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 102,
+          "provider_latency_ms": 431.586576,
+          "quality_passed": true,
+          "queue_lag_ms": 20.433983,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 452.020559,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 377.815267,
+          "capture_to_last_audio_ms": 475.42123,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 103,
+          "provider_latency_ms": 377.815267,
+          "quality_passed": true,
+          "queue_lag_ms": 33.605963,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 411.42123,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 332.375539,
+          "capture_to_last_audio_ms": 409.909396,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 104,
+          "provider_latency_ms": 332.375539,
+          "quality_passed": true,
+          "queue_lag_ms": 13.533857,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 345.909396,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 315.384078,
+          "capture_to_last_audio_ms": 403.797889,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 105,
+          "provider_latency_ms": 315.384078,
+          "quality_passed": true,
+          "queue_lag_ms": 24.413811,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 339.797889,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 404.366654,
+          "capture_to_last_audio_ms": 488.392426,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 106,
+          "provider_latency_ms": 404.366654,
+          "quality_passed": true,
+          "queue_lag_ms": 20.025772,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 424.392426,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 334.528014,
+          "capture_to_last_audio_ms": 414.761356,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 107,
+          "provider_latency_ms": 334.528014,
+          "quality_passed": true,
+          "queue_lag_ms": 16.233342,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 350.761356,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 350.785348,
+          "capture_to_last_audio_ms": 439.276443,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 108,
+          "provider_latency_ms": 350.785348,
+          "quality_passed": true,
+          "queue_lag_ms": 24.491095,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 375.276443,
+          "timed_out": false
+        },
+        {
+          "capture_to_first_audio_ms": 387.583191,
+          "capture_to_last_audio_ms": 467.211722,
+          "dropped": false,
+          "mode": "quality_first",
+          "pair_index": 109,
+          "provider_latency_ms": 387.583191,
+          "quality_passed": true,
+          "queue_lag_ms": 15.628531,
+          "restarted": false,
+          "speech_onset_to_first_audible_ms": 403.211722,
+          "timed_out": false
+        }
+      ],
+      "speech_onset_to_first_audible_ms": {
+        "p50": 418.765958,
+        "p95": 592.342013
+      },
+      "timeout_count": 0,
+      "timeout_rate": 0.0,
+      "transitions": []
+    }
+  },
+  "excluded_warmups": 10,
+  "measured_count_per_direction": 100,
+  "profile": {
+    "duration_seconds": 1800.0,
+    "kind": "soak_30_minutes"
+  },
+  "quality_passed": true,
+  "resources": {
+    "cpu_percent_peak": 51.0,
+    "observed_duration_seconds": 1800.000455218,
+    "rss_bytes_peak": 47738880,
+    "samples": [
+      {
+        "cpu_percent": 51.0,
+        "monotonic_ns": 106076802335683,
+        "rss_bytes": 46854144,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106093166435979,
+        "rss_bytes": 47456256,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106093202190488,
+        "rss_bytes": 47456256,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106109530239240,
+        "rss_bytes": 47501312,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106109565850378,
+        "rss_bytes": 47501312,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106125893752867,
+        "rss_bytes": 47538176,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106125931758510,
+        "rss_bytes": 47538176,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106142257558856,
+        "rss_bytes": 47554560,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106142293634548,
+        "rss_bytes": 47554560,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106158620875527,
+        "rss_bytes": 47554560,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106158648079809,
+        "rss_bytes": 47554560,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106174984553926,
+        "rss_bytes": 47558656,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 31.6,
+        "monotonic_ns": 106175016248431,
+        "rss_bytes": 47558656,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106191348314874,
+        "rss_bytes": 47575040,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106191379033342,
+        "rss_bytes": 47575040,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106207711705024,
+        "rss_bytes": 47575040,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106207740532467,
+        "rss_bytes": 47575040,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106224075314359,
+        "rss_bytes": 47583232,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106224109346444,
+        "rss_bytes": 47583232,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106240439130472,
+        "rss_bytes": 47591424,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106240468873651,
+        "rss_bytes": 47591424,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106256802560171,
+        "rss_bytes": 47591424,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106256826149698,
+        "rss_bytes": 47591424,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106273166284250,
+        "rss_bytes": 47591424,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106273189598368,
+        "rss_bytes": 47591424,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106289529834825,
+        "rss_bytes": 47591424,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106289554825629,
+        "rss_bytes": 47591424,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106305893490276,
+        "rss_bytes": 47595520,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106305914327403,
+        "rss_bytes": 47595520,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106322257157090,
+        "rss_bytes": 47599616,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 47.2,
+        "monotonic_ns": 106322278374460,
+        "rss_bytes": 47599616,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106338620954943,
+        "rss_bytes": 47599616,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 33.4,
+        "monotonic_ns": 106338650990940,
+        "rss_bytes": 47599616,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106354984378073,
+        "rss_bytes": 47607808,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106355016170915,
+        "rss_bytes": 47607808,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106371348083307,
+        "rss_bytes": 47607808,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106371386267815,
+        "rss_bytes": 47607808,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106387711765211,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106387748796565,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106404075454035,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 43.8,
+        "monotonic_ns": 106404098308827,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106420438857972,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 38.3,
+        "monotonic_ns": 106420464996251,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106436802701796,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106436835231704,
+        "rss_bytes": 47616000,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106453166355329,
+        "rss_bytes": 47620096,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106453198258885,
+        "rss_bytes": 47620096,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106469529942103,
+        "rss_bytes": 47620096,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106469561373048,
+        "rss_bytes": 47620096,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106485893489106,
+        "rss_bytes": 47628288,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106485916683906,
+        "rss_bytes": 47628288,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106502257062050,
+        "rss_bytes": 47628288,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106502280359668,
+        "rss_bytes": 47628288,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106518620934436,
+        "rss_bytes": 47628288,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106518651264699,
+        "rss_bytes": 47628288,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106534984384425,
+        "rss_bytes": 47640576,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106535007693999,
+        "rss_bytes": 47640576,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106551347964799,
+        "rss_bytes": 47640576,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106551377513134,
+        "rss_bytes": 47640576,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106567711703694,
+        "rss_bytes": 47640576,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106567742092754,
+        "rss_bytes": 47640576,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106584075305543,
+        "rss_bytes": 47640576,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106584096335552,
+        "rss_bytes": 47640576,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106600438943401,
+        "rss_bytes": 47640576,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106600466921014,
+        "rss_bytes": 47640576,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.2,
+        "monotonic_ns": 106616802562493,
+        "rss_bytes": 47648768,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106616825631487,
+        "rss_bytes": 47648768,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106633166397787,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106633201461603,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106649530019067,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106649565808972,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106665893727969,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106665928389499,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106682257217112,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106682288329764,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106698620652037,
+        "rss_bytes": 47648768,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106698651527795,
+        "rss_bytes": 47648768,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106714984336945,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106715006948516,
+        "rss_bytes": 47648768,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106731348108492,
+        "rss_bytes": 47652864,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106731378136928,
+        "rss_bytes": 47652864,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106747711719476,
+        "rss_bytes": 47656960,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106747743627573,
+        "rss_bytes": 47656960,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106764075353866,
+        "rss_bytes": 47656960,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106764096380167,
+        "rss_bytes": 47656960,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106780439015890,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106780460311520,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106796802634450,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106796845151812,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106813166502916,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106813206236312,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106829529851772,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106829555523047,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106845893605757,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106845923694510,
+        "rss_bytes": 47661056,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106862257406902,
+        "rss_bytes": 47665152,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106862294271918,
+        "rss_bytes": 47665152,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106878620765439,
+        "rss_bytes": 47673344,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106878665883476,
+        "rss_bytes": 47673344,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.2,
+        "monotonic_ns": 106894984486066,
+        "rss_bytes": 47673344,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106895025748941,
+        "rss_bytes": 47673344,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106911348211118,
+        "rss_bytes": 47677440,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 22.2,
+        "monotonic_ns": 106911393211630,
+        "rss_bytes": 47677440,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106927711741545,
+        "rss_bytes": 47677440,
+        "vram_mib": 1253
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106927748500058,
+        "rss_bytes": 47677440,
+        "vram_mib": 1253
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106944075396065,
+        "rss_bytes": 47681536,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106944104516011,
+        "rss_bytes": 47681536,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106960439119247,
+        "rss_bytes": 47681536,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106960469519844,
+        "rss_bytes": 47681536,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106976802639511,
+        "rss_bytes": 47685632,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106976837585872,
+        "rss_bytes": 47685632,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 106993166173675,
+        "rss_bytes": 47685632,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 106993188248996,
+        "rss_bytes": 47685632,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107009529796216,
+        "rss_bytes": 47689728,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 33.4,
+        "monotonic_ns": 107009559781553,
+        "rss_bytes": 47689728,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107025893535950,
+        "rss_bytes": 47689728,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107025918733119,
+        "rss_bytes": 47689728,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107042257066945,
+        "rss_bytes": 47689728,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107042279336513,
+        "rss_bytes": 47689728,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107058620855980,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107058653916223,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107074984573455,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107075015964695,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107091348029707,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107091375235701,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.2,
+        "monotonic_ns": 107107711751955,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107107744780497,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107124075355315,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107124097814064,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107140439209613,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107140473831851,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107156802524974,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107156832857569,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107173166359484,
+        "rss_bytes": 47697920,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107173186250782,
+        "rss_bytes": 47697920,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107189529901244,
+        "rss_bytes": 47706112,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107189567022987,
+        "rss_bytes": 47706112,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107205893408855,
+        "rss_bytes": 47710208,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107205913464750,
+        "rss_bytes": 47710208,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107222257407829,
+        "rss_bytes": 47710208,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107222290442308,
+        "rss_bytes": 47710208,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107238620767494,
+        "rss_bytes": 47710208,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107238646433750,
+        "rss_bytes": 47710208,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107254984359820,
+        "rss_bytes": 47710208,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107255016175265,
+        "rss_bytes": 47710208,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107271347976397,
+        "rss_bytes": 47693824,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107271370680170,
+        "rss_bytes": 47693824,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107287711602992,
+        "rss_bytes": 47702016,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107287737920720,
+        "rss_bytes": 47702016,
+        "vram_mib": 1255
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107304075522780,
+        "rss_bytes": 47706112,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107304115368786,
+        "rss_bytes": 47706112,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107320438930611,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107320463629999,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107336802789067,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107336842485149,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107353166434112,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107353199349378,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107369529933677,
+        "rss_bytes": 47718400,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 43.8,
+        "monotonic_ns": 107369552771909,
+        "rss_bytes": 47718400,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107385893561477,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107385926672908,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107402257152696,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107402278744716,
+        "rss_bytes": 47689728,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107418620667357,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107418646548031,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107434984524730,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107435022381068,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107451348115633,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107451376501706,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107467711826511,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107467748674240,
+        "rss_bytes": 47693824,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107484075436828,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107484117578817,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107500439035153,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107500482850243,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107516802490007,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107516824707620,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107533166238614,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107533194319363,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107549529755745,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107549559715291,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107565893469410,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107565919843207,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107582257139022,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107582285580060,
+        "rss_bytes": 47697920,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107598620658851,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107598654322040,
+        "rss_bytes": 47714304,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107614984435475,
+        "rss_bytes": 47722496,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107615012860046,
+        "rss_bytes": 47722496,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107631348110415,
+        "rss_bytes": 47726592,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107631379842760,
+        "rss_bytes": 47726592,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107647711727470,
+        "rss_bytes": 47726592,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107647743542010,
+        "rss_bytes": 47726592,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107664075356159,
+        "rss_bytes": 47726592,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107664099305587,
+        "rss_bytes": 47726592,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107680438915375,
+        "rss_bytes": 47730688,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107680470201551,
+        "rss_bytes": 47730688,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107696802684923,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107696833227332,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107713166245760,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107713190220744,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107729529848496,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107729567171297,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.2,
+        "monotonic_ns": 107745893431861,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107745924085716,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107762257119187,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107762293541489,
+        "rss_bytes": 47734784,
+        "vram_mib": 1257
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107778620874472,
+        "rss_bytes": 47734784,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107778654057289,
+        "rss_bytes": 47734784,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107794984348181,
+        "rss_bytes": 47738880,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107795013355590,
+        "rss_bytes": 47738880,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107811347983461,
+        "rss_bytes": 47738880,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 36.8,
+        "monotonic_ns": 107811375142526,
+        "rss_bytes": 47738880,
+        "vram_mib": 1256
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107827711689107,
+        "rss_bytes": 47738880,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 44.3,
+        "monotonic_ns": 107827734255920,
+        "rss_bytes": 47738880,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107844075408271,
+        "rss_bytes": 47738880,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107844097462144,
+        "rss_bytes": 47738880,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.1,
+        "monotonic_ns": 107860438951061,
+        "rss_bytes": 47738880,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107860460761372,
+        "rss_bytes": 47738880,
+        "vram_mib": 1254
+      },
+      {
+        "cpu_percent": 0.0,
+        "monotonic_ns": 107876802790901,
+        "rss_bytes": 47738880,
+        "vram_mib": 1254
+      }
+    ],
+    "vram_mib_peak": 1257,
+    "within_limits": true,
+    "scope": "benchmark_process_and_total_gpu"
+  },
+  "schema_version": "translator.task7-component-benchmark.v1",
+  "simultaneous": true,
+  "workstation_evidence": {
+    "graph": {
+      "channels": 1,
+      "correlation_marker": "deterministic-bpsk-v1",
+      "incoming": {
+        "capture": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo.monitor",
+        "playback": "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo"
+      },
+      "outgoing": {
+        "capture": "translator_virtual_mic",
+        "playback": "translator_mic_out"
+      },
+      "sample_format": "s16le",
+      "sample_rate_hz": 16000
+    },
+    "task6": {
+      "generated_at_unix_ns": 1785274378125954920,
+      "measured_per_direction": 100,
+      "model_id": "faster-whisper-small",
+      "schema_version": "translator.task6-benchmark.v2",
+      "sha256": "a563b986db097e89236e3ad0b92b884bbbea56f562339d08cbba1d50cd7e98c6"
+    }
+  },
+  "evidence_scope": "hybrid_component_estimate",
+  "release_eligible": false,
+  "release_classification": null,
+  "component_estimate_classification": "meets_target"
+}

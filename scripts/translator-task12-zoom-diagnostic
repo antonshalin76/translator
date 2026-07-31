@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import datetime as dt
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_REPORT = ROOT / "docs/benchmarks/task12-zoom-diagnostic-report.json"
+SCHEMA_VERSION = "translator.task12-zoom-diagnostic.v1"
+VIRTUAL_MIC_DESCRIPTION = "Translator_Virtual_Mic"
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def read_json(path: str) -> dict[str, Any]:
+    return json.loads((ROOT / path).read_text())
+
+
+def read_optional_json(path: str) -> dict[str, Any] | None:
+    candidate = ROOT / path
+    if not candidate.exists():
+        return None
+    return json.loads(candidate.read_text())
+
+
+def run_command(args: list[str], timeout: float = 10.0) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            "ok": False,
+            "returncode": None,
+            "safe_error": error.__class__.__name__,
+            "stdout": "",
+        }
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "safe_error": None if completed.returncode == 0 else "command_failed",
+        "stdout": completed.stdout.decode("utf-8", errors="replace"),
+    }
+
+
+def command_json(args: list[str], timeout: float = 10.0) -> tuple[list[dict[str, Any]], str | None]:
+    result = run_command(args, timeout=timeout)
+    if not result["ok"]:
+        return [], result["safe_error"] or "command_failed"
+    try:
+        value = json.loads(result["stdout"])
+    except json.JSONDecodeError:
+        return [], "json_parse_failed"
+    if not isinstance(value, list):
+        return [], "unexpected_json_shape"
+    return [item for item in value if isinstance(item, dict)], None
+
+
+def props(node: dict[str, Any]) -> dict[str, str]:
+    raw = node.get("properties")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+def is_zoom_stream(properties: dict[str, str]) -> bool:
+    application = properties.get("application.name", "").strip().lower()
+    binary = properties.get("application.process.binary", "").strip().lower()
+    return binary in {"zoom", "zoomwebviewhost"} or application in {
+        "zoom",
+        "zoom workplace",
+    }
+
+
+def is_call_like(properties: dict[str, str]) -> bool:
+    role = properties.get("media.role", "").lower()
+    media = " ".join(
+        [
+            properties.get("media.name", ""),
+            properties.get("stream.description", ""),
+        ]
+    ).lower()
+    return role in {"communication", "phone"} or any(
+        marker in media for marker in ("webrtc", "voice", "call", "meet")
+    )
+
+
+def linked_output_to_input(link_text: str, output_port: str, input_port: str) -> bool:
+    current_output = False
+    expected_link = f"|-> {input_port}"
+    for raw_line in link_text.splitlines():
+        line = raw_line.strip()
+        if line == output_port:
+            current_output = True
+            continue
+        if current_output and line == expected_link:
+            return True
+        if raw_line and not raw_line[0].isspace():
+            current_output = False
+    return False
+
+
+def pipewire_link_route_present(node_name: str, link_text: str) -> bool:
+    node_name = node_name.strip()
+    if not node_name or ":" in node_name:
+        return False
+    return linked_output_to_input(
+        link_text,
+        f"{node_name}:output_FL",
+        "translator_remote_in:playback_FL",
+    ) and linked_output_to_input(
+        link_text,
+        f"{node_name}:output_FR",
+        "translator_remote_in:playback_FR",
+    )
+
+
+def binary_state() -> dict[str, Any]:
+    binaries = ("zoom", "ZoomWebviewHost")
+    processes = []
+    for binary in binaries:
+        result = run_command(["pgrep", "-x", binary], timeout=5.0)
+        processes.append(
+            {
+                "binary": binary,
+                "path_present": shutil.which(binary) is not None,
+                "running": result["ok"],
+            }
+        )
+    return {"processes": processes}
+
+
+def collect_audio_state() -> dict[str, Any]:
+    sink_inputs, sink_input_error = command_json(["pactl", "--format=json", "list", "sink-inputs"])
+    sinks, sink_error = command_json(["pactl", "--format=json", "list", "sinks"])
+    sources, source_error = command_json(["pactl", "--format=json", "list", "sources"])
+    links = run_command(["pw-link", "-l"], timeout=10.0)
+    link_text = links["stdout"] if links["ok"] else ""
+    sink_names = {
+        int(item["index"]): item.get("name", "")
+        for item in sinks
+        if "index" in item and isinstance(item.get("name"), str)
+    }
+    candidates: list[dict[str, Any]] = []
+    for stream in sink_inputs:
+        properties = props(stream)
+        if not is_zoom_stream(properties):
+            continue
+        sink_index = int(stream.get("sink", 0) or 0)
+        link_route_present = pipewire_link_route_present(
+            properties.get("node.name", "") or properties.get("application.name", ""),
+            link_text,
+        )
+        candidates.append(
+            {
+                "stream_id": int(stream.get("index", 0) or 0),
+                "application_name": properties.get("application.name", ""),
+                "node_name": properties.get("node.name", ""),
+                "process_binary": properties.get("application.process.binary", ""),
+                "media_role": properties.get("media.role") or None,
+                "call_like": is_call_like(properties),
+                "current_sink_name": sink_names.get(sink_index, ""),
+                "on_translator_remote_in": sink_names.get(sink_index, "")
+                == "translator_remote_in",
+                "pipewire_linked_to_translator_remote_in": link_route_present,
+            }
+        )
+    virtual_mic_present = any(
+        item.get("name") == "translator_virtual_mic"
+        or props(item).get("device.description") == VIRTUAL_MIC_DESCRIPTION
+        for item in sources
+    )
+    return {
+        "pactl_available": shutil.which("pactl") is not None,
+        "errors": {
+            "sink_inputs": sink_input_error,
+            "sinks": sink_error,
+            "sources": source_error,
+            "pw_links": None if links["ok"] else links["safe_error"] or "command_failed",
+        },
+        "zoom_route_candidates": candidates,
+        "virtual_microphone": {
+            "expected_description": VIRTUAL_MIC_DESCRIPTION,
+            "source_present": virtual_mic_present,
+        },
+    }
+
+
+def task7_debt(task7: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
+        "task7_complete": task7["acceptance"]["task7_complete"],
+        "local_provider_latency_classification": task7["classification"],
+        "requires_mvp_b_provider_comparison": task7["acceptance"][
+            "requires_mvp_b_provider_comparison"
+        ],
+        "blocked_acceptance_item": task7["acceptance"]["blocked_acceptance_item"],
+    }
+
+
+def task10_debt(task10: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "canonical_evidence": "docs/benchmarks/task10-validation-report.json",
+        "completed": task10["completed"],
+        "mvp_a_gate_satisfied": task10["mvp_a_gate_satisfied"],
+        "live_second_endpoint_status": task10["live_second_endpoint"]["status"],
+    }
+
+
+def task11_debt(task11: dict[str, Any]) -> dict[str, Any]:
+    debt = {
+        "canonical_evidence": "docs/benchmarks/task11-openai-adapter-preflight.json",
+        "task11_completed": task11["task11_completed"],
+        "live_openai_comparison_status": task11["live_openai_comparison"]["status"],
+        "real_app_openai_smoke_status": task11["real_app_openai_smoke"]["status"],
+    }
+    runtime = task11.get("openai_sidecar_runtime")
+    if isinstance(runtime, dict):
+        debt["openai_sidecar_runtime_status"] = runtime.get("status")
+        debt["daemon_openai_launch_allowed"] = runtime.get(
+            "daemon_openai_launch_allowed"
+        )
+        debt["grpc_provider_dispatches_openai_sessions"] = runtime.get(
+            "grpc_provider_dispatches_openai_sessions"
+        )
+    if task11["live_openai_comparison"].get("blocker"):
+        debt["blocker"] = task11["live_openai_comparison"]["blocker"]
+    return debt
+
+
+def build_report() -> dict[str, Any]:
+    task7 = read_json("docs/benchmarks/task7-live-human-round-trip.json")
+    task10 = read_json("docs/benchmarks/task10-validation-report.json")
+    task11 = read_json("docs/benchmarks/task11-openai-adapter-preflight.json")
+    live_zoom = read_optional_json(
+        "docs/benchmarks/task12-zoom-live-translation-check.json"
+    )
+    live_zoom_completed = bool(live_zoom and live_zoom.get("task12_completed"))
+    audio_state = collect_audio_state()
+    route_candidates = audio_state["zoom_route_candidates"]
+    call_like_count = sum(1 for candidate in route_candidates if candidate["call_like"])
+    pulse_route_confirmed = any(
+        candidate["on_translator_remote_in"] for candidate in route_candidates
+    )
+    pipewire_link_route_confirmed = any(
+        candidate["pipewire_linked_to_translator_remote_in"]
+        for candidate in route_candidates
+    )
+    route_selection_confirmed = any(
+        candidate["on_translator_remote_in"]
+        or candidate["pipewire_linked_to_translator_remote_in"]
+        for candidate in route_candidates
+    )
+    route_selection_reason = "real_zoom_route_smoke_not_run"
+    if pulse_route_confirmed:
+        route_selection_reason = "zoom_sink_input_bound_to_translator_remote_in"
+    elif pipewire_link_route_confirmed:
+        route_selection_reason = "zoom_pipewire_links_bound_to_translator_remote_in"
+    virtual_mic_present = audio_state["virtual_microphone"]["source_present"]
+    preconditions_stable = (
+        task10["mvp_a_gate_satisfied"]
+        and task11["task11_completed"]
+        and task7["acceptance"]["task7_complete"]
+    )
+    blockers = []
+    if not preconditions_stable and not live_zoom_completed:
+        blockers.append("mvp_a_mvp_b_or_task7_debt_open")
+    if not route_candidates and not live_zoom_completed:
+        blockers.append("no_active_zoom_sink_input")
+    if route_candidates and not route_selection_confirmed and not live_zoom_completed:
+        blockers.append("zoom_route_selection_not_confirmed")
+    if not virtual_mic_present and not live_zoom_completed:
+        blockers.append("translator_virtual_microphone_not_present")
+    if not live_zoom_completed:
+        blockers.append("real_zoom_second_endpoint_recording_not_verified")
+
+    route_acceptance = {
+        "status": "passed" if route_selection_confirmed else "pending",
+        "reason": route_selection_reason,
+    }
+    outgoing_acceptance = {
+        "status": "pending",
+        "reason": "remote_endpoint_receipt_not_verified",
+    }
+    incoming_acceptance = {
+        "status": "pending",
+        "reason": "receiving_side_recording_not_verified",
+    }
+    if live_zoom_completed:
+        route_acceptance = {
+            "status": "passed",
+            "reason": "superseded_by_live_duplex_confirmation",
+        }
+        outgoing_acceptance = {
+            "status": "passed",
+            "reason": "superseded_by_live_duplex_confirmation",
+        }
+        incoming_acceptance = {
+            "status": "passed",
+            "reason": "superseded_by_live_duplex_confirmation",
+        }
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "task": "Task 12: Post-MVP Zoom Acceptance",
+        "generated_at": utc_now(),
+        "task12_completed": live_zoom_completed,
+        "does_not_satisfy_task12_acceptance": not live_zoom_completed,
+        "zoom_desktop": {
+            "app_key": "zoom_desktop",
+            "binary_state": binary_state(),
+            "route_discovery": {
+                "candidate_count": len(route_candidates),
+                "call_like_candidate_count": call_like_count,
+                "candidates": route_candidates,
+            },
+            "virtual_microphone": {
+                **audio_state["virtual_microphone"],
+                "zoom_selection_confirmed": route_selection_confirmed
+                or live_zoom_completed,
+                "remote_outgoing_translation_confirmed": live_zoom_completed,
+            },
+        },
+        "acceptance": {
+            "zoom_route_selection": route_acceptance,
+            "zoom_outgoing_translation": outgoing_acceptance,
+            "zoom_incoming_translation": incoming_acceptance,
+        },
+        "audio_state": {
+            "pactl_available": audio_state["pactl_available"],
+            "errors": audio_state["errors"],
+        },
+        "zoom_setup_notes": {
+            "microphone": "Select Translator_Virtual_Mic in Zoom audio settings",
+            "speaker": "Keep Zoom playback on the normal physical sink; translator routes only the selected sink-input",
+            "selection": "Use manual route selection when multiple allowlisted app streams are active",
+        },
+        "privacy": {
+            "speech_payload_recorded": False,
+            "meeting_link_recorded": False,
+            "external_provider_started": False,
+        },
+        "blockers": blockers,
+        "task7_debt_carried": task7_debt(task7),
+        "task10_debt_carried": task10_debt(task10),
+        "task11_debt_carried": task11_debt(task11),
+    }
+
+
+def main() -> int:
+    report = build_report()
+    DEFAULT_REPORT.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+    print(DEFAULT_REPORT.relative_to(ROOT))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

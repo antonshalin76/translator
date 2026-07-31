@@ -1,0 +1,1 @@
+"""Local translation provider sidecar."""

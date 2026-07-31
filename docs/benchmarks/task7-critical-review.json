@@ -1,0 +1,70 @@
+{
+  "schema_version": "translator.task7-critical-review.v1",
+  "reviewed_at": "2026-07-29T15:18:43+08:00",
+  "reviewer": {
+    "agent_id": "019facb6-088c-7330-ab06-3842b5b992c2",
+    "kind": "independent_critic"
+  },
+  "review_scope": [
+    "duplex_graph_safety",
+    "honest_headphone_self_test",
+    "exact_pcm_reinjection",
+    "virtual_peer_capability",
+    "incoming_playback_drain",
+    "privacy_evidence",
+    "latency_classification",
+    "task_checkbox_decision"
+  ],
+  "canonical_live_run": {
+    "session_id": "10109f41-9d52-4a70-8283-c0de05088561",
+    "checkpoint": "completed",
+    "recursion_count": 0,
+    "exact_pcm_frame_count": 63,
+    "exact_pcm_sha256": "22e56e6998a5a2e6ea4bbd946f730f652de9d055828cad1c97686ab5cb9e00c3",
+    "physical_mic_onset_to_returned_ru_first_audible_ms": 5968,
+    "user_confirmed_own_phrase_both_directions": true
+  },
+  "findings": [
+    {
+      "severity": "p1",
+      "status": "open",
+      "summary": "Do not mark Task 7 complete while canonical evidence keeps task7_complete=false and latency_target_passed=false."
+    },
+    {
+      "severity": "info",
+      "status": "pass",
+      "summary": "No source mute or sink mute path remains in the accepted headphone self-test route."
+    },
+    {
+      "severity": "info",
+      "status": "pass",
+      "summary": "Accepted live evidence does not rely on AEC or microphone suppression."
+    },
+    {
+      "severity": "info",
+      "status": "pass",
+      "summary": "Exact-PCM proof and VirtualPeer capability gates bind reinjection to the session, process identity and matching PCM hash."
+    },
+    {
+      "severity": "info",
+      "status": "pass",
+      "summary": "Round-trip completion waits for Russian first audio, incoming terminal outcome and incoming playback drain before teardown."
+    },
+    {
+      "severity": "info",
+      "status": "pass",
+      "summary": "Privacy evidence contains no speech text or persisted PCM payload."
+    }
+  ],
+  "verdict": {
+    "honest_isolated_headphone_self_test_accepted": true,
+    "mvp_a_functional_routing_privacy_gates_passed": true,
+    "latency_classification": "fails_usable_limit",
+    "task7_checkbox_should_remain_open": true,
+    "requires_mvp_b_provider_comparison": true
+  },
+  "residual_risks": [
+    "Open-speaker/AEC acceptance remains unresolved.",
+    "Local provider graph-boundary latency remains above the 1000 ms target and 1500 ms usable limit."
+  ]
+}

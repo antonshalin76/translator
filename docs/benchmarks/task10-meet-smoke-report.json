@@ -1,0 +1,87 @@
+{
+  "app": "Google Meet via Firefox/Chromium/Chrome",
+  "app_key": "google_meet_browser",
+  "blockers": [
+    "no_active_task10_route_candidate",
+    "real_second_endpoint_recording_not_verified"
+  ],
+  "completed": false,
+  "environment": {
+    "audio_state": {
+      "errors": {
+        "sink_inputs": null,
+        "sinks": null,
+        "sources": null
+      },
+      "non_task10_sink_input_count": 1,
+      "pactl_available": true,
+      "settle_attempts": 2,
+      "task10_route_candidates": [],
+      "unconfirmed_browser_call_count": 0,
+      "virtual_microphone": {
+        "expected_description": "Translator_Virtual_Mic",
+        "source_present": true
+      }
+    },
+    "daemon_status_available": true,
+    "generated_by": "scripts/translator-task10-real-app-smoke",
+    "service": {
+      "active": "active",
+      "enabled": "enabled",
+      "properties": {
+        "ActiveState": "active",
+        "LoadState": "loaded",
+        "MainPID": "3356468",
+        "SubState": "running"
+      },
+      "start_command": {
+        "ok": true,
+        "safe_error": null
+      }
+    }
+  },
+  "generated_at": "2026-07-29T12:26:17.008621+00:00",
+  "incoming_route_selection": {
+    "attempted": false,
+    "status": "not_attempted"
+  },
+  "live_second_endpoint": {
+    "overlapping_speech_confirmed": false,
+    "recording": {
+      "provided": false
+    },
+    "status": "blocked"
+  },
+  "privacy": {
+    "debug_capture_enabled": false,
+    "debug_text_enabled": false,
+    "external_provider_started": false
+  },
+  "route_discovery": {
+    "call_like_candidate_count": 0,
+    "candidate_count": 0,
+    "candidates": [],
+    "required_binaries": {
+      "chromium": null,
+      "chromium-browser": null,
+      "firefox": "/usr/bin/firefox",
+      "google-chrome": "/usr/bin/google-chrome"
+    },
+    "running_processes": [
+      "chrome",
+      "firefox"
+    ]
+  },
+  "schema_version": "translator.task10-real-app-smoke.v1",
+  "translated_only_default": {
+    "debug_capture_enabled": false,
+    "debug_text_enabled": false,
+    "original_audio_mixed_by_default": false
+  },
+  "virtual_microphone": {
+    "call_app_selection_confirmed": false,
+    "expected_description": "Translator_Virtual_Mic",
+    "remote_outgoing_translation_confirmed": false,
+    "source_present": true
+  }
+}
