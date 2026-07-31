@@ -23,6 +23,13 @@ def read_json(path: str) -> dict[str, Any]:
     return json.loads(read(path))
 
 
+def requires_local_artifacts(*paths: str):
+    return unittest.skipUnless(
+        all((ROOT / path).exists() for path in paths),
+        "local planning/run evidence is not published",
+    )
+
+
 def walk_keys(value: Any) -> list[str]:
     if isinstance(value, dict):
         keys = list(value)
@@ -79,6 +86,7 @@ class Task10RealAppSmokeTests(unittest.TestCase):
         self.assertNotRegex(script, re.compile(r"debug[_-]text.*true", re.IGNORECASE))
         self.assertNotRegex(script, re.compile(r"debug[_-]capture.*true", re.IGNORECASE))
 
+    @requires_local_artifacts("docs/benchmarks/task10-validation-report.json")
     def test_task10_reports_exist_and_record_live_acceptance_completion(self) -> None:
         validation = read_json("docs/benchmarks/task10-validation-report.json")
 
@@ -113,6 +121,11 @@ class Task10RealAppSmokeTests(unittest.TestCase):
         )
         self.assertEqual(validation["repo_c4_scan"]["result"], "passed")
 
+    @requires_local_artifacts(
+        "docs/benchmarks/task10-validation-report.json",
+        "docs/benchmarks/task10-telegram-smoke-report.json",
+        "docs/benchmarks/task10-meet-smoke-report.json",
+    )
     def test_virtual_microphone_presence_is_not_live_call_app_proof(self) -> None:
         validation = read_json("docs/benchmarks/task10-validation-report.json")
         telegram = read_json("docs/benchmarks/task10-telegram-smoke-report.json")
@@ -129,6 +142,11 @@ class Task10RealAppSmokeTests(unittest.TestCase):
         self.assertFalse(telegram["virtual_microphone"]["call_app_selection_confirmed"])
         self.assertFalse(telegram["virtual_microphone"]["remote_outgoing_translation_confirmed"])
 
+    @requires_local_artifacts(
+        "docs/benchmarks/task7-live-human-round-trip.json",
+        "docs/benchmarks/task10-validation-report.json",
+        "docs/benchmarks/task10-latency-ledger.json",
+    )
     def test_task10_carries_task7_latency_debt_verbatim(self) -> None:
         task7 = json.loads(TASK7_REPORT.read_text())
         validation = read_json("docs/benchmarks/task10-validation-report.json")
@@ -163,6 +181,13 @@ class Task10RealAppSmokeTests(unittest.TestCase):
             task7["latency_ms"]["physical_mic_onset_to_returned_ru_first_audible"],
         )
 
+    @requires_local_artifacts(
+        "docs/benchmarks/task10-telegram-smoke-report.json",
+        "docs/benchmarks/task10-meet-smoke-report.json",
+        "docs/benchmarks/task10-latency-ledger.json",
+        "docs/benchmarks/task10-privacy-marker-scan.json",
+        "docs/benchmarks/task10-validation-report.json",
+    )
     def test_real_app_smoke_reports_record_blockers_without_spoken_content(self) -> None:
         forbidden_keys = {
             "pcm",
@@ -227,6 +252,7 @@ class Task10RealAppSmokeTests(unittest.TestCase):
             "google_meet_browser",
         )
 
+    @requires_local_artifacts("docs/benchmarks/task7-live-human-round-trip.json")
     def test_separate_telegram_and_meet_runs_can_satisfy_future_live_gate(self) -> None:
         smoke = load_smoke_module()
         task7 = json.loads(TASK7_REPORT.read_text())
@@ -450,6 +476,10 @@ class Task10RealAppSmokeTests(unittest.TestCase):
 
         self.assertFalse(merged["telegram_desktop"]["completed"])
 
+    @requires_local_artifacts(
+        "docs/planning/translator-live-duplex-task-prompts.md",
+        "docs/planning/translator-live-duplex-tasks.md",
+    )
     def test_task10_planning_stays_open_until_real_second_endpoint_passes(self) -> None:
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")

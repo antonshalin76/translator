@@ -21,6 +21,13 @@ def read_json(path: str) -> dict[str, Any]:
     return json.loads(read(path))
 
 
+def requires_local_artifacts(*paths: str):
+    return unittest.skipUnless(
+        all((ROOT / path).exists() for path in paths),
+        "local planning/run evidence is not published",
+    )
+
+
 def walk_keys(value: Any) -> list[str]:
     if isinstance(value, dict):
         keys = list(value)
@@ -66,6 +73,7 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", script)
         self.assertNotIn("pgrep -a", script)
 
+    @requires_local_artifacts("docs/benchmarks/task10-simulated-app-streams-report.json")
     def test_report_shape_keeps_synthetic_evidence_separate(self) -> None:
         report = read_json("docs/benchmarks/task10-simulated-app-streams-report.json")
 
@@ -87,6 +95,7 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
         self.assertFalse(zoom["counts_toward_task10_mvp_a"])
         self.assertIn(zoom["route_attempt"]["status"], {"blocked", "failed", "passed"})
 
+    @requires_local_artifacts("docs/benchmarks/task10-simulated-app-streams-report.json")
     def test_browser_move_without_call_like_candidate_is_not_task10_route_pass(self) -> None:
         report = read_json("docs/benchmarks/task10-simulated-app-streams-report.json")
         meet = next(case for case in report["cases"] if case["app_key"] == "google_meet_browser")
@@ -108,6 +117,7 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
         )
         self.assertEqual(result, "browser_stream_move_passed_without_call_like_candidate")
 
+    @requires_local_artifacts("docs/benchmarks/task10-simulated-app-streams-report.json")
     def test_report_carries_task7_debt_and_no_sensitive_payload(self) -> None:
         report = read_json("docs/benchmarks/task10-simulated-app-streams-report.json")
         debt = report["task7_debt_carried"]
@@ -138,6 +148,10 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
         self.assertNotRegex(rendered, re.compile(r"zoommtg://", re.IGNORECASE))
         self.assertNotRegex(rendered, re.compile(r"\bpwd=", re.IGNORECASE))
 
+    @requires_local_artifacts(
+        "docs/planning/translator-live-duplex-task-prompts.md",
+        "docs/planning/translator-live-duplex-tasks.md",
+    )
     def test_planning_notes_do_not_mark_task10_complete(self) -> None:
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")

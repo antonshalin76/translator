@@ -21,6 +21,13 @@ def read_json(path: str) -> dict[str, Any]:
     return json.loads(read(path))
 
 
+def requires_local_artifacts(*paths: str):
+    return unittest.skipUnless(
+        all((ROOT / path).exists() for path in paths),
+        "local planning/run evidence is not published",
+    )
+
+
 def walk_keys(value: Any) -> list[str]:
     if isinstance(value, dict):
         keys = list(value)
@@ -90,6 +97,7 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         self.assertNotRegex(script, re.compile(r"sk-[A-Za-z0-9_-]+"))
         self.assertNotIn("print(os.environ", script)
 
+    @requires_local_artifacts("docs/benchmarks/task11-openai-adapter-preflight.json")
     def test_report_shape_carries_debts_and_keeps_task11_open(self) -> None:
         report = read_json("docs/benchmarks/task11-openai-adapter-preflight.json")
 
@@ -145,6 +153,7 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
             "passed_by_live_user_confirmation",
         )
 
+    @requires_local_artifacts("docs/benchmarks/task11-openai-adapter-preflight.json")
     def test_report_records_safe_preflight_cases_without_secret_or_spoken_payload(self) -> None:
         report = read_json("docs/benchmarks/task11-openai-adapter-preflight.json")
         cases = {case["case"]: case for case in report["preflight_cases"]}
@@ -204,6 +213,7 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", rendered)
         self.assertNotRegex(rendered, re.compile(r"sk-[A-Za-z0-9_-]+"))
 
+    @requires_local_artifacts("docs/benchmarks/task11-openai-adapter-preflight.json")
     def test_synthetic_speech_comparison_report_is_privacy_safe(self) -> None:
         report = read_json("docs/benchmarks/task11-openai-adapter-preflight.json")
         comparison = report["synthetic_speech_comparison"]
@@ -252,6 +262,10 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
                 self.assertGreater(direction["output_audio_delta_count"], 0)
                 self.assertGreater(direction["first_output_audio_delta_ms"], 0)
 
+    @requires_local_artifacts(
+        "docs/benchmarks/task7-live-human-round-trip.json",
+        "docs/benchmarks/task10-validation-report.json",
+    )
     def test_preflight_module_builds_report_from_current_task_debt(self) -> None:
         module = load_preflight_module()
         report = module.build_report()
@@ -269,6 +283,10 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         self.assertFalse(report["task11_completed"])
         self.assertIn("synthetic_speech_comparison", report)
 
+    @requires_local_artifacts(
+        "docs/planning/translator-live-duplex-task-prompts.md",
+        "docs/planning/translator-live-duplex-tasks.md",
+    )
     def test_planning_notes_record_preflight_without_marking_task11_complete(self) -> None:
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")
