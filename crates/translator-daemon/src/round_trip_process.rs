@@ -277,11 +277,11 @@ impl ActiveRoundTripRuntime for ProcessActiveRoundTrip {
             .done_receiver
             .recv_timeout(ACTIVE_STOP_TIMEOUT)
             .map_err(|_| RoundTripRuntimeError::StopFailed)?;
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                self.terminal_result = Some(Err(RoundTripRuntimeError::StopFailed));
-                return Err(RoundTripRuntimeError::StopFailed);
-            }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            self.terminal_result = Some(Err(RoundTripRuntimeError::StopFailed));
+            return Err(RoundTripRuntimeError::StopFailed);
         }
         self.terminal_result = Some(result);
         result

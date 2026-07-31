@@ -42,6 +42,11 @@ coverage/
 /.playwright-cli/
 *.log
 
+# Local development planning and run evidence
+/docs/planning/
+/docs/benchmarks/
+/repo-c4.json
+
 # Local editor and operating-system state
 .idea/
 .vscode/
