@@ -36,7 +36,7 @@ The daemon owns audio routing and device selection. The Python sidecar owns prov
 
 - Ubuntu 24.04 or a comparable Linux desktop with PipeWire and PulseAudio compatibility.
 - `pactl`, `pw-link`, and `wpctl` available in the user session.
-- Rust 1.85+.
+- Rust 1.88+.
 - Python 3.12 and `uv`.
 - Bun for the Tauri/Vite frontend.
 - Headphones for normal duplex use. Open-speaker mode is guarded by AEC validation.
@@ -100,7 +100,7 @@ python3 -m unittest tests.test_task1_boundaries tests.test_task8_ui_controls tes
 (cd apps/translator-ui && bun test src/*.test.ts && bun run build)
 ```
 
-Live application acceptance requires a running desktop audio session and real/simulated calls. Existing task scripts live under `scripts/`, and evidence documents live under `docs/benchmarks/`.
+Live application acceptance requires a running desktop audio session and real/simulated calls. Existing task scripts live under `scripts/`; local run evidence is intentionally ignored and should stay outside published git history.
 
 ## Privacy And Security
 

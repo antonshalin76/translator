@@ -142,7 +142,7 @@ impl DirectionPolicy {
 
     fn evaluate_epoch(&mut self, epoch_end_ms: u64) -> Option<LatencyTransition> {
         if epoch_end_ms == 0
-            || epoch_end_ms % EPOCH_MS != 0
+            || !epoch_end_ms.is_multiple_of(EPOCH_MS)
             || epoch_end_ms <= self.last_evaluated_end_ms
         {
             return None;

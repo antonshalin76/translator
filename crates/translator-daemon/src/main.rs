@@ -301,9 +301,9 @@ fn invalid_manual_route(message: &str) -> translator_audio::RoutingSafeError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OriginalLoopbackErrorCode {
-    DiscoveryFailed,
-    LoadFailed,
-    CleanupFailed,
+    Discovery,
+    Load,
+    Cleanup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,14 +407,14 @@ where
 
     fn load_module(&self, request: &OriginalLoopbackRequest) -> Result<(), OriginalLoopbackError> {
         let args = original_loopback_load_args(request);
-        self.run_pactl_owned(&args, OriginalLoopbackErrorCode::LoadFailed)?;
+        self.run_pactl_owned(&args, OriginalLoopbackErrorCode::Load)?;
         Ok(())
     }
 
     fn unload_module(&self, module_id: &str) -> Result<(), OriginalLoopbackError> {
         self.run_pactl_owned(
             &["unload-module".to_owned(), module_id.to_owned()],
-            OriginalLoopbackErrorCode::CleanupFailed,
+            OriginalLoopbackErrorCode::Cleanup,
         )?;
         Ok(())
     }
@@ -423,9 +423,9 @@ where
     where
         T: for<'de> Deserialize<'de>,
     {
-        let result = self.run_pactl(args, OriginalLoopbackErrorCode::DiscoveryFailed)?;
+        let result = self.run_pactl(args, OriginalLoopbackErrorCode::Discovery)?;
         serde_json::from_slice(result.stdout())
-            .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::DiscoveryFailed))
+            .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Discovery))
     }
 
     fn run_pactl(

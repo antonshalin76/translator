@@ -17,6 +17,13 @@ def read(path: str) -> str:
     return (ROOT / path).read_text()
 
 
+def requires_local_artifacts(*paths: str):
+    return unittest.skipUnless(
+        all((ROOT / path).exists() for path in paths),
+        "local planning/run evidence is not published",
+    )
+
+
 class Task9DesktopRunModeTests(unittest.TestCase):
     def test_systemd_unit_is_user_session_owner_with_bounded_restart(self) -> None:
         unit = read("systemd/translator.service")
@@ -188,6 +195,10 @@ class Task9DesktopRunModeTests(unittest.TestCase):
         self.assertNotIn('Command::new("systemctl"', tauri)
         self.assertNotRegex(tauri, r"\bsystemctl\s+--user\s+(?:start|stop|restart|enable|disable)")
 
+    @requires_local_artifacts(
+        "docs/benchmarks/task9-validation-report.json",
+        "docs/benchmarks/task7-live-human-round-trip.json",
+    )
     def test_task9_validation_report_carries_task7_latency_debt(self) -> None:
         report_path = ROOT / "docs/benchmarks/task9-validation-report.json"
         self.assertTrue(report_path.exists(), "Task 9 validation report is missing")
@@ -233,6 +244,11 @@ class Task9DesktopRunModeTests(unittest.TestCase):
         self.assertIn("default_route_journal_path", daemon)
         self.assertIn("PulseRoutingWatcher::new_with_route_journal", daemon)
 
+    @requires_local_artifacts(
+        "docs/planning/translator-live-duplex-design.md",
+        "docs/planning/translator-live-duplex-task-prompts.md",
+        "docs/planning/translator-live-duplex-tasks.md",
+    )
     def test_planning_documents_record_terminal_lifecycle_command(self) -> None:
         design = read("docs/planning/translator-live-duplex-design.md")
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
