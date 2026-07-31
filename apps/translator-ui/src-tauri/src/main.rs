@@ -402,8 +402,8 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             } = event
             {
                 let app = tray.app_handle();
-                let _ = refresh_tray_menu(&app);
-                show_main_window(&app);
+                let _ = refresh_tray_menu(app);
+                show_main_window(app);
             }
         });
 

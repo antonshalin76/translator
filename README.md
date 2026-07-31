@@ -100,7 +100,7 @@ python3 -m unittest tests.test_task1_boundaries tests.test_task8_ui_controls tes
 (cd apps/translator-ui && bun test src/*.test.ts && bun run build)
 ```
 
-Live application acceptance requires a running desktop audio session and real/simulated calls. Existing task scripts live under `scripts/`, and evidence documents live under `docs/benchmarks/`.
+Live application acceptance requires a running desktop audio session and real/simulated calls. Existing task scripts live under `scripts/`; local run evidence is intentionally ignored and should stay outside published git history.
 
 ## Privacy And Security
 

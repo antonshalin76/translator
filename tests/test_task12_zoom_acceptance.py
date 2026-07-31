@@ -46,6 +46,13 @@ def read_json(path: str) -> dict[str, Any]:
     return json.loads(read(path))
 
 
+def requires_local_artifacts(*paths: str):
+    return unittest.skipUnless(
+        all((ROOT / path).exists() for path in paths),
+        "local planning/run evidence is not published",
+    )
+
+
 def walk_keys(value: Any) -> list[str]:
     if isinstance(value, dict):
         keys = list(value)
@@ -93,6 +100,7 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
         self.assertNotRegex(script, re.compile(r"\bpwd=", re.IGNORECASE))
         self.assertNotIn("OPENAI_API_KEY", script)
 
+    @requires_local_artifacts("docs/benchmarks/task12-zoom-diagnostic-report.json")
     def test_zoom_diagnostic_report_records_completed_acceptance_and_carries_debts(self) -> None:
         report = read_json("docs/benchmarks/task12-zoom-diagnostic-report.json")
 
@@ -138,6 +146,7 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
             "wired_with_deterministic_fake_websocket_contract",
         )
 
+    @requires_local_artifacts("docs/benchmarks/task12-zoom-diagnostic-report.json")
     def test_zoom_diagnostic_report_has_setup_notes_without_private_payload(self) -> None:
         report = read_json("docs/benchmarks/task12-zoom-diagnostic-report.json")
 
@@ -153,6 +162,7 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
         self.assertNotRegex(rendered, re.compile(r"zoommtg://", re.IGNORECASE))
         self.assertNotRegex(rendered, re.compile(r"\bpwd=", re.IGNORECASE))
 
+    @requires_local_artifacts("docs/benchmarks/task12-zoom-live-translation-check.json")
     def test_zoom_live_translation_report_records_full_duplex_acceptance(self) -> None:
         report = read_json("docs/benchmarks/task12-zoom-live-translation-check.json")
 
@@ -217,6 +227,11 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
         self.assertNotRegex(rendered, re.compile(r"zoommtg://", re.IGNORECASE))
         self.assertNotRegex(rendered, re.compile(r"\bpwd=", re.IGNORECASE))
 
+    @requires_local_artifacts(
+        "docs/benchmarks/task7-live-human-round-trip.json",
+        "docs/benchmarks/task10-validation-report.json",
+        "docs/benchmarks/task11-openai-adapter-preflight.json",
+    )
     def test_zoom_module_builds_report_from_current_debt_reports(self) -> None:
         module = load_zoom_module()
         report = module.build_report()
@@ -326,6 +341,10 @@ ZOOM VoiceEngine:output_FR
         self.assertEqual(candidate["node_name"], "ZOOM VoiceEngine")
         self.assertTrue(candidate["pipewire_linked_to_translator_remote_in"])
 
+    @requires_local_artifacts(
+        "docs/planning/translator-live-duplex-task-prompts.md",
+        "docs/planning/translator-live-duplex-tasks.md",
+    )
     def test_planning_notes_record_completed_zoom_duplex_without_closing_debts(self) -> None:
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")

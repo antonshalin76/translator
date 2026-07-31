@@ -571,19 +571,16 @@ class OpenAIRealtimeProvider:
         delay_ms: int,
         outcome: UtteranceOutcome,
     ) -> None:
-        try:
-            await asyncio.sleep(delay_ms / 1000)
-            session = self._sessions.get(session_id)
-            if session is None:
-                return
-            async with session.lock:
-                utterance = session.utterances.get(utterance_id)
-                if utterance is None or utterance.final_sent or not utterance.input_complete:
-                    return
-                await self._publish_pending_audio_locked(session, utterance)
-                await self._publish_final_locked(session, utterance, outcome)
-        except asyncio.CancelledError:
+        await asyncio.sleep(delay_ms / 1000)
+        session = self._sessions.get(session_id)
+        if session is None:
             return
+        async with session.lock:
+            utterance = session.utterances.get(utterance_id)
+            if utterance is None or utterance.final_sent or not utterance.input_complete:
+                return
+            await self._publish_pending_audio_locked(session, utterance)
+            await self._publish_final_locked(session, utterance, outcome)
 
     def _convert_output_audio(
         self,

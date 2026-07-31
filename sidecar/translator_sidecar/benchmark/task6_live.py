@@ -296,18 +296,18 @@ class _ProviderDuplexBridge:
             requested_output_format=pcm_format,
             voice_profile=_voice_profile(target_language),
         )
-        first_audio_ns: int | None = None
+        first_audio_times_ns: list[int] = []
         safe_error_code: str | None = None
         final_outcome: str | None = None
 
         async def publish(batch, commit) -> None:
-            nonlocal first_audio_ns, safe_error_code, final_outcome
+            nonlocal safe_error_code, final_outcome
             for event in batch:
                 if isinstance(event, ProviderAudioDelta):
                     if event.session_id != session_id:
                         raise RuntimeError("provider session isolation failed")
-                    if first_audio_ns is None:
-                        first_audio_ns = time.monotonic_ns()
+                    if not first_audio_times_ns:
+                        first_audio_times_ns.append(time.monotonic_ns())
                 elif isinstance(event, PrivacySafeProviderError):
                     safe_error_code = event.code.value
                 elif isinstance(event, ProviderUtteranceFinal):
@@ -348,7 +348,7 @@ class _ProviderDuplexBridge:
                 )
             )
         await self._provider.wait_idle()
-        if first_audio_ns is None:
+        if not first_audio_times_ns:
             raise RuntimeError(
                 "provider emitted no audio "
                 f"(error={safe_error_code}, outcome={final_outcome})"
@@ -360,7 +360,7 @@ class _ProviderDuplexBridge:
             )
         )
         await self._provider.wait_publications(session_id)
-        return (first_audio_ns - started_ns) / 1_000_000
+        return (first_audio_times_ns[0] - started_ns) / 1_000_000
 
     def close(self) -> None:
         shutdown = asyncio.run_coroutine_threadsafe(
@@ -456,14 +456,17 @@ def run(output_path: Path) -> dict[str, Any]:
     for model_id in (_SMALL_ID, _LARGE_ID):
         holder: list[AsrModelManager] = []
 
-        def factory(selected: str = model_id) -> AsrModelManager:
+        def factory(
+            selected: str = model_id,
+            selected_holder: list[AsrModelManager] = holder,
+        ) -> AsrModelManager:
             manager = _asr_manager(
                 selected_id=selected,
                 small_path=small_path,
                 large_path=large_path,
                 device=device,
             )
-            holder.append(manager)
+            selected_holder.append(manager)
             return manager
 
         report = benchmark_asr_candidate(
