@@ -21,7 +21,7 @@ bytes = "1.10"
 clap = { version = "4.5", features = ["derive"] }
 fs4 = "1.1"
 futures-util = "0.3"
-getrandom = "0.3"
+getrandom = "0.4"
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 prost = "0.14.4"
