@@ -4160,7 +4160,7 @@ dependencies = [
  "clap",
  "fs4",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "http-body-util",
  "rustix",
  "serde",
