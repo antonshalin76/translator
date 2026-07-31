@@ -300,10 +300,10 @@ where
         }
 
         for module in modules.values() {
-            if let Some(role) = module_claimed_role(module, &journal.generation) {
-                if !module_matches(role, module, &journal.generation) {
-                    return Err(AudioGraphError::new(failure_code));
-                }
+            if let Some(role) = module_claimed_role(module, &journal.generation)
+                && !module_matches(role, module, &journal.generation)
+            {
+                return Err(AudioGraphError::new(failure_code));
             }
         }
 

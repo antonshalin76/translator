@@ -895,12 +895,11 @@ fn validate_launch_snapshot(snapshot: &RuntimeSnapshot) -> Result<(), DuplexRunt
         {
             return Err(DuplexRuntimeError::InvalidConfiguration);
         }
-        if state.enabled {
-            if state.source_language == state.target_language
-                || state.voice_profile.language != state.target_language
-            {
-                return Err(DuplexRuntimeError::InvalidConfiguration);
-            }
+        if state.enabled
+            && (state.source_language == state.target_language
+                || state.voice_profile.language != state.target_language)
+        {
+            return Err(DuplexRuntimeError::InvalidConfiguration);
         }
     }
     Ok(())
