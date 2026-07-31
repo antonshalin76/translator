@@ -3,7 +3,6 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
-    sync::OnceLock,
     time::Duration,
 };
 
@@ -25,11 +24,6 @@ use translator_ipc::{
 use uuid::Uuid;
 
 const WRONG_TOKEN: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-
-fn sidecar_smoke_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -168,7 +162,6 @@ async fn assert_matching_probe(socket_path: &Path, token: &str, generation_id: U
 
 #[tokio::test]
 async fn rust_supervisor_starts_authenticated_python_sidecar_and_opens_duplex_sessions() {
-    let _guard = sidecar_smoke_lock().lock().await;
     tokio::time::timeout(Duration::from_secs(10), async {
         let root = workspace_root();
         let python = root.join("sidecar/.venv/bin/python");
@@ -234,7 +227,6 @@ async fn rust_supervisor_starts_authenticated_python_sidecar_and_opens_duplex_se
 
 #[tokio::test]
 async fn real_python_sidecar_with_wrong_generation_is_reaped_and_rejected() {
-    let _guard = sidecar_smoke_lock().lock().await;
     tokio::time::timeout(Duration::from_secs(10), async {
         let root = workspace_root();
         let python = root.join("sidecar/.venv/bin/python");
@@ -276,7 +268,6 @@ async fn real_python_sidecar_with_wrong_generation_is_reaped_and_rejected() {
 
 #[tokio::test]
 async fn normal_shutdown_delivers_sigterm_before_reap() {
-    let _guard = sidecar_smoke_lock().lock().await;
     tokio::time::timeout(Duration::from_secs(10), async {
         let root = workspace_root();
         let python = root.join("sidecar/.venv/bin/python");
@@ -312,7 +303,6 @@ async fn normal_shutdown_delivers_sigterm_before_reap() {
 #[tokio::test]
 async fn ignored_sigterm_escalates_to_bounded_kill_and_reap() {
     assert!(GRACEFUL_SHUTDOWN_TIMEOUT <= Duration::from_secs(2));
-    let _guard = sidecar_smoke_lock().lock().await;
     tokio::time::timeout(Duration::from_secs(10), async {
         let root = workspace_root();
         let python = root.join("sidecar/.venv/bin/python");
@@ -362,7 +352,6 @@ async fn ignored_sigterm_escalates_to_bounded_kill_and_reap() {
 
 #[tokio::test]
 async fn leader_exit_does_not_leave_a_process_group_descendant_alive() {
-    let _guard = sidecar_smoke_lock().lock().await;
     tokio::time::timeout(Duration::from_secs(10), async {
         let root = workspace_root();
         let python = root.join("sidecar/.venv/bin/python");
@@ -424,7 +413,6 @@ async fn leader_exit_does_not_leave_a_process_group_descendant_alive() {
 
 #[tokio::test]
 async fn reaped_leader_does_not_discard_ownership_of_live_process_group() {
-    let _guard = sidecar_smoke_lock().lock().await;
     tokio::time::timeout(Duration::from_secs(10), async {
         let root = workspace_root();
         let python = root.join("sidecar/.venv/bin/python");
