@@ -415,18 +415,16 @@ where
                 }
                 _ => sink_validation_required = true,
             }
-        } else {
-            if let Some(default_sink) = snapshot.sinks.get(&snapshot.default_sink) {
-                if default_sink.available {
-                    if !self.validator.validate(default_sink) {
-                        return Err(DeviceWatcherError::new(
-                            DeviceWatcherErrorCode::GraphValidationFailed,
-                        ));
-                    }
-                    proposed_sink_name = Some(snapshot.default_sink.clone());
-                    sink_validation_required = false;
-                }
+        } else if let Some(default_sink) = snapshot.sinks.get(&snapshot.default_sink)
+            && default_sink.available
+        {
+            if !self.validator.validate(default_sink) {
+                return Err(DeviceWatcherError::new(
+                    DeviceWatcherErrorCode::GraphValidationFailed,
+                ));
             }
+            proposed_sink_name = Some(snapshot.default_sink.clone());
+            sink_validation_required = false;
         }
 
         self.pinned_source_name = proposed_source_name;
