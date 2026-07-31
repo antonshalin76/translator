@@ -209,22 +209,20 @@ class SchedulerContext:
                         close()
                     except Exception:
                         failed = True
-            if self.cancelled() or stream_cancelled.is_set():
-                return
-            terminal = (
-                _BRIDGE_OVERFLOW
-                if overflowed
-                else _BRIDGE_FAILURE
-                if failed
-                else _BRIDGE_END
-            )
-            self._put_bridge_item(
-                loop,
-                queue,
-                terminal,
-                stream_cancelled,
-                frame_duration_ms,
-            )
+            if not self.cancelled() and not stream_cancelled.is_set():
+                if overflowed:
+                    terminal = _BRIDGE_OVERFLOW
+                elif failed:
+                    terminal = _BRIDGE_FAILURE
+                else:
+                    terminal = _BRIDGE_END
+                self._put_bridge_item(
+                    loop,
+                    queue,
+                    terminal,
+                    stream_cancelled,
+                    frame_duration_ms,
+                )
 
     def _put_bridge_item(
         self,
@@ -375,11 +373,13 @@ class InferenceScheduler:
                 self._shutdown_impl()
             )
         shutdown_task = self._shutdown_task
-        cancelled: asyncio.CancelledError | None = None
+        cancelled: BaseException | None = None
         while not shutdown_task.done():
             try:
                 await asyncio.shield(shutdown_task)
-            except asyncio.CancelledError as error:
+            except BaseException as error:
+                if not isinstance(error, asyncio.CancelledError):
+                    raise
                 cancelled = error
                 current = asyncio.current_task()
                 if current is not None:

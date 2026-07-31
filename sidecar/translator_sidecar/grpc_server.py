@@ -166,8 +166,7 @@ class _AuthInterceptor(grpc.aio.ServerInterceptor):
                     grpc.StatusCode.UNAUTHENTICATED,
                     "authentication_failed",
                 )
-                if False:
-                    yield provider_pb2.ProviderEvent()
+                yield provider_pb2.ProviderEvent()
 
             return grpc.stream_stream_rpc_method_handler(
                 abort_stream,
@@ -813,12 +812,14 @@ class ProviderGrpcServer:
                 return
             server = self._server
             stop_task = asyncio.ensure_future(server.stop(grace=0))
-            cancelled: asyncio.CancelledError | None = None
+            cancelled: BaseException | None = None
             try:
                 while not stop_task.done():
                     try:
                         await asyncio.shield(stop_task)
-                    except asyncio.CancelledError as error:
+                    except BaseException as error:
+                        if not isinstance(error, asyncio.CancelledError):
+                            raise
                         cancelled = error
                         current = asyncio.current_task()
                         if current is not None:
