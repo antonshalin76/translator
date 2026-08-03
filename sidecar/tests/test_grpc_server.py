@@ -32,7 +32,6 @@ from translator_sidecar.provider_contract import (
     ProviderUtteranceFinal,
     SafeErrorCode,
     SafeErrorSummary,
-    SessionCloseReason,
     UtteranceOutcome,
     make_provider_error,
 )

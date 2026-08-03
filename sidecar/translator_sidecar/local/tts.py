@@ -23,7 +23,7 @@ from translator_sidecar.provider_contract import (
 
 _ALLOWED_SAMPLE_RATES = {16_000, 24_000, 48_000}
 _ALLOWED_FRAME_DURATIONS_MS = {20, 40, 60, 80, 100}
-_MAX_OUTPUT_MS = 12_000
+_MAX_OUTPUT_MS = 30_000
 _OFFLINE_ENV = {
     "HF_HUB_OFFLINE": "1",
     "TRANSFORMERS_OFFLINE": "1",

@@ -242,23 +242,24 @@ def build_local_provider(
             asr_model_id=selected_asr_id,
         )
 
-    device = "cuda" if _cuda_available() else "cpu"
+    asr_device = "cuda" if _cuda_available() else "cpu"
+    mt_device = asr_device
     try:
         translator = _load_verified_translator(
             model_directories[_MT_MODEL_ID],
-            device=device,
+            device=mt_device,
         )
     except Exception:
-        if device != "cuda":
+        if mt_device != "cuda":
             return _unavailable_provider(
                 now_ns=now_ns,
                 asr_model_id=selected_asr_id,
             )
-        device = "cpu"
+        mt_device = "cpu"
         try:
             translator = _load_verified_translator(
                 model_directories[_MT_MODEL_ID],
-                device=device,
+                device=mt_device,
             )
         except Exception:
             return _unavailable_provider(
@@ -276,7 +277,7 @@ def build_local_provider(
         asr = AsrModelManager(
             selected_id=selected_key,
             model_paths=asr_paths,
-            device=device,
+            device=asr_device,
         )
         prepare_asr = getattr(asr, "prepare", None)
         if prepare_asr is not None:
@@ -295,7 +296,7 @@ def build_local_provider(
             asr_model_id=selected_asr_id,
             mt_model_id=_MT_MODEL_ID,
             tts_model_id=_TTS_MODEL_ID,
-            mt_device=ComputeDevice(device),
+            mt_device=ComputeDevice(mt_device),
         )
     except Exception:
         return _unavailable_provider(

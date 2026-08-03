@@ -590,7 +590,7 @@ def test_tts_cancellation_after_first_frame_stops_source_and_resampler(
     assert len(streams[0].calls) == calls_after_first_frame
 
 
-def test_tts_enforces_twelve_second_output_cap(
+def test_tts_enforces_thirty_second_output_cap(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -602,7 +602,7 @@ def test_tts_enforces_twelve_second_output_cap(
     class LazyLongVoice:
         def synthesize(self, _text: str) -> object:
             def generate() -> object:
-                for index in range(130):
+                for index in range(310):
                     pulls.append(index)
                     yield Chunk(
                         np.zeros(2_205, dtype=np.int16),
@@ -630,7 +630,7 @@ def test_tts_enforces_twelve_second_output_cap(
             self.output_samples += len(output)
             if (
                 self.first_overflow_call is None
-                and self.output_samples >= 16_000 * 121 // 10
+                and self.output_samples >= 16_000 * 301 // 10
             ):
                 self.first_overflow_call = self.calls
             return output
@@ -662,7 +662,7 @@ def test_tts_enforces_twelve_second_output_cap(
         while True:
             next(frames)
             emitted += 1
-    assert emitted == 120
+    assert emitted == 300
     assert streams[0].calls == len(pulls)
     assert streams[0].max_input_samples <= 2_205
     assert streams[0].first_overflow_call is not None

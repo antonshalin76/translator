@@ -594,7 +594,7 @@ def test_adapter_construction_failure_returns_reachable_unavailable_provider(
     asyncio.run(scenario())
 
 
-def test_build_local_provider_uses_cpu_after_cuda_mt_load_failure(
+def test_build_local_provider_keeps_cuda_asr_after_cuda_mt_load_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -661,7 +661,7 @@ def test_build_local_provider_uses_cpu_after_cuda_mt_load_failure(
     mt_path = tmp_path / "nllb-200-distilled-600m-ct2-int8"
     assert isinstance(provider, FakeProvider)
     assert mt_attempts == [(mt_path, "cuda"), (mt_path, "cpu")]
-    assert captured["asr"]["device"] == "cpu"
+    assert captured["asr"]["device"] == "cuda"
     assert captured["provider"]["asr"] is captured["asr_instance"]
     assert captured["provider"]["translator"] is captured["mt_instance"]
     assert captured["provider"]["mt_device"] is ComputeDevice.CPU
@@ -708,6 +708,8 @@ def test_cuda_mt_smoke_failure_reloads_and_verifies_cpu(
 
     class FakeAdapter:
         def __init__(self, *args, **kwargs) -> None:
+            if "selected_id" in kwargs:
+                captured["asr_kwargs"] = kwargs
             del args, kwargs
 
     class FakeRegistry(FakeAdapter):
@@ -750,6 +752,7 @@ def test_cuda_mt_smoke_failure_reloads_and_verifies_cpu(
     ]
     assert all(text.strip() for _, text, _, _, _ in smoke_calls)
     assert captured["translator"] is loads[1][2]
+    assert captured["asr_kwargs"]["device"] == "cuda"
     assert captured["mt_device"] is ComputeDevice.CPU
 
 

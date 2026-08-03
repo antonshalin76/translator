@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${ROOT}/sidecar${PYTHONPATH:+:${PYTHONPATH}}"
+exec "${ROOT}/sidecar/.venv/bin/python" -m translator_sidecar.benchmark.podcast_quality "$@"

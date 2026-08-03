@@ -22,6 +22,7 @@ secrets/
 *.egg-info/
 .mypy_cache/
 .coverage
+coverage.xml
 coverage/
 
 # Local model assets and caches

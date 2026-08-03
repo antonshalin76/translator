@@ -38,6 +38,7 @@ from translator_sidecar.provider_contract import (
     SafeErrorSummary,
     SampleFormat,
     SessionCloseReason,
+    TranslationMode,
     UpdateDebugText,
     UtteranceOutcome,
 )
@@ -54,14 +55,51 @@ from .source_commit import SourceCommit
 from .tts import TtsOutputLimit
 
 
-_MAX_SOURCE_UTTERANCE_MS: int = 12_000
-_MAX_TRANSLATION_CHARS = 128
-_MAX_TRANSLATION_TOKENS = 96
-_MAX_OUTPUT_MS = 12_000
+_BASE_SOURCE_UTTERANCE_MS: int = 12_000
+_MAX_SOURCE_UTTERANCE_MS: int = 30_000
+_BASE_TRANSLATION_CHARS = 128
+_BASE_TRANSLATION_TOKENS = 96
+_BASE_OUTPUT_MS = 12_000
+_MAX_OUTPUT_MS = 30_000
 _MAX_TERMINAL_IDS = 4096
 _MAX_PENDING_EVENTS = 64
 _TERMINAL_RESERVED_EVENTS = 3
 _MAX_RETIRED_SESSIONS = 64
+
+
+def _source_utterance_limit_ms(mode: TranslationMode) -> int:
+    if mode is TranslationMode.STREAMING_FIRST:
+        return _MAX_SOURCE_UTTERANCE_MS
+    if mode is TranslationMode.BALANCED:
+        return _MAX_SOURCE_UTTERANCE_MS
+    return _MAX_SOURCE_UTTERANCE_MS
+
+
+def _translation_exceeds_budget(
+    source_text: str,
+    translation: str,
+    token_count: int,
+) -> bool:
+    source_word_count = max(1, len(source_text.split()))
+    char_limit = max(
+        _BASE_TRANSLATION_CHARS,
+        min(2_048, len(source_text.strip()) * 3),
+    )
+    token_limit = max(
+        _BASE_TRANSLATION_TOKENS,
+        min(512, source_word_count * 3),
+    )
+    return len(translation) > char_limit or token_count > token_limit
+
+
+def _output_limit_ms(source_ms: int, translation: str) -> int:
+    word_count = max(1, len(translation.split()))
+    speech_estimate_ms = word_count * 450
+    duration_estimate_ms = max(_BASE_OUTPUT_MS, source_ms * 2)
+    return min(
+        _MAX_OUTPUT_MS,
+        max(_BASE_OUTPUT_MS, duration_estimate_ms, speech_estimate_ms),
+    )
 
 
 class LocalProviderProtocolError(RuntimeError):
@@ -300,7 +338,7 @@ class LocalProvider:
 
             if (
                 utterance.buffered_ms + frame.frame_duration_ms
-                > _MAX_SOURCE_UTTERANCE_MS
+                > _source_utterance_limit_ms(session.request.mode)
             ):
                 utterance.purge_source()
                 utterance.state = _CollectionState.OVERFLOW_DISCARDING
@@ -556,6 +594,7 @@ class LocalProvider:
         active_stage = ModelKind.ASR
         try:
             pcm = b"".join(utterance.pcm_parts)
+            source_buffered_ms = utterance.buffered_ms
             utterance.purge_source()
             async with self._model_execution(
                 session,
@@ -622,9 +661,10 @@ class LocalProvider:
                     ModelState.READY,
                 )
             mt_ms = self._elapsed_ms(utterance.capture_onset_ns)
-            if (
-                len(translation) > _MAX_TRANSLATION_CHARS
-                or token_count > _MAX_TRANSLATION_TOKENS
+            if _translation_exceeds_budget(
+                source_text,
+                translation,
+                token_count,
             ):
                 await self._drop(
                     session,
@@ -657,7 +697,10 @@ class LocalProvider:
             ):
                 if (
                     frame_count + 1
-                ) * output.frame_duration_ms > _MAX_OUTPUT_MS:
+                ) * output.frame_duration_ms > _output_limit_ms(
+                    source_buffered_ms,
+                    translation,
+                ):
                     raise SchedulerOverflow(
                         "TTS output limit was reached"
                     )

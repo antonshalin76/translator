@@ -31,6 +31,17 @@ class FakeSentencePiece:
         return " translated output "
 
 
+class LongSentencePiece(FakeSentencePiece):
+    def __init__(self, piece_count: int) -> None:
+        super().__init__()
+        self._piece_count = piece_count
+
+    def encode(self, text: str, *, out_type: type[str]) -> list[str]:
+        assert out_type is str
+        assert text == "long private source"
+        return [f"piece-{index}" for index in range(self._piece_count)]
+
+
 class FakeResult:
     hypotheses = [["eng_Latn", "translated", "output"]]
 
@@ -214,6 +225,39 @@ def test_nllb_uses_exact_language_and_eos_contract(
         )
     ]
     assert tokenizer.decoded == ["translated", "output"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_max_decoding_length"),
+    [
+        (TranslationMode.QUALITY_FIRST, 512),
+        (TranslationMode.BALANCED, 392),
+        (TranslationMode.STREAMING_FIRST, 392),
+    ],
+)
+def test_nllb_scales_decoding_length_for_long_podcast_source(
+    tmp_path: Path,
+    mode: TranslationMode,
+    expected_max_decoding_length: int,
+) -> None:
+    runtime = FakeCTranslate2()
+    translator = NllbTranslator(
+        tmp_path,
+        translator=runtime,
+        tokenizer=LongSentencePiece(180),
+    )
+
+    assert (
+        translator.translate(
+            "long private source",
+            source_language=Language.RU,
+            target_language=Language.EN,
+            mode=mode,
+        )
+        == "translated output"
+    )
+
+    assert runtime.calls[0][1]["max_decoding_length"] == expected_max_decoding_length
 
 
 def test_nllb_strips_optional_eos_without_dropping_last_real_token(

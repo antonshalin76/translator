@@ -536,7 +536,7 @@ def test_source_overflow_discards_until_eou_then_emits_atomic_terminal(
             opened, health = await provider.open_session(
                 session, collector.publish
             )
-            for sequence in range(120):
+            for sequence in range(300):
                 await provider.submit_frame(
                     input_frame(
                         session,
@@ -548,7 +548,7 @@ def test_source_overflow_discards_until_eou_then_emits_atomic_terminal(
             await provider.submit_frame(
                 input_frame(
                     session,
-                    sequence=120,
+                    sequence=300,
                     utterance_id=utterance_id,
                     end_of_utterance=False,
                 )
@@ -561,7 +561,7 @@ def test_source_overflow_discards_until_eou_then_emits_atomic_terminal(
             await provider.submit_frame(
                 input_frame(
                     session,
-                    sequence=121,
+                    sequence=301,
                     utterance_id=utterance_id,
                     end_of_utterance=True,
                 )
@@ -608,10 +608,10 @@ def test_source_overflow_discards_until_eou_then_emits_atomic_terminal(
 
 @pytest.mark.parametrize(
     ("mode", "accepted_ms"),
-    [
+        [
         (mode, accepted_ms)
         for mode in TranslationMode
-        for accepted_ms in (11_900, 12_000)
+        for accepted_ms in (11_900, 12_000, 23_900, 24_000, 29_900, 30_000)
     ],
 )
 def test_source_at_or_just_below_cap_is_accepted_and_all_pcm_is_transcribed(
@@ -656,6 +656,40 @@ def test_source_at_or_just_below_cap_is_accepted_and_all_pcm_is_transcribed(
     run(scenario())
 
 
+def test_podcast_length_source_window_is_accepted_and_all_pcm_is_transcribed() -> None:
+    async def scenario() -> None:
+        provider, asr, _, _ = build_provider()
+        session = request(
+            AudioDirection.MICROPHONE,
+            mode=TranslationMode.STREAMING_FIRST,
+        )
+        collector = Collector()
+        utterance_id = uuid4()
+        try:
+            await provider.open_session(session, collector.publish)
+            expected_pcm = []
+            for sequence in range(240):
+                pcm_word = bytes([(sequence % 255) + 1, 0])
+                expected_pcm.append(pcm_word * 1600)
+                await provider.submit_frame(
+                    input_frame(
+                        session,
+                        sequence=sequence,
+                        utterance_id=utterance_id,
+                        end_of_utterance=sequence == 239,
+                        pcm_word=pcm_word,
+                    )
+                )
+            await provider.wait_idle()
+            assert len(asr.calls) == 1
+            assert asr.calls[0][0] == b"".join(expected_pcm)
+            assert collector.events[-1].outcome is UtteranceOutcome.COMPLETED
+        finally:
+            await provider.shutdown()
+
+    run(scenario())
+
+
 def test_overflow_discarding_still_validates_sequence() -> None:
     async def scenario() -> None:
         provider, _, _, _ = build_provider()
@@ -667,7 +701,7 @@ def test_overflow_discarding_still_validates_sequence() -> None:
         utterance_id = uuid4()
         try:
             await provider.open_session(session, collector.publish)
-            for sequence in range(121):
+            for sequence in range(301):
                 await provider.submit_frame(
                     input_frame(
                         session,
@@ -683,7 +717,7 @@ def test_overflow_discarding_still_validates_sequence() -> None:
                 await provider.submit_frame(
                     input_frame(
                         session,
-                        sequence=122,
+                        sequence=302,
                         utterance_id=utterance_id,
                         end_of_utterance=True,
                     )
@@ -706,7 +740,7 @@ def test_first_over_cap_frame_with_eou_drops_immediately() -> None:
         utterance_id = uuid4()
         try:
             await provider.open_session(session, collector.publish)
-            for sequence in range(120):
+            for sequence in range(300):
                 await provider.submit_frame(
                     input_frame(
                         session,
@@ -718,7 +752,7 @@ def test_first_over_cap_frame_with_eou_drops_immediately() -> None:
             await provider.submit_frame(
                 input_frame(
                     session,
-                    sequence=120,
+                    sequence=300,
                     utterance_id=utterance_id,
                     end_of_utterance=True,
                 )
@@ -997,7 +1031,7 @@ def test_cancel_purges_collecting_and_overflow_states(
         utterance_id = uuid4()
         try:
             await provider.open_session(session, collector.publish)
-            frame_count = 121 if overflow else 1
+            frame_count = 301 if overflow else 1
             for sequence in range(frame_count):
                 await provider.submit_frame(
                     input_frame(
@@ -1214,6 +1248,43 @@ def test_translation_limits_drop_without_tts_or_content_in_errors(
                 assert final.final_audio_sequence is None
                 assert translation not in repr(collector.batches)
                 assert tts.calls == []
+        finally:
+            await provider.shutdown()
+
+    run(scenario())
+
+
+def test_podcast_length_translation_budget_scales_with_source_text() -> None:
+    async def scenario() -> None:
+        source_text = " ".join(f"source{i}" for i in range(80))
+        translation = " ".join(f"translated{i}" for i in range(120))
+        provider, _, _, tts = build_provider(
+            asr=FakeAsr(result=source_text),
+            translator=FakeTranslator(
+                result=translation,
+                token_count=120,
+            ),
+        )
+        session = request(
+            AudioDirection.SPEAKER,
+            debug_text_enabled=True,
+        )
+        collector = Collector()
+        utterance_id = uuid4()
+        try:
+            await provider.open_session(session, collector.publish)
+            await provider.submit_frame(
+                input_frame(
+                    session,
+                    sequence=0,
+                    utterance_id=utterance_id,
+                    end_of_utterance=True,
+                )
+            )
+            await provider.wait_idle()
+            assert collector.events[-1].outcome is UtteranceOutcome.COMPLETED
+            assert len(tts.calls) == 1
+            assert tts.calls[0]["text"] == translation
         finally:
             await provider.shutdown()
 
@@ -2574,13 +2645,13 @@ def test_total_publication_capacity_fails_closed(
             await provider.open_session(session, collector.publish)
             for utterance_index in range(2):
                 utterance_id = uuid4()
-                for frame_index in range(121):
+                for frame_index in range(301):
                     await provider.submit_frame(
                         input_frame(
                             session,
                             sequence=sequence,
                             utterance_id=utterance_id,
-                            end_of_utterance=frame_index == 120,
+                            end_of_utterance=frame_index == 300,
                         )
                     )
                     sequence += 1

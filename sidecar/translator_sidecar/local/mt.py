@@ -19,6 +19,8 @@ _BEAM_SIZE = {
     TranslationMode.BALANCED: 2,
     TranslationMode.STREAMING_FIRST: 1,
 }
+_BASE_DECODING_LENGTH = 96
+_MAX_DECODING_LENGTH = 512
 _TIME_24_RE = re.compile(r"(?<!\d)(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?!\d)")
 _PURCHASE_ORDER_ID_RE = re.compile(
     r"\border\s+(?:number|no\.?)\s*#?\s*(?P<identifier>\d+)\b",
@@ -202,7 +204,7 @@ class NllbTranslator:
                 [source],
                 target_prefix=[[target_token]],
                 beam_size=_BEAM_SIZE[mode],
-                max_decoding_length=96,
+                max_decoding_length=_decoding_length(len(pieces), mode),
             )
             tokens = list(results[0].hypotheses[0])
             if tokens and tokens[0] == target_token:
@@ -239,3 +241,15 @@ class NllbTranslator:
             return len(self._tokenizer.encode(normalized, out_type=str))
         except Exception:
             raise LocalTranslationError("local MT tokenization failed") from None
+
+
+def _decoding_length(source_piece_count: int, mode: TranslationMode) -> int:
+    multiplier = {
+        TranslationMode.QUALITY_FIRST: 3,
+        TranslationMode.BALANCED: 2,
+        TranslationMode.STREAMING_FIRST: 2,
+    }[mode]
+    return max(
+        _BASE_DECODING_LENGTH,
+        min(_MAX_DECODING_LENGTH, source_piece_count * multiplier + 32),
+    )

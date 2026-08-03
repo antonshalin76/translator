@@ -1,0 +1,9 @@
+[run]
+source = sidecar/translator_sidecar
+relative_files = True
+omit =
+    sidecar/translator_sidecar/generated/*
+
+[report]
+omit =
+    sidecar/translator_sidecar/generated/*
