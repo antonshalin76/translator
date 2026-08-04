@@ -100,6 +100,31 @@ python3 -m unittest tests.test_task1_boundaries tests.test_task8_ui_controls tes
 (cd apps/translator-ui && bun test src/*.test.ts && bun run build)
 ```
 
+Quality diagnostics:
+
+```bash
+# Show the approved local quality matrix, including Qwen3-ASR candidates.
+./scripts/translator-podcast-quality-debug --list-candidates
+
+# Full local provider path on RU/EN podcast or local audio segments.
+./scripts/translator-podcast-quality-debug \
+  --asr-model faster-whisper-small,faster-whisper-large-v3 \
+  --tts-model piper-medium
+
+# ASR-only probe on local mono s16le 16 kHz PCM.
+./scripts/translator-asr-quality-debug \
+  --audio output/sample.s16le \
+  --language ru \
+  --asr-model faster-whisper-small,qwen3-asr-0.6b-hf
+```
+
+The ASR-only probe can execute current faster-whisper models through the pinned
+local manifest. Qwen3-ASR is wired as an optional Transformers runtime candidate:
+if `torch`/`transformers` or model weights are unavailable, the report marks that
+candidate as `skipped` instead of failing the whole benchmark. GigaAM, Parakeet,
+Kokoro, Silero, and Qwen3-TTS are currently tracked in the quality matrix for
+controlled adapter work and are not live defaults.
+
 Live application acceptance requires a running desktop audio session and real/simulated calls. Existing task scripts live under `scripts/`; local run evidence is intentionally ignored and should stay outside published git history.
 
 ## Privacy And Security

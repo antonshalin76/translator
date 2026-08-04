@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
 from translator_sidecar.benchmark import podcast_quality
+from translator_sidecar.provider_contract import TranslationMode, VoiceGender
 
 
 def test_podcast_segments_align_to_provider_frame_and_max_count() -> None:
@@ -28,6 +31,40 @@ def test_podcast_model_parser_accepts_repeated_and_comma_separated_values() -> N
         "faster-whisper-large-v3",
         "custom",
     ]
+
+
+def test_podcast_model_parser_defaults_to_quality_matrix() -> None:
+    assert podcast_quality._parse_model_ids([])[:4] == [
+        "faster-whisper-small",
+        "faster-whisper-large-v3",
+        "faster-whisper-large-v3-turbo-ct2",
+        "gigaam-v3-e2e-rnnt",
+    ]
+
+
+def test_podcast_tts_parser_accepts_repeated_and_comma_separated_values() -> None:
+    assert podcast_quality._parse_tts_model_ids(
+        ["piper-medium,kokoro-82m", "qwen3-tts-0.6b-customvoice"]
+    ) == [
+        "piper-medium",
+        "kokoro-82m",
+        "qwen3-tts-0.6b-customvoice",
+    ]
+
+
+def test_podcast_skips_asr_candidate_without_local_provider_runtime() -> None:
+    report = asyncio.run(
+        podcast_quality._run_model(
+            "qwen3-asr-0.6b-hf",
+            {"ru_to_en": [b"\0" * podcast_quality._FRAME_BYTES]},
+            mode=TranslationMode.STREAMING_FIRST,
+            voice_gender=VoiceGender.MALE,
+        )
+    )
+
+    assert report["status"] == "skipped"
+    assert report["skip_reason"] == "asr_candidate_not_supported_by_local_provider"
+    assert report["candidate"]["id"] == "qwen3-asr-0.6b-hf"
 
 
 def test_podcast_summary_reports_drop_latency_and_tts_wer() -> None:

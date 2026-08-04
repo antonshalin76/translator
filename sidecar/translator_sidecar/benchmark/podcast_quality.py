@@ -20,6 +20,13 @@ from uuid import uuid4
 
 from jiwer import wer
 
+from translator_sidecar.benchmark.model_matrix import (
+    candidate_by_id,
+    candidate_report,
+    default_asr_candidate_ids,
+    default_tts_candidate_ids,
+    registry_report,
+)
 from translator_sidecar.local.runtime import build_local_provider
 from translator_sidecar.provider_contract import (
     AudioDirection,
@@ -516,6 +523,38 @@ async def _run_model(
     mode: TranslationMode,
     voice_gender: VoiceGender,
 ) -> dict[str, Any]:
+    try:
+        candidate = candidate_by_id(model_id, role="asr")
+    except KeyError:
+        return {
+            "model_id": model_id,
+            "asr_model_id": model_id,
+            "tts_model_id": "piper-medium",
+            "status": "skipped",
+            "skip_reason": "unknown_asr_candidate",
+            "mode": mode.value,
+            "voice_gender": voice_gender.value,
+            "candidate": {
+                "id": model_id,
+                "role": "asr",
+                "runtime": "unknown",
+            },
+            "summary": _summarize([]),
+            "segments": [],
+        }
+    if candidate.runtime != "local_provider":
+        return {
+            "model_id": model_id,
+            "asr_model_id": model_id,
+            "tts_model_id": "piper-medium",
+            "status": "skipped",
+            "skip_reason": "asr_candidate_not_supported_by_local_provider",
+            "mode": mode.value,
+            "voice_gender": voice_gender.value,
+            "candidate": candidate.to_report(),
+            "summary": _summarize([]),
+            "segments": [],
+        }
     with _asr_model_env(model_id):
         provider = build_local_provider(now_ns=time.monotonic_ns)
     results: list[dict[str, Any]] = []
@@ -537,6 +576,10 @@ async def _run_model(
         _release_provider_models(provider)
     return {
         "model_id": model_id,
+        "asr_model_id": model_id,
+        "tts_model_id": "piper-medium",
+        "status": "completed",
+        "candidate": candidate.to_report(),
         "mode": mode.value,
         "voice_gender": voice_gender.value,
         "summary": _summarize(results),
@@ -550,7 +593,16 @@ def _parse_model_ids(values: list[str]) -> list[str]:
         model_ids.extend(
             item.strip() for item in value.split(",") if item.strip()
         )
-    return model_ids or ["faster-whisper-small", "faster-whisper-large-v3"]
+    return model_ids or default_asr_candidate_ids()
+
+
+def _parse_tts_model_ids(values: list[str]) -> list[str]:
+    model_ids: list[str] = []
+    for value in values:
+        model_ids.extend(
+            item.strip() for item in value.split(",") if item.strip()
+        )
+    return model_ids or default_tts_candidate_ids()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -570,6 +622,21 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="ASR model id; repeat or pass comma-separated values.",
+    )
+    parser.add_argument(
+        "--tts-model",
+        action="append",
+        default=[],
+        help=(
+            "TTS candidate id for report metadata; repeat or pass "
+            "comma-separated values. The current provider runtime still uses "
+            "piper-medium until alternate TTS adapters are enabled."
+        ),
+    )
+    parser.add_argument(
+        "--list-candidates",
+        action="store_true",
+        help="Print the approved ASR/TTS benchmark candidate registry and exit.",
     )
     parser.add_argument(
         "--mode",
@@ -621,8 +688,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         raise PodcastQualityError("one of the podcast inputs produced no segments")
     mode = TranslationMode(args.mode)
     voice_gender = VoiceGender(args.voice_gender)
+    asr_model_ids = _parse_model_ids(args.asr_model)
+    tts_model_ids = _parse_tts_model_ids(args.tts_model)
     model_reports = []
-    for model_id in _parse_model_ids(args.asr_model):
+    for model_id in asr_model_ids:
         model_reports.append(
             await _run_model(
                 model_id,
@@ -640,6 +709,19 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "segment_ms": args.segment_ms,
             "max_segments": args.max_segments,
             "work_dir": str(run_dir),
+            "selected_tts_models": tts_model_ids,
+        },
+        "candidate_matrix": {
+            "asr": candidate_report(
+                asr_model_ids,
+                role="asr",
+                include_unknown=True,
+            ),
+            "tts": candidate_report(
+                tts_model_ids,
+                role="tts",
+                include_unknown=True,
+            ),
         },
         "models": model_reports,
     }
@@ -654,6 +736,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.list_candidates:
+        print(json.dumps(registry_report(), ensure_ascii=False, indent=2))
+        return 0
     args.work_dir.mkdir(parents=True, exist_ok=True)
     try:
         report = asyncio.run(run(args))
