@@ -138,6 +138,31 @@ def test_faster_whisper_ct2_probe_uses_candidate_repository_and_mode_beam() -> N
     }
 
 
+def test_faster_whisper_ct2_probe_falls_back_to_cpu_on_cuda_runtime_failure() -> None:
+    model = FakeWhisperCt2()
+    factory_calls: list[tuple[str, dict[str, object]]] = []
+
+    def factory(repository: str, **kwargs: object) -> FakeWhisperCt2:
+        factory_calls.append((repository, kwargs))
+        if kwargs["device"] == "cuda":
+            raise RuntimeError("Library libcublas.so.12 is not found")
+        return model
+
+    probe = asr_quality.FasterWhisperCt2AsrProbe(
+        repository="deepdml/faster-whisper-large-v3-turbo-ct2",
+        device="cuda",
+        model_factory=factory,
+    )
+
+    assert probe.transcribe(
+        b"\0\0" * 160,
+        language=Language.EN,
+        mode=TranslationMode.STREAMING_FIRST,
+    ) == "turbo text"
+    assert [call[1]["device"] for call in factory_calls] == ["cuda", "cpu"]
+    assert factory_calls[1][1]["compute_type"] == "int8"
+
+
 def test_asr_quality_candidate_skips_unimplemented_runtime(tmp_path: Path) -> None:
     report = asr_quality._run_candidate(
         "gigaam-v3-e2e-rnnt",

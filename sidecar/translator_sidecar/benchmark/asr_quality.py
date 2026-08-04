@@ -44,6 +44,13 @@ _BEAM_SIZE = {
     TranslationMode.BALANCED: 3,
     TranslationMode.STREAMING_FIRST: 1,
 }
+_CUDA_RUNTIME_MARKERS = (
+    "libcublas",
+    "libcudnn",
+    "cuda driver",
+    "cuda runtime",
+    "cuda not found",
+)
 
 
 class AsrQualityError(RuntimeError):
@@ -109,6 +116,11 @@ def _safe_error_summary(error: Exception) -> str:
     return f"{type(error).__name__}: {first_line}"
 
 
+def _is_cuda_runtime_error(error: Exception) -> bool:
+    message = str(error).casefold()
+    return any(marker in message for marker in _CUDA_RUNTIME_MARKERS)
+
+
 def _manifest_model_directory(manifest: ModelManifest, model_id: str) -> Path:
     model = manifest.models[model_id]
     for model_file in model.files:
@@ -167,8 +179,6 @@ class FasterWhisperCt2AsrProbe:
         device: str | None = None,
         model_factory: Callable[..., Any] | None = None,
     ) -> None:
-        self._device = device or ("cuda" if _cuda_available() else "cpu")
-        compute_type = "float16" if self._device == "cuda" else "int8"
         factory = model_factory
         if factory is None:
             try:
@@ -178,9 +188,31 @@ class FasterWhisperCt2AsrProbe:
                     "faster-whisper CT2 runtime is unavailable"
                 ) from error
             factory = WhisperModel
-        self._model = factory(
+        requested_device = device or ("cuda" if _cuda_available() else "cpu")
+        try:
+            self._model = self._load(
+                factory,
+                repository,
+                device=requested_device,
+            )
+            self._device = requested_device
+        except Exception as error:
+            if requested_device != "cuda" or not _is_cuda_runtime_error(error):
+                raise
+            self._model = self._load(factory, repository, device="cpu")
+            self._device = "cpu"
+
+    @staticmethod
+    def _load(
+        factory: Callable[..., Any],
+        repository: str,
+        *,
+        device: str,
+    ) -> Any:
+        compute_type = "float16" if device == "cuda" else "int8"
+        return factory(
             repository,
-            device=self._device,
+            device=device,
             compute_type=compute_type,
             local_files_only=False,
             num_workers=1,
