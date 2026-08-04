@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TASK10_SCRIPT = ROOT / "scripts/translator-task10-real-app-smoke"
+DEFAULT_OUTPUT = ROOT / "output/browser-live-stream/browser-live-stream-smoke.json"
+BROWSER_BINARIES = ("google-chrome", "chromium", "chromium-browser", "firefox")
+DEFAULT_YOUTUBE_QUERY = "English technology podcast interview"
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def load_task10_module() -> Any:
+    loader = importlib.machinery.SourceFileLoader(
+        "task10_real_app_smoke",
+        str(TASK10_SCRIPT),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("task10_module_spec_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def run_command(args: list[str], timeout: float = 20.0) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            "ok": False,
+            "returncode": None,
+            "safe_error": error.__class__.__name__,
+            "stdout": "",
+            "stderr": "",
+        }
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "safe_error": None if completed.returncode == 0 else "command_failed",
+        "stdout": completed.stdout.decode("utf-8", errors="replace"),
+        "stderr": completed.stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def props(stream: dict[str, Any]) -> dict[str, str]:
+    raw = stream.get("properties")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+def command_json(args: list[str], timeout: float = 10.0) -> list[dict[str, Any]]:
+    result = run_command(args, timeout=timeout)
+    if not result["ok"]:
+        return []
+    try:
+        payload = json.loads(result["stdout"])
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def sink_names() -> dict[int, str]:
+    return {
+        int(item["index"]): item.get("name", "")
+        for item in command_json(["pactl", "--format=json", "list", "sinks"])
+        if "index" in item and isinstance(item.get("name"), str)
+    }
+
+
+def sink_inputs() -> list[dict[str, Any]]:
+    return command_json(["pactl", "--format=json", "list", "sink-inputs"])
+
+
+def browser_binary() -> str | None:
+    for name in BROWSER_BINARIES:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def resolve_youtube_url(
+    *,
+    url: str | None,
+    query: str | None,
+) -> tuple[str, dict[str, Any]]:
+    if url:
+        return url, {"source": "explicit_url", "ok": True}
+    search_query = query or DEFAULT_YOUTUBE_QUERY
+    yt_dlp = shutil.which("yt-dlp")
+    if yt_dlp is None:
+        fallback = "https://www.youtube.com/results?search_query=" + search_query.replace(
+            " ",
+            "+",
+        )
+        return fallback, {"source": "youtube_search_page", "ok": False}
+    result = run_command(
+        [
+            yt_dlp,
+            "--no-playlist",
+            "--default-search",
+            "ytsearch1:",
+            "--print",
+            "webpage_url",
+            search_query,
+        ],
+        timeout=45.0,
+    )
+    for line in result["stdout"].splitlines():
+        candidate = line.strip()
+        if candidate.startswith("https://www.youtube.com/"):
+            return candidate, {
+                "source": "yt_dlp_search_metadata",
+                "ok": True,
+                "query": search_query,
+            }
+    fallback = "https://www.youtube.com/results?search_query=" + search_query.replace(
+        " ",
+        "+",
+    )
+    return fallback, {
+        "source": "youtube_search_page",
+        "ok": False,
+        "query": search_query,
+        "safe_error": result["safe_error"],
+    }
+
+
+def start_browser(url: str, profile: Path) -> tuple[subprocess.Popen[Any] | None, str | None]:
+    binary = browser_binary()
+    if binary is None:
+        return None, "browser_binary_unavailable"
+    command = [
+        binary,
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--new-window",
+        "--autoplay-policy=no-user-gesture-required",
+        "--disable-background-timer-throttling",
+        "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
+        url,
+    ]
+    return (
+        subprocess.Popen(
+            command,
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        ),
+        None,
+    )
+
+
+def terminate_owned(process: subprocess.Popen[Any] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def browser_stream_candidate(stream: dict[str, Any], baseline_ids: set[int]) -> dict[str, Any] | None:
+    stream_id = int(stream.get("index", 0) or 0)
+    properties = props(stream)
+    binary = properties.get("application.process.binary", "").lower()
+    application = properties.get("application.name", "")
+    if stream_id in baseline_ids:
+        return None
+    if binary not in {"google-chrome", "chrome", "chromium", "chromium-browser", "firefox"}:
+        return None
+    sinks = sink_names()
+    sink_index = int(stream.get("sink", 0) or 0)
+    return {
+        "stream_id": stream_id,
+        "sink_id": sink_index,
+        "sink_name": sinks.get(sink_index, ""),
+        "application_name": application,
+        "process_binary": properties.get("application.process.binary", ""),
+        "media_role": properties.get("media.role"),
+        "media_name": properties.get("media.name"),
+        "stream_description": properties.get("stream.description"),
+        "corked": bool(stream.get("corked")),
+    }
+
+
+def find_browser_stream(
+    baseline_ids: set[int],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout_seconds
+    fallback: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        for stream in sink_inputs():
+            candidate = browser_stream_candidate(stream, baseline_ids)
+            if candidate is None:
+                continue
+            if not candidate["corked"]:
+                return candidate
+            fallback = candidate
+        time.sleep(0.25)
+    return fallback
+
+
+def lookup_sink_input(stream_id: int) -> dict[str, Any] | None:
+    for stream in sink_inputs():
+        if int(stream.get("index", 0) or 0) == stream_id:
+            return browser_stream_candidate(stream, set())
+    return None
+
+
+def maybe_press_play() -> dict[str, Any]:
+    if shutil.which("xdotool") is None:
+        return {"attempted": False, "safe_error": "xdotool_unavailable"}
+    search = run_command(["xdotool", "search", "--name", "YouTube"], timeout=5.0)
+    window_ids = [line.strip() for line in search["stdout"].splitlines() if line.strip().isdigit()]
+    if not window_ids:
+        return {"attempted": True, "safe_error": "youtube_window_not_found"}
+    result = run_command(
+        ["xdotool", "windowactivate", window_ids[-1], "key", "space"],
+        timeout=5.0,
+    )
+    return {
+        "attempted": True,
+        "ok": result["ok"],
+        "safe_error": result["safe_error"],
+    }
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run a live browser-origin YouTube stream through translator routing.",
+    )
+    parser.add_argument("--url", help="Browser URL to open. Must produce audio.")
+    parser.add_argument("--youtube-query", default=DEFAULT_YOUTUBE_QUERY)
+    parser.add_argument("--duration-seconds", type=float, default=30.0)
+    parser.add_argument("--settle-seconds", type=float, default=15.0)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--keep-browser", action="store_true")
+    parser.add_argument("--keep-translation-running", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    task10 = load_task10_module()
+    service, _started_by_script = task10.ensure_service(start_service=True)
+    before_status = (
+        task10.daemon_request("/v1/status") if service["active"] == "active" else None
+    )
+    was_running = bool(
+        isinstance(before_status, dict)
+        and before_status.get("ok")
+        and before_status.get("json", {}).get("translation_running")
+    )
+    start_translation = None
+    if not was_running:
+        start_translation = task10.daemon_request(
+            "/v1/translation/start",
+            method="POST",
+            payload={},
+        )
+
+    url, url_resolution = resolve_youtube_url(
+        url=args.url,
+        query=args.youtube_query,
+    )
+    baseline_ids = {int(stream.get("index", 0) or 0) for stream in sink_inputs()}
+    play_attempt = None
+    route_attempt: dict[str, Any] = {"attempted": False, "status": "blocked"}
+    process: subprocess.Popen[Any] | None = None
+    with tempfile.TemporaryDirectory(prefix="translator-browser-live.") as temp:
+        profile = Path(temp) / "profile"
+        process, browser_error = start_browser(url, profile)
+        stream = (
+            None
+            if browser_error
+            else find_browser_stream(
+                baseline_ids,
+                timeout_seconds=args.settle_seconds,
+            )
+        )
+        if (stream is None or stream.get("corked")) and browser_error is None:
+            play_attempt = maybe_press_play()
+            stream = find_browser_stream(
+                baseline_ids,
+                timeout_seconds=max(5.0, args.settle_seconds / 2),
+            )
+        samples = []
+        if stream is not None:
+            response = task10.daemon_request(
+                "/v1/routes/manual-override",
+                method="POST",
+                payload={"stream_id": stream["stream_id"]},
+            )
+            route_attempt = {
+                "attempted": True,
+                "status": "passed" if response.get("ok") else "failed",
+                "stream_id": stream["stream_id"],
+                "http_status": response.get("status"),
+                "safe_error": response.get("safe_error"),
+            }
+            deadline = time.monotonic() + max(0.0, args.duration_seconds)
+            while time.monotonic() < deadline:
+                status = task10.daemon_request("/v1/status")
+                route_state = task10.daemon_request("/v1/routes")
+                selected_stream = lookup_sink_input(stream["stream_id"])
+                samples.append(
+                    {
+                        "at": utc_now(),
+                        "status_ok": status.get("ok"),
+                        "translation_running": status.get("json", {}).get(
+                            "translation_running"
+                        )
+                        if status.get("ok")
+                        else None,
+                        "routes_ok": route_state.get("ok"),
+                        "routes": route_state.get("json", {}).get("value")
+                        if route_state.get("ok")
+                        else None,
+                        "selected_stream": selected_stream,
+                        "selected_stream_on_remote_in": (
+                            selected_stream is not None
+                            and selected_stream.get("sink_name") == "translator_remote_in"
+                        ),
+                    }
+                )
+                time.sleep(2.0)
+        if not args.keep_browser:
+            terminate_owned(process)
+
+    after_status = task10.daemon_request("/v1/status")
+    stop_translation = None
+    if (
+        not args.keep_translation_running
+        and not was_running
+        and after_status.get("ok")
+        and after_status.get("json", {}).get("translation_running")
+    ):
+        stop_translation = task10.daemon_request(
+            "/v1/translation/stop",
+            method="POST",
+            payload={},
+        )
+    route_bound = route_attempt.get("status") == "passed"
+    selected_stream_remote_samples = sum(
+        1 for sample in samples if sample.get("selected_stream_on_remote_in")
+    )
+    latest_stream_bound = bool(samples and samples[-1].get("selected_stream_on_remote_in"))
+    report = {
+        "schema_version": "translator.browser-live-stream-smoke.v1",
+        "generated_at": utc_now(),
+        "generated_by": "scripts/translator-browser-live-stream-smoke",
+        "source": {
+            "url": url,
+            "resolution": url_resolution,
+            "browser_origin": True,
+            "local_file_playback": False,
+        },
+        "service": service,
+        "translation": {
+            "was_running_before": was_running,
+            "start": start_translation,
+            "stop": stop_translation,
+        },
+        "browser": {
+            "start_error": browser_error,
+            "process_pid": process.pid if process is not None else None,
+            "play_attempt": play_attempt,
+        },
+        "stream": stream,
+        "route_attempt": route_attempt,
+        "samples": samples,
+        "route_verification": {
+            "selected_stream_remote_sample_count": selected_stream_remote_samples,
+            "latest_selected_stream_on_remote_in": latest_stream_bound,
+        },
+        "passed": stream is not None and route_bound and bool(samples) and latest_stream_bound,
+        "blockers": [
+            value
+            for value in (
+                browser_error,
+                "browser_audio_stream_not_found" if stream is None else None,
+                "manual_route_failed" if stream is not None and not route_bound else None,
+                "no_status_samples" if stream is not None and not samples else None,
+                "selected_stream_not_on_remote_in"
+                if stream is not None and samples and not latest_stream_bound
+                else None,
+            )
+            if value
+        ],
+    }
+    write_json(args.output, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["passed"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

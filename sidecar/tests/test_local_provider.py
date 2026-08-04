@@ -186,6 +186,7 @@ class FakeTts:
         output_channels: int,
         frame_duration_ms: int,
         cancelled,
+        continuation: bool = False,
     ) -> Iterator[bytes]:
         self.calls.append(
             {
@@ -196,6 +197,7 @@ class FakeTts:
                 "sample_rate_hz": output_sample_rate_hz,
                 "channels": output_channels,
                 "frame_duration_ms": frame_duration_ms,
+                "continuation": continuation,
             }
         )
         if (
@@ -338,6 +340,72 @@ def build_provider(
         effective_translator,
         effective_tts,
     )
+
+
+def test_provider_marks_voiced_eou_tail_as_tts_continuation() -> None:
+    async def scenario() -> None:
+        provider, _asr, _translator, tts = build_provider(
+            translator=FakeTranslator(result="Translated sentence.")
+        )
+        session = request(AudioDirection.MICROPHONE)
+        collector = Collector()
+        try:
+            await provider.open_session(session, collector.publish)
+            utterance_id = uuid4()
+            for sequence in range(3):
+                await provider.submit_frame(
+                    input_frame(
+                        session,
+                        sequence=sequence,
+                        utterance_id=utterance_id,
+                        end_of_utterance=sequence == 2,
+                        pcm_word=b"\x00\x20",
+                    )
+                )
+            await provider.wait_idle()
+        finally:
+            await provider.shutdown()
+
+        assert tts.calls[-1]["continuation"] is True
+
+    run(scenario())
+
+
+def test_provider_keeps_silent_eou_tail_as_terminal_tts_boundary() -> None:
+    async def scenario() -> None:
+        provider, _asr, _translator, tts = build_provider(
+            translator=FakeTranslator(result="Translated sentence.")
+        )
+        session = request(AudioDirection.MICROPHONE)
+        collector = Collector()
+        try:
+            await provider.open_session(session, collector.publish)
+            utterance_id = uuid4()
+            await provider.submit_frame(
+                input_frame(
+                    session,
+                    sequence=0,
+                    utterance_id=utterance_id,
+                    end_of_utterance=False,
+                    pcm_word=b"\x00\x20",
+                )
+            )
+            await provider.submit_frame(
+                input_frame(
+                    session,
+                    sequence=1,
+                    utterance_id=utterance_id,
+                    end_of_utterance=True,
+                    pcm_word=b"\x00\x00",
+                )
+            )
+            await provider.wait_idle()
+        finally:
+            await provider.shutdown()
+
+        assert tts.calls[-1]["continuation"] is False
+
+    run(scenario())
 
 
 def test_local_provider_rejects_openai_provider_sessions() -> None:

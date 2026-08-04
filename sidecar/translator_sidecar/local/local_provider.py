@@ -8,6 +8,9 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+import math
+import os
+import struct
 from typing import Any
 from uuid import UUID
 
@@ -66,6 +69,9 @@ _MAX_PENDING_EVENTS = 64
 _TERMINAL_RESERVED_EVENTS = 3
 _MAX_RETIRED_SESSIONS = 64
 _PROVIDER_STALE_MESSAGE = "provider result is stale"
+_DEFAULT_CONTINUATION_TAIL_RMS = 300.0
+_CONTINUATION_TAIL_FRAMES = 3
+_MIN_CONTINUATION_VOICED_TAIL_FRAMES = 2
 
 
 def _source_utterance_limit_ms(mode: TranslationMode) -> int:
@@ -101,6 +107,46 @@ def _output_limit_ms(source_ms: int, translation: str) -> int:
         _MAX_OUTPUT_MS,
         max(_BASE_OUTPUT_MS, duration_estimate_ms, speech_estimate_ms),
     )
+
+
+def _configured_continuation_tail_rms() -> float:
+    value = os.environ.get("TRANSLATOR_CONTINUATION_TAIL_RMS")
+    if value is None:
+        return _DEFAULT_CONTINUATION_TAIL_RMS
+    try:
+        threshold = float(value)
+    except ValueError:
+        return _DEFAULT_CONTINUATION_TAIL_RMS
+    if not math.isfinite(threshold) or threshold < 0:
+        return _DEFAULT_CONTINUATION_TAIL_RMS
+    return threshold
+
+
+def _pcm_rms(pcm: bytes) -> float:
+    sample_count = len(pcm) // 2
+    if sample_count == 0:
+        return 0.0
+    total = 0
+    for sample, in struct.iter_unpack("<h", pcm[: sample_count * 2]):
+        total += sample * sample
+    return math.sqrt(total / sample_count)
+
+
+def _looks_like_continuation_boundary(
+    utterance: _Utterance,
+    frame: ProviderInputFrame,
+) -> bool:
+    if frame.sample_format is not SampleFormat.S16LE:
+        return False
+    threshold = _configured_continuation_tail_rms()
+    recent_frames = utterance.pcm_parts[-_CONTINUATION_TAIL_FRAMES:]
+    if not recent_frames:
+        return False
+    voiced_tail = [_pcm_rms(pcm) >= threshold for pcm in recent_frames]
+    if not voiced_tail[-1]:
+        return False
+    required = min(_MIN_CONTINUATION_VOICED_TAIL_FRAMES, len(voiced_tail))
+    return sum(voiced_tail) >= required
 
 
 class LocalProviderProtocolError(RuntimeError):
@@ -166,6 +212,7 @@ class _Utterance:
     buffered_ms: int = 0
     identity: JobIdentity | None = None
     last_audio_sequence: int | None = None
+    continues_speech: bool = False
 
     def purge_source(self) -> None:
         self.pcm_parts.clear()
@@ -339,6 +386,10 @@ class LocalProvider:
             utterance.buffered_ms += frame.frame_duration_ms
             if not frame.end_of_utterance:
                 return
+            utterance.continues_speech = _looks_like_continuation_boundary(
+                utterance,
+                frame,
+            )
             session.collecting_id = None
             if not self._models_available(session):
                 await self._drop_locked(
@@ -763,6 +814,7 @@ class LocalProvider:
                     text,
                     session.request,
                     context,
+                    continuation=utterance.continues_speech,
                 ),
                 frame_duration_ms=output.frame_duration_ms,
             ):
@@ -780,6 +832,8 @@ class LocalProvider:
         text: str,
         request: OpenProviderSession,
         context: SchedulerContext,
+        *,
+        continuation: bool = False,
     ) -> Iterator[bytes]:
         output = request.requested_output_format
         try:
@@ -792,6 +846,7 @@ class LocalProvider:
                 output_channels=output.channels,
                 frame_duration_ms=output.frame_duration_ms,
                 cancelled=context.cancelled,
+                continuation=continuation,
             )
         except TtsOutputLimit:
             raise SchedulerOverflow("TTS output limit was reached") from None

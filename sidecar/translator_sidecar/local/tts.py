@@ -26,6 +26,8 @@ _ALLOWED_FRAME_DURATIONS_MS = {20, 40, 60, 80, 100}
 _MAX_OUTPUT_MS = 30_000
 _PIPER_VOICE_UNAVAILABLE_MESSAGE = "requested Piper voice is unavailable"
 _TTS_UNAVAILABLE_MESSAGE = "local TTS is unavailable"
+_TERMINAL_CONTINUATION_PUNCTUATION = frozenset(".!?…")
+_TRAILING_PUNCTUATION_CLOSERS = frozenset("\"')]}»”’")
 _OFFLINE_ENV = {
     "HF_HUB_OFFLINE": "1",
     "TRANSFORMERS_OFFLINE": "1",
@@ -49,6 +51,28 @@ def _suppress_piper_content_logs() -> None:
     piper_logger = logging.getLogger("piper.voice")
     if piper_logger.level < logging.INFO:
         piper_logger.setLevel(logging.INFO)
+
+
+def _prepare_synthesis_text(text: str, *, continuation: bool) -> str:
+    normalized = text.strip()
+    if not continuation:
+        return normalized
+    return _strip_terminal_continuation_punctuation(normalized)
+
+
+def _strip_terminal_continuation_punctuation(text: str) -> str:
+    body = text
+    closers = ""
+    while body and body[-1] in _TRAILING_PUNCTUATION_CLOSERS:
+        closers = body[-1] + closers
+        body = body[:-1].rstrip()
+    had_terminal = False
+    while body and body[-1] in _TERMINAL_CONTINUATION_PUNCTUATION:
+        had_terminal = True
+        body = body[:-1].rstrip()
+    if not had_terminal or not body:
+        return text
+    return f"{body}{closers}".strip()
 
 
 class PiperVoiceRegistry:
@@ -174,6 +198,7 @@ class PiperTts:
         output_channels: int,
         frame_duration_ms: int,
         cancelled: Callable[[], bool] | None = None,
+        continuation: bool = False,
     ) -> Iterator[bytes]:
         del mode
         is_cancelled = cancelled or (lambda: False)
@@ -187,7 +212,10 @@ class PiperTts:
             raise TtsUnsupported("TTS output channel count is unsupported")
         if frame_duration_ms not in _ALLOWED_FRAME_DURATIONS_MS:
             raise TtsUnsupported("TTS frame duration is unsupported")
-        normalized = text.strip()
+        normalized = _prepare_synthesis_text(
+            text,
+            continuation=continuation,
+        )
         if not normalized:
             raise TtsUnavailable("local TTS input is unavailable")
 

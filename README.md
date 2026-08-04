@@ -93,7 +93,9 @@ forced to an `end_of_utterance` boundary around 6000 ms, and pauses after the
 first 2500 ms can close the current chunk after about 120 ms of non-speech. For
 experiments, override `TRANSLATOR_VAD_MIN_UTTERANCE_MS`,
 `TRANSLATOR_VAD_MAX_UTTERANCE_MS`, and
-`TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS` in `.env`.
+`TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS` in `.env`. The sidecar also uses
+`TRANSLATOR_CONTINUATION_TAIL_RMS` to distinguish a forced voiced chunk boundary
+from a natural silent phrase ending before TTS renders punctuation.
 
 CTranslate2/faster-whisper GPU execution requires CUDA 12 cuBLAS and cuDNN 9
 runtime libraries. The service unit already prepends the local compatibility

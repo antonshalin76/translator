@@ -362,6 +362,59 @@ def test_tts_frames_across_lazy_chunks_and_pads_final_frame(
     assert np.count_nonzero(final[80:]) == 0
 
 
+def test_tts_continuation_strips_only_terminal_sentence_punctuation(
+    tmp_path: Path,
+) -> None:
+    model_path = create_voice(tmp_path, "en-female")
+    voice = FakeVoice([Chunk(np.arange(320, dtype=np.int16))])
+    registry = PiperVoiceRegistry(
+        {(Language.EN, VoiceGender.FEMALE): model_path},
+        voice_factory=lambda _path, **_kwargs: voice,
+    )
+
+    frames = list(
+        PiperTts(registry).synthesize_frames(
+            "Keep going, please.",
+            target_language=Language.EN,
+            voice_profile=profile(Language.EN, VoiceGender.FEMALE),
+            mode=TranslationMode.STREAMING_FIRST,
+            output_sample_rate_hz=16_000,
+            output_channels=1,
+            frame_duration_ms=20,
+            continuation=True,
+        )
+    )
+
+    assert frames
+    assert voice.texts == ["Keep going, please"]
+
+
+def test_tts_terminal_boundary_keeps_sentence_punctuation(
+    tmp_path: Path,
+) -> None:
+    model_path = create_voice(tmp_path, "en-female")
+    voice = FakeVoice([Chunk(np.arange(320, dtype=np.int16))])
+    registry = PiperVoiceRegistry(
+        {(Language.EN, VoiceGender.FEMALE): model_path},
+        voice_factory=lambda _path, **_kwargs: voice,
+    )
+
+    list(
+        PiperTts(registry).synthesize_frames(
+            "Keep going, please.",
+            target_language=Language.EN,
+            voice_profile=profile(Language.EN, VoiceGender.FEMALE),
+            mode=TranslationMode.STREAMING_FIRST,
+            output_sample_rate_hz=16_000,
+            output_channels=1,
+            frame_duration_ms=20,
+            continuation=False,
+        )
+    )
+
+    assert voice.texts == ["Keep going, please."]
+
+
 def test_tts_does_not_pull_later_chunks_before_current_frames_are_consumed(
     tmp_path: Path,
 ) -> None:
