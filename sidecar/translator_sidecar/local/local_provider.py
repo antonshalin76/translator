@@ -65,6 +65,7 @@ _MAX_TERMINAL_IDS = 4096
 _MAX_PENDING_EVENTS = 64
 _TERMINAL_RESERVED_EVENTS = 3
 _MAX_RETIRED_SESSIONS = 64
+_PROVIDER_STALE_MESSAGE = "provider result is stale"
 
 
 def _source_utterance_limit_ms(mode: TranslationMode) -> int:
@@ -182,9 +183,7 @@ class _Session:
     collecting_id: UUID | None = None
     utterances: dict[UUID, _Utterance] = field(default_factory=dict)
     terminal_ids: set[UUID] = field(default_factory=set)
-    pending_publications: deque[_Publication] = field(
-        default_factory=deque
-    )
+    pending_publications: deque[_Publication] = field(default_factory=deque)
     pending_audio_ms: int = 0
     pending_event_count: int = 0
     in_flight: _Publication | None = None
@@ -194,26 +193,17 @@ class _Session:
     in_flight_committed: bool = False
     publication_error: LocalProviderPublicationError | None = None
     publication_error_consumed: bool = False
-    model_keys: dict[ModelKind, tuple[ModelKind, str]] = field(
-        default_factory=dict
-    )
+    model_keys: dict[ModelKind, tuple[ModelKind, str]] = field(default_factory=dict)
     closed: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    publication_signal: asyncio.Event = field(
-        default_factory=asyncio.Event
-    )
-    publication_space: asyncio.Event = field(
-        default_factory=asyncio.Event
-    )
-    publication_idle: asyncio.Event = field(
-        default_factory=asyncio.Event
-    )
+    publication_signal: asyncio.Event = field(default_factory=asyncio.Event)
+    publication_space: asyncio.Event = field(default_factory=asyncio.Event)
+    publication_idle: asyncio.Event = field(default_factory=asyncio.Event)
     publication_task: asyncio.Task[None] | None = None
 
     def next_event_sequence(self) -> int:
         self.event_sequence += 1
         return self.event_sequence
-
 
 
 class LocalProvider:
@@ -231,9 +221,7 @@ class LocalProvider:
         mt_model_id: str,
         tts_model_id: str,
         mt_device: ComputeDevice,
-        model_admission_probe: (
-            Callable[[ModelKind], None] | None
-        ) = None,
+        model_admission_probe: (Callable[[ModelKind], None] | None) = None,
     ) -> None:
         self._asr = asr
         self._translator = translator
@@ -246,9 +234,7 @@ class LocalProvider:
         self._mt_device = mt_device
         self._model_admission_probe = model_admission_probe
         self._sessions: dict[UUID, _Session] = {}
-        self._retired_sessions: OrderedDict[UUID, _Session] = (
-            OrderedDict()
-        )
+        self._retired_sessions: OrderedDict[UUID, _Session] = OrderedDict()
         self._model_states: dict[
             tuple[ModelKind, str],
             ModelState,
@@ -294,9 +280,7 @@ class LocalProvider:
         session.publication_space.set()
         session.publication_idle.set()
         self._sessions[request.session_id] = session
-        session.publication_task = asyncio.create_task(
-            self._publication_loop(session)
-        )
+        session.publication_task = asyncio.create_task(self._publication_loop(session))
         opened = ProviderSessionOpened(
             session_id=request.session_id,
             direction_id=request.direction_id,
@@ -372,14 +356,10 @@ class LocalProvider:
         session = self._active_session(request.session_id)
         async with session.lock:
             if request.direction_id is not session.request.direction_id:
-                raise LocalProviderProtocolError(
-                    "utterance direction mismatch"
-                )
+                raise LocalProviderProtocolError("utterance direction mismatch")
             utterance = session.utterances.get(request.utterance_id)
             if utterance is None:
-                raise LocalProviderProtocolError(
-                    "utterance is unavailable"
-                )
+                raise LocalProviderProtocolError("utterance is unavailable")
             if utterance.identity is not None:
                 try:
                     self._scheduler.cancel_utterance(
@@ -409,9 +389,7 @@ class LocalProvider:
                             stream_id=utterance.stream_id,
                             utterance_id=utterance.utterance_id,
                             event_sequence=session.next_event_sequence(),
-                            final_audio_sequence=(
-                                utterance.last_audio_sequence
-                            ),
+                            final_audio_sequence=(utterance.last_audio_sequence),
                             outcome=UtteranceOutcome.CANCELLED,
                         ),
                     ),
@@ -457,9 +435,7 @@ class LocalProvider:
                             session_id=request.session_id,
                             direction_id=session.request.direction_id,
                             event_sequence=session.next_event_sequence(),
-                            reason=SessionCloseReason(
-                                request.reason.value
-                            ),
+                            reason=SessionCloseReason(request.reason.value),
                         ),
                     ),
                 ),
@@ -480,23 +456,18 @@ class LocalProvider:
         sessions = tuple(self._sessions.values())
         if sessions:
             await asyncio.gather(
-                *(
-                    session.publication_idle.wait()
-                    for session in sessions
-                )
+                *(session.publication_idle.wait() for session in sessions)
             )
         error = self._take_publication_error()
         if error is not None:
             raise error from None
 
     async def wait_publications(self, session_id: UUID) -> None:
-        session = self._sessions.get(
+        session = self._sessions.get(session_id) or self._retired_sessions.get(
             session_id
-        ) or self._retired_sessions.get(session_id)
+        )
         if session is None:
-            raise LocalProviderProtocolError(
-                "provider session is unavailable"
-            )
+            raise LocalProviderProtocolError("provider session is unavailable")
         await session.publication_idle.wait()
         self._retired_sessions.pop(session_id, None)
         if (
@@ -523,9 +494,7 @@ class LocalProvider:
                 session.collecting_id = None
                 session.publication_signal.set()
                 if session.publication_task is not None:
-                    publication_tasks.append(
-                        session.publication_task
-                    )
+                    publication_tasks.append(session.publication_task)
         self._sessions.clear()
         self._retired_sessions.clear()
         await self._scheduler.shutdown()
@@ -601,10 +570,7 @@ class LocalProvider:
                 utterance,
                 ModelKind.ASR,
             ):
-                if (
-                    self._model_state(session, ModelKind.ASR)
-                    is not ModelState.READY
-                ):
+                if self._model_state(session, ModelKind.ASR) is not ModelState.READY:
                     await self._set_model_state(
                         session,
                         ModelKind.ASR,
@@ -643,12 +609,10 @@ class LocalProvider:
                 translation = await utterance.commit.finalize_async(
                     source_text,
                     end_of_utterance=True,
-                    translate=lambda committed_source: (
-                        context.run_gpu(
-                            lambda: self._translate(
-                                committed_source,
-                                session.request,
-                            )
+                    translate=lambda committed_source: context.run_gpu(
+                        lambda: self._translate(
+                            committed_source,
+                            session.request,
                         )
                     ),
                 )
@@ -695,20 +659,14 @@ class LocalProvider:
                     context,
                 )
             ):
-                if (
-                    frame_count + 1
-                ) * output.frame_duration_ms > _output_limit_ms(
+                if (frame_count + 1) * output.frame_duration_ms > _output_limit_ms(
                     source_buffered_ms,
                     translation,
                 ):
-                    raise SchedulerOverflow(
-                        "TTS output limit was reached"
-                    )
+                    raise SchedulerOverflow("TTS output limit was reached")
                 self._validate_output_frame(pcm_frame, session.request)
                 if tts_ms is None:
-                    tts_ms = self._elapsed_ms(
-                        utterance.capture_onset_ns
-                    )
+                    tts_ms = self._elapsed_ms(utterance.capture_onset_ns)
                 await self._publish_audio(
                     session,
                     utterance,
@@ -718,9 +676,7 @@ class LocalProvider:
                 audio_sequence += 1
                 frame_count += 1
             if frame_count == 0:
-                raise SchedulerUnavailable(
-                    "TTS inference is unavailable"
-                )
+                raise SchedulerUnavailable("TTS inference is unavailable")
             await self._complete(
                 session,
                 utterance,
@@ -795,10 +751,7 @@ class LocalProvider:
             ModelKind.TTS,
         ):
             output = session.request.requested_output_format
-            if (
-                self._model_state(session, ModelKind.TTS)
-                is not ModelState.READY
-            ):
+            if self._model_state(session, ModelKind.TTS) is not ModelState.READY:
                 await self._set_model_state(
                     session,
                     ModelKind.TTS,
@@ -841,9 +794,7 @@ class LocalProvider:
                 cancelled=context.cancelled,
             )
         except TtsOutputLimit:
-            raise SchedulerOverflow(
-                "TTS output limit was reached"
-            ) from None
+            raise SchedulerOverflow("TTS output limit was reached") from None
 
     async def _set_model_state(
         self,
@@ -853,16 +804,14 @@ class LocalProvider:
     ) -> None:
         async with session.lock:
             if session.closed:
-                raise SchedulerStale("provider result is stale")
+                raise SchedulerStale(_PROVIDER_STALE_MESSAGE)
             key = session.model_keys[kind]
             async with self._model_lock:
                 if (
                     self._model_states[key] is ModelState.FAILED
                     and state is not ModelState.FAILED
                 ):
-                    raise SchedulerUnavailable(
-                        "shared model is unavailable"
-                    )
+                    raise SchedulerUnavailable("shared model is unavailable")
                 self._model_states[key] = state
 
     async def _require_model_available(
@@ -872,15 +821,10 @@ class LocalProvider:
     ) -> None:
         async with session.lock:
             if session.closed:
-                raise SchedulerStale("provider result is stale")
+                raise SchedulerStale(_PROVIDER_STALE_MESSAGE)
             async with self._model_lock:
-                if (
-                    self._model_states[session.model_keys[kind]]
-                    is ModelState.FAILED
-                ):
-                    raise SchedulerUnavailable(
-                        "shared model is unavailable"
-                    )
+                if self._model_states[session.model_keys[kind]] is ModelState.FAILED:
+                    raise SchedulerUnavailable("shared model is unavailable")
 
     @asynccontextmanager
     async def _model_execution(
@@ -919,9 +863,7 @@ class LocalProvider:
         async with session.lock:
             if self._is_current(session, utterance):
                 async with self._model_lock:
-                    self._model_states[
-                        session.model_keys[kind]
-                    ] = ModelState.FAILED
+                    self._model_states[session.model_keys[kind]] = ModelState.FAILED
 
     async def _enqueue_publication(
         self,
@@ -934,26 +876,21 @@ class LocalProvider:
         while True:
             async with session.lock:
                 if not self._is_current(session, utterance):
-                    raise SchedulerStale("provider result is stale")
+                    raise SchedulerStale(_PROVIDER_STALE_MESSAGE)
                 if require_debug and not session.debug_text_enabled:
                     return
                 in_flight_ms = (
-                    session.in_flight.audio_ms
-                    if session.in_flight is not None
-                    else 0
+                    session.in_flight.audio_ms if session.in_flight is not None else 0
                 )
                 pending_events = (
-                    session.pending_event_count
-                    + session.in_flight_batch_size
+                    session.pending_event_count + session.in_flight_batch_size
                 )
                 nonterminal_limit = max(
                     0,
-                    _MAX_PENDING_EVENTS
-                    - _TERMINAL_RESERVED_EVENTS,
+                    _MAX_PENDING_EVENTS - _TERMINAL_RESERVED_EVENTS,
                 )
                 event_capacity_exceeded = (
-                    pending_events + publication.event_count
-                    > nonterminal_limit
+                    pending_events + publication.event_count > nonterminal_limit
                 )
                 if publication.event_count > nonterminal_limit:
                     self._fail_session_locked(
@@ -963,15 +900,10 @@ class LocalProvider:
                         ),
                     )
                     return
-                if (
-                    event_capacity_exceeded
-                    or (
-                        publication.audio_ms > 0
-                        and session.pending_audio_ms
-                        + in_flight_ms
-                        + publication.audio_ms
-                        > 1200
-                    )
+                if event_capacity_exceeded or (
+                    publication.audio_ms > 0
+                    and session.pending_audio_ms + in_flight_ms + publication.audio_ms
+                    > 1200
                 ):
                     session.publication_space.clear()
                     wait_for_space = session.publication_space
@@ -988,14 +920,8 @@ class LocalProvider:
         session: _Session,
         publication: _Publication,
     ) -> bool:
-        pending_events = (
-            session.pending_event_count
-            + session.in_flight_batch_size
-        )
-        if (
-            pending_events + publication.event_count
-            > _MAX_PENDING_EVENTS
-        ):
+        pending_events = session.pending_event_count + session.in_flight_batch_size
+        if pending_events + publication.event_count > _MAX_PENDING_EVENTS:
             self._fail_session_locked(
                 session,
                 LocalProviderPublicationError(
@@ -1019,10 +945,7 @@ class LocalProvider:
         pending_audio_ms = 0
         pending_event_count = 0
         for publication in session.pending_publications:
-            if (
-                utterance_id is None
-                or publication.utterance_id == utterance_id
-            ):
+            if utterance_id is None or publication.utterance_id == utterance_id:
                 continue
             retained.append(publication)
             pending_audio_ms += publication.audio_ms
@@ -1035,10 +958,7 @@ class LocalProvider:
         in_flight_task = session.in_flight_task
         if (
             in_flight is not None
-            and (
-                utterance_id is None
-                or in_flight.utterance_id == utterance_id
-            )
+            and (utterance_id is None or in_flight.utterance_id == utterance_id)
             and in_flight_task is not None
             and not in_flight_task.done()
         ):
@@ -1106,7 +1026,9 @@ class LocalProvider:
                     session.in_flight_cancelled = False
                     session.in_flight_committed = False
 
-                    def commit_publication() -> None:
+                    def commit_publication(
+                        publication: _Publication = publication,
+                    ) -> None:
                         if (
                             session.in_flight is not publication
                             or session.in_flight_committed
@@ -1129,9 +1051,7 @@ class LocalProvider:
                     await publish_task
                 except asyncio.CancelledError:
                     async with session.lock:
-                        callback_cancelled = (
-                            session.in_flight_cancelled
-                        )
+                        callback_cancelled = session.in_flight_cancelled
                     if not callback_cancelled:
                         raise
                 except Exception:
@@ -1139,10 +1059,7 @@ class LocalProvider:
                     return
 
                 async with session.lock:
-                    if (
-                        not callback_cancelled
-                        and not session.in_flight_committed
-                    ):
+                    if not callback_cancelled and not session.in_flight_committed:
                         self._fail_session_locked(
                             session,
                             LocalProviderPublicationError(
@@ -1170,9 +1087,7 @@ class LocalProvider:
         self,
         session: _Session,
     ) -> None:
-        error = LocalProviderPublicationError(
-            "provider event publication failed"
-        )
+        error = LocalProviderPublicationError("provider event publication failed")
         async with session.lock:
             self._fail_session_locked(session, error)
             session.in_flight = None
@@ -1272,7 +1187,7 @@ class LocalProvider:
     ) -> None:
         async with session.lock:
             if not self._is_current(session, utterance):
-                raise SchedulerStale("provider result is stale")
+                raise SchedulerStale(_PROVIDER_STALE_MESSAGE)
             self._terminalize_local(session, utterance)
             self._append_publication_locked(
                 session,
@@ -1293,12 +1208,8 @@ class LocalProvider:
                             direction_id=session.request.direction_id,
                             stream_id=utterance.stream_id,
                             utterance_id=utterance.utterance_id,
-                            event_sequence=(
-                                session.next_event_sequence()
-                            ),
-                            final_audio_sequence=(
-                                utterance.last_audio_sequence
-                            ),
+                            event_sequence=(session.next_event_sequence()),
+                            final_audio_sequence=(utterance.last_audio_sequence),
                             outcome=UtteranceOutcome.COMPLETED,
                         ),
                     ),
@@ -1362,9 +1273,7 @@ class LocalProvider:
                         direction_id=session.request.direction_id,
                         stream_id=utterance.stream_id,
                         utterance_id=utterance.utterance_id,
-                        event_sequence=(
-                            session.next_event_sequence()
-                        ),
+                        event_sequence=(session.next_event_sequence()),
                         code=code,
                         retryable=True,
                         safe_message=SAFE_ERROR_MESSAGES[code],
@@ -1374,12 +1283,8 @@ class LocalProvider:
                         direction_id=session.request.direction_id,
                         stream_id=utterance.stream_id,
                         utterance_id=utterance.utterance_id,
-                        event_sequence=(
-                            session.next_event_sequence()
-                        ),
-                        final_audio_sequence=(
-                            utterance.last_audio_sequence
-                        ),
+                        event_sequence=(session.next_event_sequence()),
+                        final_audio_sequence=(utterance.last_audio_sequence),
                         outcome=UtteranceOutcome.DROPPED,
                     ),
                 ),
@@ -1405,9 +1310,7 @@ class LocalProvider:
             asr_final_text_ms=asr_ms,
             mt_first_text_ms=mt_ms,
             tts_first_audio_ms=tts_ms,
-            provider_total_ms=self._elapsed_ms(
-                utterance.capture_onset_ns
-            ),
+            provider_total_ms=self._elapsed_ms(utterance.capture_onset_ns),
         )
 
     def _health(
@@ -1416,12 +1319,9 @@ class LocalProvider:
         *,
         allocate_sequence: bool = True,
     ) -> ProviderHealth:
-        asr_device = ComputeDevice(
-            getattr(self._asr, "actual_device", "cpu")
-        )
+        asr_device = ComputeDevice(getattr(self._asr, "actual_device", "cpu"))
         effective_asr_id = (
-            getattr(self._asr, "resident_model_id", None)
-            or self._asr_model_id
+            getattr(self._asr, "resident_model_id", None) or self._asr_model_id
         )
         models = (
             self._model_health(
@@ -1451,34 +1351,24 @@ class LocalProvider:
                 ModelKind.TTS,
             )
         )
-        unavailable = any(
-            state is ModelState.FAILED
-            for state in states
-        )
+        unavailable = any(state is ModelState.FAILED for state in states)
         starting = any(
-            state in {ModelState.NOT_LOADED, ModelState.LOADING}
-            for state in states
+            state in {ModelState.NOT_LOADED, ModelState.LOADING} for state in states
         )
         degraded = bool(
             getattr(self._asr, "degraded", False)
             or asr_device is ComputeDevice.CPU
             or self._mt_device is ComputeDevice.CPU
         )
-        state = (
-            ProviderState.UNAVAILABLE
-            if unavailable
-            else ProviderState.STARTING
-            if starting
-            else ProviderState.DEGRADED
-            if degraded
-            else ProviderState.READY
+        state = self._provider_state(
+            unavailable=unavailable,
+            starting=starting,
+            degraded=degraded,
         )
         safe_error = (
             SafeErrorSummary(
                 code=SafeErrorCode.MODEL_NOT_LOADED,
-                message=SAFE_ERROR_MESSAGES[
-                    SafeErrorCode.MODEL_NOT_LOADED
-                ],
+                message=SAFE_ERROR_MESSAGES[SafeErrorCode.MODEL_NOT_LOADED],
                 retryable=True,
             )
             if unavailable
@@ -1498,8 +1388,7 @@ class LocalProvider:
             models=models,
             queues=ProviderQueues(
                 provider_input_buffered_ms=sum(
-                    utterance.buffered_ms
-                    for utterance in session.utterances.values()
+                    utterance.buffered_ms for utterance in session.utterances.values()
                 ),
                 provider_output_buffered_ms=(
                     session.pending_audio_ms
@@ -1511,9 +1400,7 @@ class LocalProvider:
                 ),
                 queue_lag_ms=max(
                     (
-                        self._elapsed_ms(
-                            utterance.capture_onset_ns
-                        )
+                        self._elapsed_ms(utterance.capture_onset_ns)
                         for utterance in session.utterances.values()
                         if utterance.pcm_parts
                     ),
@@ -1546,14 +1433,7 @@ class LocalProvider:
         self,
         request: OpenProviderSession,
     ) -> dict[ModelKind, ModelState]:
-        asr_state = (
-            ModelState.FAILED
-            if bool(getattr(self._asr, "unavailable", False))
-            else ModelState.READY
-            if getattr(self._asr, "resident_model_id", None)
-            is not None
-            else ModelState.NOT_LOADED
-        )
+        asr_state = self._asr_initial_state()
         return {
             ModelKind.ASR: asr_state,
             ModelKind.MT: self._adapter_model_state(
@@ -1566,6 +1446,28 @@ class LocalProvider:
                 default=ModelState.READY,
             ),
         }
+
+    @staticmethod
+    def _provider_state(
+        *,
+        unavailable: bool,
+        starting: bool,
+        degraded: bool,
+    ) -> ProviderState:
+        if unavailable:
+            return ProviderState.UNAVAILABLE
+        if starting:
+            return ProviderState.STARTING
+        if degraded:
+            return ProviderState.DEGRADED
+        return ProviderState.READY
+
+    def _asr_initial_state(self) -> ModelState:
+        if bool(getattr(self._asr, "unavailable", False)):
+            return ModelState.FAILED
+        if getattr(self._asr, "resident_model_id", None) is not None:
+            return ModelState.READY
+        return ModelState.NOT_LOADED
 
     def _model_keys(
         self,
@@ -1583,11 +1485,7 @@ class LocalProvider:
             ),
             ModelKind.TTS: (
                 ModelKind.TTS,
-                (
-                    f"{voice.language.value}:"
-                    f"{voice.gender.value}:"
-                    f"{self._tts_model_id}"
-                ),
+                (f"{voice.language.value}:{voice.gender.value}:{self._tts_model_id}"),
             ),
         }
 
@@ -1617,22 +1515,13 @@ class LocalProvider:
         frame: ProviderInputFrame,
     ) -> _Utterance:
         if frame.utterance_id in session.terminal_ids:
-            raise LocalProviderProtocolError(
-                "utterance is already terminal"
-            )
+            raise LocalProviderProtocolError("utterance is already terminal")
         if session.collecting_id is None:
             if frame.utterance_id in session.utterances:
-                raise LocalProviderProtocolError(
-                    "utterance already reached EOU"
-                )
-            if (
-                len(session.terminal_ids) + len(session.utterances)
-                >= _MAX_TERMINAL_IDS
-            ):
+                raise LocalProviderProtocolError("utterance already reached EOU")
+            if len(session.terminal_ids) + len(session.utterances) >= _MAX_TERMINAL_IDS:
                 self._fail_session_locked(session)
-                raise LocalProviderProtocolError(
-                    "terminal identity capacity reached"
-                )
+                raise LocalProviderProtocolError("terminal identity capacity reached")
             utterance = _Utterance(
                 utterance_id=frame.utterance_id,
                 stream_id=frame.stream_id,
@@ -1643,9 +1532,7 @@ class LocalProvider:
             session.collecting_id = frame.utterance_id
             return utterance
         if session.collecting_id != frame.utterance_id:
-            raise LocalProviderProtocolError(
-                "utterance identity changed before EOU"
-            )
+            raise LocalProviderProtocolError("utterance identity changed before EOU")
         return session.utterances[frame.utterance_id]
 
     def _validate_open(self, request: OpenProviderSession) -> None:
@@ -1655,17 +1542,11 @@ class LocalProvider:
             or input_format.channels != 1
             or input_format.sample_format is not SampleFormat.S16LE
         ):
-            raise LocalProviderProtocolError(
-                "local ASR input format is unsupported"
-            )
+            raise LocalProviderProtocolError("local ASR input format is unsupported")
         if request.source_language is request.target_language:
-            raise LocalProviderProtocolError(
-                "language pair is unsupported"
-            )
+            raise LocalProviderProtocolError("language pair is unsupported")
         if request.voice_profile.language is not request.target_language:
-            raise LocalProviderProtocolError(
-                "voice language does not match target"
-            )
+            raise LocalProviderProtocolError("voice language does not match target")
 
     def _validate_frame(
         self,
@@ -1679,46 +1560,31 @@ class LocalProvider:
             or frame.target_language is not request.target_language
             or frame.mode is not request.mode
         ):
-            raise LocalProviderProtocolError(
-                "frame session contract mismatch"
-            )
+            raise LocalProviderProtocolError("frame session contract mismatch")
         input_format = request.requested_input_format
         if (
             frame.sample_rate_hz != input_format.sample_rate_hz
             or frame.channels != input_format.channels
             or frame.sample_format is not input_format.sample_format
-            or frame.frame_duration_ms
-            != input_format.frame_duration_ms
+            or frame.frame_duration_ms != input_format.frame_duration_ms
         ):
-            raise LocalProviderProtocolError(
-                "frame PCM format mismatch"
-            )
+            raise LocalProviderProtocolError("frame PCM format mismatch")
         expected_bytes = (
-            frame.sample_rate_hz
-            * frame.channels
-            * frame.frame_duration_ms
-            // 1000
-            * 2
+            frame.sample_rate_hz * frame.channels * frame.frame_duration_ms // 1000 * 2
         )
         if len(frame.pcm) != expected_bytes:
-            raise LocalProviderProtocolError(
-                "frame PCM length mismatch"
-            )
+            raise LocalProviderProtocolError("frame PCM length mismatch")
         if session.stream_id is None:
             session.stream_id = frame.stream_id
         elif frame.stream_id != session.stream_id:
-            raise LocalProviderProtocolError(
-                "stream identity mismatch"
-            )
+            raise LocalProviderProtocolError("stream identity mismatch")
         expected_sequence = (
             0
             if session.last_input_sequence is None
             else session.last_input_sequence + 1
         )
         if frame.sequence != expected_sequence:
-            raise LocalProviderProtocolError(
-                "frame sequence is not contiguous"
-            )
+            raise LocalProviderProtocolError("frame sequence is not contiguous")
 
     @staticmethod
     def _validate_output_frame(
@@ -1734,16 +1600,12 @@ class LocalProvider:
             * 2
         )
         if len(pcm) != expected_bytes:
-            raise SchedulerUnavailable(
-                "TTS output frame is unavailable"
-            )
+            raise SchedulerUnavailable("TTS output frame is unavailable")
 
     def _active_session(self, session_id: UUID) -> _Session:
         session = self._sessions.get(session_id)
         if session is None or session.closed:
-            raise LocalProviderProtocolError(
-                "provider session is unavailable"
-            )
+            raise LocalProviderProtocolError("provider session is unavailable")
         return session
 
     @staticmethod
@@ -1753,8 +1615,7 @@ class LocalProvider:
     ) -> bool:
         return (
             not session.closed
-            and session.utterances.get(utterance.utterance_id)
-            is utterance
+            and session.utterances.get(utterance.utterance_id) is utterance
             and utterance.utterance_id not in session.terminal_ids
         )
 
@@ -1769,9 +1630,7 @@ class LocalProvider:
             and len(session.terminal_ids) >= _MAX_TERMINAL_IDS
         ):
             self._fail_session_locked(session)
-            raise LocalProviderProtocolError(
-                "terminal identity capacity reached"
-            )
+            raise LocalProviderProtocolError("terminal identity capacity reached")
         session.utterances.pop(utterance.utterance_id, None)
         session.terminal_ids.add(utterance.utterance_id)
 
@@ -1784,8 +1643,7 @@ class LocalProvider:
 
     def _models_available(self, session: _Session) -> bool:
         return all(
-            self._model_state(session, kind)
-            is not ModelState.FAILED
+            self._model_state(session, kind) is not ModelState.FAILED
             for kind in (
                 ModelKind.ASR,
                 ModelKind.MT,
@@ -1803,9 +1661,7 @@ class LocalProvider:
         session.closed = True
         session.debug_text_enabled = False
         try:
-            self._scheduler.close_session(
-                session.request.session_id
-            )
+            self._scheduler.close_session(session.request.session_id)
         except SchedulerStale:
             pass
         for utterance in tuple(session.utterances.values()):
@@ -1824,10 +1680,7 @@ class LocalProvider:
             self._sessions.pop(session_id)
             self._retired_sessions[session_id] = session
             self._retired_sessions.move_to_end(session_id)
-            while (
-                len(self._retired_sessions)
-                > _MAX_RETIRED_SESSIONS
-            ):
+            while len(self._retired_sessions) > _MAX_RETIRED_SESSIONS:
                 self._retired_sessions.popitem(last=False)
 
     def _take_publication_error(

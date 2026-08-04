@@ -238,6 +238,43 @@ fn segmenter_allows_podcast_length_continuous_voice_before_forcing_eou() {
 }
 
 #[test]
+fn default_segmenter_forces_continuous_voice_at_six_seconds() {
+    let detector = ScriptedDetector::new(std::iter::repeat_n(true, 320));
+    let mut segmenter = SpeechSegmenter::new(Uuid::new_v4(), detector);
+
+    let events = process_events(&mut segmenter, 0..320);
+    let starts = speech_start_ids(&events);
+    let frames = utterance_frames(&events);
+
+    assert_eq!(starts.len(), 2);
+    assert_ne!(starts[0], starts[1]);
+    assert_eq!(frames.len(), 320);
+    assert_eq!(frames[299], (starts[0], 299, true));
+    assert_eq!(
+        frames
+            .iter()
+            .map(|(_utterance_id, sequence, _eou)| *sequence)
+            .collect::<Vec<_>>(),
+        (0..320).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn default_segmenter_closes_on_short_pause_after_minimum_live_window() {
+    let detector =
+        ScriptedDetector::new(std::iter::repeat_n(true, 125).chain(std::iter::repeat_n(false, 6)));
+    let mut segmenter = SpeechSegmenter::new(Uuid::new_v4(), detector);
+
+    let events = process_events(&mut segmenter, 0..131);
+    let starts = speech_start_ids(&events);
+    let frames = frame_sequences(&events);
+
+    assert_eq!(starts.len(), 1);
+    assert_eq!(frames.len(), 131);
+    assert_eq!(frames[130], (130, true));
+}
+
+#[test]
 fn segmenter_rearms_after_forced_continuous_voice_without_dropping_speech() {
     let detector = ScriptedDetector::new(std::iter::repeat_n(true, 406));
     let mut segmenter = low_latency_segmenter(detector);

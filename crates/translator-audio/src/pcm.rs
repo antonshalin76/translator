@@ -13,7 +13,10 @@ const DEFAULT_SPEECH_CONFIRMATION_FRAMES: usize = 10;
 const MIN_SPEECH_CONFIRMATION_FRAMES: usize = 3;
 const MAX_SPEECH_CONFIRMATION_FRAMES: usize = 25;
 const END_OF_UTTERANCE_SILENCE_FRAMES: usize = 15;
-const DEFAULT_MAX_UTTERANCE_FRAMES: usize = 1_200;
+const ADAPTIVE_END_OF_UTTERANCE_SILENCE_FRAMES: usize = 6;
+const DEFAULT_MIN_UTTERANCE_FRAMES: usize = 125;
+const MIN_MIN_UTTERANCE_FRAMES: usize = 50;
+const DEFAULT_MAX_UTTERANCE_FRAMES: usize = 300;
 const MIN_MAX_UTTERANCE_FRAMES: usize = 200;
 const MAX_MAX_UTTERANCE_FRAMES: usize = 1_500;
 const DEFAULT_MIN_VOICE_RMS: f64 = 300.0;
@@ -243,6 +246,25 @@ fn configured_max_utterance_frames() -> usize {
         .unwrap_or(DEFAULT_MAX_UTTERANCE_FRAMES)
 }
 
+fn configured_min_utterance_frames(max_utterance_frames: usize) -> usize {
+    std::env::var("TRANSLATOR_VAD_MIN_UTTERANCE_MS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value / StreamPcmFormat::provider_default().frame_duration_ms as usize)
+        .filter(|value| *value >= MIN_MIN_UTTERANCE_FRAMES)
+        .map(|value| value.min(max_utterance_frames))
+        .unwrap_or(DEFAULT_MIN_UTTERANCE_FRAMES.min(max_utterance_frames))
+}
+
+fn configured_adaptive_silence_frames() -> usize {
+    std::env::var("TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value / StreamPcmFormat::provider_default().frame_duration_ms as usize)
+        .map(|value| value.clamp(1, END_OF_UTTERANCE_SILENCE_FRAMES))
+        .unwrap_or(ADAPTIVE_END_OF_UTTERANCE_SILENCE_FRAMES)
+}
+
 fn rms(samples: &[i16]) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -263,7 +285,9 @@ pub struct SpeechSegmenter<D> {
     pending_speech: Vec<PcmFrame>,
     trailing_silence: Vec<PcmFrame>,
     active_frames: usize,
+    min_utterance_frames: usize,
     max_utterance_frames: usize,
+    adaptive_silence_frames: usize,
     rearm_silence_frames: Option<usize>,
 }
 
@@ -278,11 +302,14 @@ impl<D: VoiceDetector> SpeechSegmenter<D> {
         detector: D,
         speech_confirmation_frames: usize,
     ) -> Self {
-        Self::with_confirmation_and_max_frames(
+        let max_utterance_frames = configured_max_utterance_frames();
+        Self::with_confirmation_and_adaptive_frames(
             stream_id,
             detector,
             speech_confirmation_frames,
-            configured_max_utterance_frames(),
+            configured_min_utterance_frames(max_utterance_frames),
+            max_utterance_frames,
+            configured_adaptive_silence_frames(),
         )
     }
 
@@ -293,12 +320,35 @@ impl<D: VoiceDetector> SpeechSegmenter<D> {
         speech_confirmation_frames: usize,
         max_utterance_frames: usize,
     ) -> Self {
+        Self::with_confirmation_and_adaptive_frames(
+            stream_id,
+            detector,
+            speech_confirmation_frames,
+            max_utterance_frames,
+            max_utterance_frames,
+            END_OF_UTTERANCE_SILENCE_FRAMES,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_confirmation_and_adaptive_frames(
+        stream_id: Uuid,
+        detector: D,
+        speech_confirmation_frames: usize,
+        min_utterance_frames: usize,
+        max_utterance_frames: usize,
+        adaptive_silence_frames: usize,
+    ) -> Self {
         let speech_confirmation_frames = speech_confirmation_frames.clamp(
             MIN_SPEECH_CONFIRMATION_FRAMES,
             MAX_SPEECH_CONFIRMATION_FRAMES,
         );
         let max_utterance_frames =
             max_utterance_frames.clamp(MIN_MAX_UTTERANCE_FRAMES, MAX_MAX_UTTERANCE_FRAMES);
+        let min_utterance_frames =
+            min_utterance_frames.clamp(speech_confirmation_frames, max_utterance_frames);
+        let adaptive_silence_frames =
+            adaptive_silence_frames.clamp(1, END_OF_UTTERANCE_SILENCE_FRAMES);
         Self {
             stream_id,
             detector,
@@ -307,7 +357,9 @@ impl<D: VoiceDetector> SpeechSegmenter<D> {
             pending_speech: Vec::with_capacity(speech_confirmation_frames),
             trailing_silence: Vec::with_capacity(END_OF_UTTERANCE_SILENCE_FRAMES),
             active_frames: 0,
+            min_utterance_frames,
             max_utterance_frames,
+            adaptive_silence_frames,
             rearm_silence_frames: None,
         }
     }
@@ -401,7 +453,12 @@ impl<D: VoiceDetector> SpeechSegmenter<D> {
         }
         self.trailing_silence.push(frame);
         self.active_frames = self.active_frames.saturating_add(1);
-        if self.trailing_silence.len() < END_OF_UTTERANCE_SILENCE_FRAMES {
+        let silence_frames = if self.active_frames >= self.min_utterance_frames {
+            self.adaptive_silence_frames
+        } else {
+            END_OF_UTTERANCE_SILENCE_FRAMES
+        };
+        if self.trailing_silence.len() < silence_frames {
             if self.active_frames >= self.max_utterance_frames {
                 return self.finish_with_trailing_silence(utterance_id, true);
             }

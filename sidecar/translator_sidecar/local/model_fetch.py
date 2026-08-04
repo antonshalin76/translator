@@ -25,7 +25,7 @@ from translator_sidecar.local.model_manifest import (
 
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-_CONTENT_LENGTH_RE = re.compile(r"^[0-9]+$")
+_CONTENT_LENGTH_RE = re.compile(r"^\d+$")
 _MAX_CHUNK_SIZE = 8 * 1024 * 1024
 
 
@@ -227,9 +227,7 @@ class ModelFetcher:
 
                 if response.status != 200:
                     raise FetchError("download response status is not allowed")
-                self.manifest.validate_download_chain(
-                    model_id, model_file.path, chain
-                )
+                self.manifest.validate_download_chain(model_id, model_file.path, chain)
                 _validate_response_metadata(response, model_file)
                 while True:
                     try:
@@ -266,9 +264,7 @@ def _header_values(
     ]
 
 
-def _validate_response_metadata(
-    response: HttpResponse, model_file: ModelFile
-) -> None:
+def _validate_response_metadata(response: HttpResponse, model_file: ModelFile) -> None:
     content_length = _single_header(response, "Content-Length")
     if (
         content_length is None
@@ -277,9 +273,7 @@ def _validate_response_metadata(
     ):
         raise FetchError("response Content-Length does not match manifest")
     encodings = _header_values(response.headers, "Content-Encoding")
-    if len(encodings) > 1 or (
-        encodings and encodings[0].strip().lower() != "identity"
-    ):
+    if len(encodings) > 1 or (encodings and encodings[0].strip().lower() != "identity"):
         raise FetchError("response Content-Encoding is not supported")
 
 

@@ -6,7 +6,6 @@ import argparse
 from contextlib import nullcontext
 import datetime as dt
 import json
-import os
 from pathlib import Path
 import sys
 import tempfile
@@ -23,6 +22,7 @@ from translator_sidecar.benchmark.model_matrix import (
     default_executable_asr_candidate_ids,
 )
 from translator_sidecar.local.asr import AsrModelManager
+from translator_sidecar.local.cuda_runtime import configure_cuda_runtime
 from translator_sidecar.local.model_manifest import ModelManifest, load_manifest
 from translator_sidecar.provider_contract import Language, TranslationMode
 
@@ -67,6 +67,7 @@ def _utc_now() -> str:
 
 def _cuda_available() -> bool:
     try:
+        configure_cuda_runtime()
         import ctranslate2
 
         return ctranslate2.get_cuda_device_count() > 0
@@ -92,9 +93,7 @@ def _write_wav(path: Path, pcm_s16le: bytes, *, sample_rate_hz: int) -> None:
 def _decode_pcm(pcm_s16le: bytes) -> np.ndarray:
     if not pcm_s16le or len(pcm_s16le) % 2:
         raise AsrQualityError("PCM input must be non-empty s16le mono audio")
-    return np.frombuffer(pcm_s16le, dtype="<i2").astype(np.float32) / np.float32(
-        32768
-    )
+    return np.frombuffer(pcm_s16le, dtype="<i2").astype(np.float32) / np.float32(32768)
 
 
 def _safe_wer(reference: str | None, hypothesis: str) -> float | None:
@@ -191,6 +190,8 @@ class FasterWhisperCt2AsrProbe:
         self._factory = factory
         self._repository = repository
         requested_device = device or ("cuda" if _cuda_available() else "cpu")
+        if requested_device == "cuda":
+            configure_cuda_runtime()
         try:
             self._model = self._load(
                 factory,
@@ -289,6 +290,7 @@ class QwenTransformersAsrProbe:
                 raise AsrQualityUnavailable(
                     "Qwen3-ASR requires the optional transformers package"
                 ) from error
+
             def model_factory(model_id: str) -> Any:
                 return AutoModelForMultimodalLM.from_pretrained(
                     model_id,
@@ -383,7 +385,7 @@ def _run_candidate(
             "wer": None,
             "wall_ms": None,
         }
-    except (ImportError, ModuleNotFoundError) as error:
+    except ImportError as error:
         return {
             "model_id": model_id,
             "candidate": candidate.to_report(),
@@ -421,9 +423,7 @@ def _run_candidate(
 def _parse_model_ids(values: list[str]) -> list[str]:
     model_ids: list[str] = []
     for value in values:
-        model_ids.extend(
-            item.strip() for item in value.split(",") if item.strip()
-        )
+        model_ids.extend(item.strip() for item in value.split(",") if item.strip())
     return model_ids or default_executable_asr_candidate_ids()
 
 

@@ -40,12 +40,20 @@ from .provider_contract import (
 
 
 OPENAI_REALTIME_TRANSLATION_MODEL = "gpt-realtime-translate"
-OPENAI_REALTIME_TRANSLATION_ENDPOINT = (
-    "wss://api.openai.com/v1/realtime/translations"
-)
+OPENAI_REALTIME_TRANSLATION_ENDPOINT = "wss://api.openai.com/v1/realtime/translations"
 OPENAI_PROVIDER_NAME = "openai-realtime-translation"
 _DEFAULT_CREDENTIAL_ENV = "OPENAI_API_KEY"
 _DEFAULT_FRAME_DURATION_MS = 20
+
+RealtimeProviderEvent = (
+    ProviderAudioDelta | ProviderTranscriptDelta | ProviderTranslationDelta
+)
+
+
+def _realtime_events(
+    *events: RealtimeProviderEvent,
+) -> tuple[RealtimeProviderEvent, ...]:
+    return events
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +160,9 @@ class OpenAIRealtimeAdapter:
         opened: ProviderSessionOpened | None = None
         error: PrivacySafeProviderError | None = None
         provider_matches = request.provider_id is ProviderId.OPENAI
-        can_start = provider_matches and self._config.cloud_opt_in and credential_present
+        can_start = (
+            provider_matches and self._config.cloud_opt_in and credential_present
+        )
 
         if can_start:
             opened = ProviderSessionOpened(
@@ -172,12 +182,9 @@ class OpenAIRealtimeAdapter:
             model_state = ModelState.READY
             safe_error = None
         else:
-            code = (
-                SafeErrorCode.PROVIDER_UNAVAILABLE
-                if not provider_matches
-                else SafeErrorCode.CLOUD_NOT_ENABLED
-                if not self._config.cloud_opt_in
-                else SafeErrorCode.PROVIDER_AUTH_FAILED
+            code = self._preflight_failure_code(
+                provider_matches=provider_matches,
+                cloud_opt_in=self._config.cloud_opt_in,
             )
             error = make_provider_error(
                 session_id=request.session_id,
@@ -227,9 +234,7 @@ class OpenAIRealtimeAdapter:
             health=health,
             opened=opened,
             error=error,
-            connect_plan=(
-                self._connect_plan(request) if can_start else None
-            ),
+            connect_plan=(self._connect_plan(request) if can_start else None),
         )
 
     def map_realtime_events(
@@ -248,7 +253,7 @@ class OpenAIRealtimeAdapter:
         if event_type == "session.output_audio.delta":
             delta = event.get("delta")
             if not isinstance(delta, str):
-                return ()
+                return _realtime_events()
             try:
                 pcm = base64.b64decode(delta, validate=True)
             except binascii.Error as error:
@@ -275,9 +280,7 @@ class OpenAIRealtimeAdapter:
                         stream_id=stream_id,
                         utterance_id=utterance_id,
                         sequence=sequence,
-                        event_sequence=self._next_event_sequence(
-                            request.session_id
-                        ),
+                        event_sequence=self._next_event_sequence(request.session_id),
                         provider_monotonic_ns=now_ns,
                         sample_rate_hz=24_000,
                         channels=1,
@@ -288,15 +291,15 @@ class OpenAIRealtimeAdapter:
                 )
                 sequence += 1
             self._audio_sequences[sequence_key] = sequence
-            return tuple(events)
+            return _realtime_events(*events)
 
         if not request.debug_text_enabled:
-            return ()
+            return _realtime_events()
         delta = event.get("delta")
         if not isinstance(delta, str):
-            return ()
+            return _realtime_events()
         if event_type == "session.input_transcript.delta":
-            return (
+            return _realtime_events(
                 ProviderTranscriptDelta(
                     session_id=request.session_id,
                     direction_id=request.direction_id,
@@ -308,7 +311,7 @@ class OpenAIRealtimeAdapter:
                 ),
             )
         if event_type == "session.output_transcript.delta":
-            return (
+            return _realtime_events(
                 ProviderTranslationDelta(
                     session_id=request.session_id,
                     direction_id=request.direction_id,
@@ -320,10 +323,22 @@ class OpenAIRealtimeAdapter:
                     is_final=False,
                 ),
             )
-        return ()
+        return _realtime_events()
 
     def _credential_present(self) -> bool:
         return bool(self._environ.get(self._config.credential_env_name, "").strip())
+
+    @staticmethod
+    def _preflight_failure_code(
+        *,
+        provider_matches: bool,
+        cloud_opt_in: bool,
+    ) -> SafeErrorCode:
+        if not provider_matches:
+            return SafeErrorCode.PROVIDER_UNAVAILABLE
+        if not cloud_opt_in:
+            return SafeErrorCode.CLOUD_NOT_ENABLED
+        return SafeErrorCode.PROVIDER_AUTH_FAILED
 
     def _connect_plan(self, request: OpenProviderSession) -> dict[str, Any]:
         return {

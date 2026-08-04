@@ -60,7 +60,7 @@ if (!root) {
 const appRoot = root;
 
 render();
-void refreshStatus();
+await refreshStatus();
 window.setInterval(() => {
   void refreshStatus();
 }, 2000);
@@ -287,25 +287,26 @@ function providerControl(): HTMLElement {
 }
 
 function debugControl(control: DebugControl): HTMLElement {
+  const isDebugText = control === "debug_text";
   const intent = debugToggleIntent(
     control,
-    control === "debug_text"
+    isDebugText
       ? !state.snapshot.debug_text_enabled
       : !state.snapshot.debug_capture_enabled,
   );
   const enabled =
-    control === "debug_text"
+    isDebugText
       ? state.snapshot.debug_text_enabled
       : state.snapshot.debug_capture_enabled;
   const button = element("button", `control-button ${enabled ? "active" : ""}`);
   button.type = "button";
   button.disabled = state.busy !== null;
-  button.textContent =
-    control === "debug_text"
-      ? `Debug text ${enabled ? "On" : "Off"}`
-      : `Capture ${enabled ? "On" : "Off"}`;
-    button.addEventListener("click", () => {
-    if (control === "debug_text" && enabled) {
+  const controlState = enabled ? "On" : "Off";
+  button.textContent = isDebugText
+    ? `Debug text ${controlState}`
+    : `Capture ${controlState}`;
+  button.addEventListener("click", () => {
+    if (isDebugText && enabled) {
       clearDebugText();
     }
     void invokeAction(intent.command, intent.args, control);
@@ -401,13 +402,12 @@ function directionPanel(directionId: AudioDirection): HTMLElement {
       `${labelLanguage(direction.source_language)} → ${labelLanguage(direction.target_language)}`,
     ),
   );
+  const directionStateText = state.connected
+    ? directionEnabledText(enabled)
+    : "Ожидание";
   heading.append(
     copy,
-    element(
-      "span",
-      `state-text ${enabled ? "enabled" : "disabled"}`,
-      state.connected ? (enabled ? "Включен" : "Отключен") : "Ожидание",
-    ),
+    element("span", `state-text ${enabled ? "enabled" : "disabled"}`, directionStateText),
   );
 
   const pairControls = element("div", "segmented");
@@ -857,14 +857,20 @@ function defaultLatency(directionId: AudioDirection): LatencyPolicyState {
 }
 
 function directionState(directionId: AudioDirection): DirectionState {
+  const sourceLanguage = directionId === "microphone" ? "ru" : "en";
+  const targetLanguage = directionId === "microphone" ? "en" : "ru";
   return (
     state.snapshot.directions?.find((direction) => direction.direction_id === directionId) ??
-    defaultDirection(directionId, directionId === "microphone" ? "ru" : "en", directionId === "microphone" ? "en" : "ru")
+    defaultDirection(directionId, sourceLanguage, targetLanguage)
   );
 }
 
 function directionEnabled(direction: DirectionState): boolean {
   return direction.enabled !== false;
+}
+
+function directionEnabledText(enabled: boolean): string {
+  return enabled ? "Включен" : "Отключен";
 }
 
 function latencyState(directionId: AudioDirection): LatencyPolicyState | undefined {

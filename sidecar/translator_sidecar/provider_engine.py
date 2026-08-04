@@ -116,13 +116,17 @@ ProviderEngineEvent = (
 )
 
 
+def _engine_events(
+    *events: ProviderEngineEvent,
+) -> tuple[ProviderEngineEvent, ...]:
+    return events
+
+
 def mock_transform_pcm(pcm: bytes) -> bytes:
     """Reverse complete s16le samples while preserving the byte format."""
     if len(pcm) % 2:
         raise ValueError("s16le PCM must contain complete samples")
-    return b"".join(
-        pcm[offset : offset + 2] for offset in range(len(pcm) - 2, -1, -2)
-    )
+    return b"".join(pcm[offset : offset + 2] for offset in range(len(pcm) - 2, -1, -2))
 
 
 class ProviderEngine:
@@ -199,19 +203,21 @@ class ProviderEngine:
     ) -> tuple[ProviderEngineEvent, ...]:
         session = self._active_session(session_id)
         if not session.input_queue:
-            return ()
+            return _engine_events()
 
         queued = session.input_queue[0]
         frame = queued.frame
         if self._expired(session, frame.capture_monotonic_ns, now_ns):
             self._pop_input(session)
-            return (self._terminal(session, frame, UtteranceOutcome.DROPPED),)
+            return _engine_events(
+                self._terminal(session, frame, UtteranceOutcome.DROPPED)
+            )
         ready_ns = (
             queued.enqueued_ns
             + self._injection.process_delay_ms * _NANOSECONDS_PER_MILLISECOND
         )
         if now_ns < ready_ns:
-            return ()
+            return _engine_events()
 
         self._pop_input(session)
         if (
@@ -219,7 +225,7 @@ class ProviderEngine:
             and session.processed_frames >= self._injection.fail_after_frames
         ):
             session.processed_frames += 1
-            return (
+            return _engine_events(
                 self._error(
                     session,
                     SafeErrorCode.PROVIDER_UNAVAILABLE,
@@ -232,7 +238,7 @@ class ProviderEngine:
         session.processed_frames += 1
 
         if session.output_buffered_ms + frame.frame_duration_ms > OUTPUT_LIMIT_MS:
-            return (
+            return _engine_events(
                 self._error(
                     session,
                     SafeErrorCode.QUEUE_OVERFLOW,
@@ -248,8 +254,8 @@ class ProviderEngine:
         )
         session.output_buffered_ms += frame.frame_duration_ms
         if not session.debug_text_enabled:
-            return ()
-        return (
+            return _engine_events()
+        return _engine_events(
             ProviderTranscriptDelta(
                 session_id=frame.session_id,
                 direction_id=frame.direction_id,
@@ -281,13 +287,9 @@ class ProviderEngine:
             frame = queued.frame
             session.output_buffered_ms -= frame.frame_duration_ms
             if self._expired(session, frame.capture_monotonic_ns, now_ns):
-                events.append(
-                    self._terminal(session, frame, UtteranceOutcome.DROPPED)
-                )
+                events.append(self._terminal(session, frame, UtteranceOutcome.DROPPED))
                 continue
-            audio_sequence = session.next_audio_sequence.get(
-                frame.utterance_id, 0
-            )
+            audio_sequence = session.next_audio_sequence.get(frame.utterance_id, 0)
             events.append(
                 ProviderAudioDelta(
                     session_id=frame.session_id,
@@ -305,13 +307,10 @@ class ProviderEngine:
                 )
             )
             session.next_audio_sequence[frame.utterance_id] = audio_sequence + 1
-            session.last_emitted_audio_sequence[frame.utterance_id] = (
-                audio_sequence
-            )
+            session.last_emitted_audio_sequence[frame.utterance_id] = audio_sequence
             total_ms = max(
                 0,
-                (now_ns - frame.capture_monotonic_ns)
-                // _NANOSECONDS_PER_MILLISECOND,
+                (now_ns - frame.capture_monotonic_ns) // _NANOSECONDS_PER_MILLISECOND,
             )
             events.append(
                 ProviderLatency(
@@ -330,9 +329,7 @@ class ProviderEngine:
                 )
         return tuple(events)
 
-    def cancel_utterance(
-        self, request: CancelUtterance
-    ) -> ProviderUtteranceFinal:
+    def cancel_utterance(self, request: CancelUtterance) -> ProviderUtteranceFinal:
         session = self._active_session(request.session_id)
         if request.direction_id is not session.request.direction_id:
             raise ProviderProtocolError("direction_identity_mismatch")
@@ -354,9 +351,7 @@ class ProviderEngine:
             outcome=UtteranceOutcome.CANCELLED,
         )
 
-    def close_session(
-        self, request: CloseProviderSession
-    ) -> ProviderSessionClosed:
+    def close_session(self, request: CloseProviderSession) -> ProviderSessionClosed:
         session = self._active_session(request.session_id)
         session.input_queue.clear()
         session.output_queue.clear()
@@ -398,8 +393,7 @@ class ProviderEngine:
         )
         expiry_ns = (
             queued.frame.capture_monotonic_ns
-            + _MAX_AGE_MS[session.request.mode]
-            * _NANOSECONDS_PER_MILLISECOND
+            + _MAX_AGE_MS[session.request.mode] * _NANOSECONDS_PER_MILLISECOND
             + 1
         )
         wakeup_ns = min(ready_ns, expiry_ns)
@@ -445,9 +439,7 @@ class ProviderEngine:
             raise ProviderProtocolError("session_terminal")
         return session
 
-    def _validate_frame(
-        self, session: _Session, frame: ProviderInputFrame
-    ) -> None:
+    def _validate_frame(self, session: _Session, frame: ProviderInputFrame) -> None:
         request = session.request
         if frame.utterance_id in session.terminal_utterances:
             raise ProviderProtocolError("utterance_terminal")
@@ -477,11 +469,7 @@ class ProviderEngine:
         ):
             raise ProviderProtocolError("session_contract_mismatch")
         expected_pcm_bytes = (
-            frame.sample_rate_hz
-            * frame.channels
-            * 2
-            * frame.frame_duration_ms
-            // 1000
+            frame.sample_rate_hz * frame.channels * 2 * frame.frame_duration_ms // 1000
         )
         if len(frame.pcm) != expected_pcm_bytes:
             raise ProviderProtocolError("pcm_length_mismatch")
@@ -490,20 +478,14 @@ class ProviderEngine:
         self, session: _Session, capture_monotonic_ns: int, now_ns: int
     ) -> bool:
         age_ns = max(0, now_ns - capture_monotonic_ns)
-        return (
-            age_ns
-            > _MAX_AGE_MS[session.request.mode]
-            * _NANOSECONDS_PER_MILLISECOND
-        )
+        return age_ns > _MAX_AGE_MS[session.request.mode] * _NANOSECONDS_PER_MILLISECOND
 
     def _pop_input(self, session: _Session) -> _QueuedInput:
         queued = session.input_queue.popleft()
         session.input_buffered_ms -= queued.frame.frame_duration_ms
         return queued
 
-    def _remove_utterance_input(
-        self, session: _Session, utterance_id: UUID
-    ) -> None:
+    def _remove_utterance_input(self, session: _Session, utterance_id: UUID) -> None:
         retained: deque[_QueuedInput] = deque()
         while session.input_queue:
             queued = session.input_queue.popleft()
@@ -513,9 +495,7 @@ class ProviderEngine:
                 retained.append(queued)
         session.input_queue = retained
 
-    def _remove_utterance_output(
-        self, session: _Session, utterance_id: UUID
-    ) -> None:
+    def _remove_utterance_output(self, session: _Session, utterance_id: UUID) -> None:
         retained: deque[_QueuedOutput] = deque()
         while session.output_queue:
             queued = session.output_queue.popleft()
@@ -601,8 +581,7 @@ class ProviderEngine:
         if now_ns is not None and capture_times:
             queue_lag_ms = max(
                 0,
-                (now_ns - min(capture_times))
-                // _NANOSECONDS_PER_MILLISECOND,
+                (now_ns - min(capture_times)) // _NANOSECONDS_PER_MILLISECOND,
             )
         return ProviderQueues(
             provider_input_buffered_ms=session.input_buffered_ms,

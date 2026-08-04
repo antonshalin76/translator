@@ -24,6 +24,8 @@ from translator_sidecar.provider_contract import (
 _ALLOWED_SAMPLE_RATES = {16_000, 24_000, 48_000}
 _ALLOWED_FRAME_DURATIONS_MS = {20, 40, 60, 80, 100}
 _MAX_OUTPUT_MS = 30_000
+_PIPER_VOICE_UNAVAILABLE_MESSAGE = "requested Piper voice is unavailable"
+_TTS_UNAVAILABLE_MESSAGE = "local TTS is unavailable"
 _OFFLINE_ENV = {
     "HF_HUB_OFFLINE": "1",
     "TRANSFORMERS_OFFLINE": "1",
@@ -90,14 +92,14 @@ class PiperVoiceRegistry:
                 return loaded
             path = self._voice_paths.get(key)
             if path is None:
-                raise TtsUnavailable("requested Piper voice is unavailable")
+                raise TtsUnavailable(_PIPER_VOICE_UNAVAILABLE_MESSAGE)
             config_path = path.with_suffix(".onnx.json")
             if (
                 not path.is_absolute()
                 or not path.is_file()
                 or not config_path.is_file()
             ):
-                raise TtsUnavailable("requested Piper voice is unavailable")
+                raise TtsUnavailable(_PIPER_VOICE_UNAVAILABLE_MESSAGE)
             os.environ.update(_OFFLINE_ENV)
             _suppress_piper_content_logs()
             try:
@@ -112,9 +114,7 @@ class PiperVoiceRegistry:
                     use_cuda=False,
                 )
             except Exception:
-                raise TtsUnavailable(
-                    "requested Piper voice is unavailable"
-                ) from None
+                raise TtsUnavailable(_PIPER_VOICE_UNAVAILABLE_MESSAGE) from None
             self._voices[key] = voice
             return voice
 
@@ -207,7 +207,7 @@ class PiperTts:
         except (TtsOutputLimit, TtsUnavailable, TtsUnsupported):
             raise
         except Exception:
-            raise TtsUnavailable("local TTS is unavailable") from None
+            raise TtsUnavailable(_TTS_UNAVAILABLE_MESSAGE) from None
 
     def _render_frames(
         self,
@@ -218,9 +218,7 @@ class PiperTts:
         frame_duration_ms: int,
         is_cancelled: Callable[[], bool],
     ) -> Iterator[bytes]:
-        frame_samples = (
-            output_sample_rate_hz * frame_duration_ms // 1000
-        )
+        frame_samples = output_sample_rate_hz * frame_duration_ms // 1000
         buffered = np.empty(0, dtype=np.int16)
         input_sample_rate: int | None = None
         resampler: Any | None = None
@@ -247,9 +245,7 @@ class PiperTts:
             elif chunk.sample_rate != input_sample_rate:
                 raise TtsUnavailable("local TTS chunk is unavailable")
 
-            samples = np.frombuffer(
-                chunk.audio_int16_bytes, dtype="<i2"
-            )
+            samples = np.frombuffer(chunk.audio_int16_bytes, dtype="<i2")
             input_slice_samples = max(1, input_sample_rate // 10)
             for offset in range(0, len(samples), input_slice_samples):
                 if is_cancelled():
@@ -266,9 +262,7 @@ class PiperTts:
                         return
                     frame = buffered[:frame_samples]
                     buffered = buffered[frame_samples:]
-                    emitted_ms = self._check_output_limit(
-                        emitted_ms, frame_duration_ms
-                    )
+                    emitted_ms = self._check_output_limit(emitted_ms, frame_duration_ms)
                     yield self._encode_frame(frame, output_channels)
 
         if is_cancelled():
@@ -284,9 +278,7 @@ class PiperTts:
                     return
                 frame = buffered[:frame_samples]
                 buffered = buffered[frame_samples:]
-                emitted_ms = self._check_output_limit(
-                    emitted_ms, frame_duration_ms
-                )
+                emitted_ms = self._check_output_limit(emitted_ms, frame_duration_ms)
                 yield self._encode_frame(frame, output_channels)
         if len(buffered):
             if is_cancelled():
@@ -308,7 +300,7 @@ class PiperTts:
 
                 factory = soxr.ResampleStream
             except Exception:
-                raise TtsUnavailable("local TTS is unavailable") from None
+                raise TtsUnavailable(_TTS_UNAVAILABLE_MESSAGE) from None
         try:
             return factory(
                 input_sample_rate,
@@ -317,7 +309,7 @@ class PiperTts:
                 dtype="int16",
             )
         except Exception:
-            raise TtsUnavailable("local TTS is unavailable") from None
+            raise TtsUnavailable(_TTS_UNAVAILABLE_MESSAGE) from None
 
     @staticmethod
     def _check_output_limit(emitted_ms: int, frame_ms: int) -> int:

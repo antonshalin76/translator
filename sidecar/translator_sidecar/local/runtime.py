@@ -11,6 +11,7 @@ from translator_sidecar.local.asr import (
     AsrModelManager,
     AsrUnavailable,
 )
+from translator_sidecar.local.cuda_runtime import configure_cuda_runtime
 from translator_sidecar.local.inference_scheduler import InferenceScheduler
 from translator_sidecar.local.local_provider import LocalProvider
 from translator_sidecar.local.model_manifest import (
@@ -93,6 +94,7 @@ class _UnavailableTts:
 
 def _cuda_available() -> bool:
     try:
+        configure_cuda_runtime()
         import ctranslate2
 
         return ctranslate2.get_cuda_device_count() > 0

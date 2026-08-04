@@ -422,7 +422,14 @@ export function lifecycleEventClearsDebugText(
 }
 
 export function labelLanguage(language: Language | undefined): string {
-  return language === "ru" ? "Русский" : language === "en" ? "English" : "—";
+  switch (language) {
+    case "ru":
+      return "Русский";
+    case "en":
+      return "English";
+    default:
+      return "—";
+  }
 }
 
 export function labelMode(mode: TranslationMode | undefined): string {
@@ -439,7 +446,14 @@ export function labelMode(mode: TranslationMode | undefined): string {
 }
 
 export function labelVoiceGender(gender: VoiceGender | undefined): string {
-  return gender === "female" ? "Женский" : gender === "male" ? "Мужской" : "—";
+  switch (gender) {
+    case "female":
+      return "Женский";
+    case "male":
+      return "Мужской";
+    default:
+      return "—";
+  }
 }
 
 export function formatMs(value: number | null | undefined): string {

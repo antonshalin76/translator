@@ -18,6 +18,8 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_HUGGINGFACE_HOST = "huggingface.co"
+_QUARANTINE_DIR = ".quarantine"
 _LANGUAGES = {"ru", "en"}
 _ROLES = {"asr", "mt", "tts"}
 _ACQUISITIONS = {"reuse", "download"}
@@ -34,7 +36,7 @@ _IRINA_FILES = {
     "ru_RU-irina-medium.onnx": (
         63_201_294,
         "8ff38212d23da300bbe3705c645e6e5b9475f0bfde01558eb17813e22acaaaaa",
-        "https://huggingface.co/rhasspy/piper-voices/resolve/"
+        f"https://{_HUGGINGFACE_HOST}/rhasspy/piper-voices/resolve/"
         f"{_IRINA_REVISION}/ru/ru_RU/irina/medium/"
         "ru_RU-irina-medium.onnx",
         "ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx",
@@ -42,7 +44,7 @@ _IRINA_FILES = {
     "ru_RU-irina-medium.onnx.json": (
         4_765,
         "c2ec28bb38e2b59e93b959b3e40348c1afebbd272f30fed5d41205d08e98a9d7",
-        "https://huggingface.co/rhasspy/piper-voices/resolve/"
+        f"https://{_HUGGINGFACE_HOST}/rhasspy/piper-voices/resolve/"
         f"{_IRINA_REVISION}/ru/ru_RU/irina/medium/"
         "ru_RU-irina-medium.onnx.json",
         "ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json",
@@ -136,17 +138,14 @@ class RuntimeFileOps:
                 os.close(descriptor)
                 raise OSError("runtime symlink changed during open")
         else:
-            descriptor = os.open(
-                path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
-            )
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
             resolved = path
         descriptor_stat = os.fstat(descriptor)
         resolved_stat = resolved.stat()
-        if (
-            not stat.S_ISREG(descriptor_stat.st_mode)
-            or (descriptor_stat.st_dev, descriptor_stat.st_ino)
-            != (resolved_stat.st_dev, resolved_stat.st_ino)
-        ):
+        if not stat.S_ISREG(descriptor_stat.st_mode) or (
+            descriptor_stat.st_dev,
+            descriptor_stat.st_ino,
+        ) != (resolved_stat.st_dev, resolved_stat.st_ino):
             os.close(descriptor)
             raise OSError("runtime file identity changed during open")
         return descriptor, resolved
@@ -189,18 +188,16 @@ class ModelManifest:
                 label = "source" if index == 0 else "redirect"
                 raise ManifestError(f"{label} URL is not allowed")
             if index == 0:
-                if parsed.hostname != "huggingface.co":
+                if parsed.hostname != _HUGGINGFACE_HOST:
                     raise ManifestError("source URL host is not allowed")
-            elif parsed.hostname == "huggingface.co":
+            elif parsed.hostname == _HUGGINGFACE_HOST:
                 expected_cache_path = (
                     f"/api/resolve-cache/models/{model.source.repository}/"
                     f"{model.source.revision}/"
                     f"{quote(model_file.source_path or '', safe='')}"
                 )
                 if parsed.path != expected_cache_path:
-                    raise ManifestError(
-                        "redirect host cache path is not pinned"
-                    )
+                    raise ManifestError("redirect host cache path is not pinned")
             elif parsed.hostname not in self.policy.redirect_hosts:
                 raise ManifestError("redirect host is not allowlisted")
 
@@ -276,13 +273,9 @@ class DownloadLedger:
         try:
             persisted = self._load_persisted(directory_fd)
             if persisted is None:
-                self.transferred_bytes = self._existing_partial_bytes(
-                    directory_fd
-                )
+                self.transferred_bytes = self._existing_partial_bytes(directory_fd)
                 if self.transferred_bytes:
-                    self._persist(
-                        self.transferred_bytes, directory_fd=directory_fd
-                    )
+                    self._persist(self.transferred_bytes, directory_fd=directory_fd)
             else:
                 self.transferred_bytes = persisted
         finally:
@@ -383,20 +376,14 @@ class DownloadLedger:
             directory_fd = self.filesystem.open_directory(self.staging_dir)
         renamed = False
         try:
-            output = self.filesystem.open_exclusive_at(
-                directory_fd, temp_name
-            )
+            output = self.filesystem.open_exclusive_at(directory_fd, temp_name)
             with output:
                 output.write(payload)
                 self.filesystem.fsync_file(output)
-            self.filesystem.replace_at(
-                directory_fd, temp_name, self._ledger_path.name
-            )
+            self.filesystem.replace_at(directory_fd, temp_name, self._ledger_path.name)
             renamed = True
             self.filesystem.fsync_directory_fd(directory_fd)
-            if not self.filesystem.directory_matches(
-                self.staging_dir, directory_fd
-            ):
+            if not self.filesystem.directory_matches(self.staging_dir, directory_fd):
                 raise OSError("download ledger parent identity changed")
         except OSError as error:
             if not renamed:
@@ -436,17 +423,12 @@ class FilesystemOps:
     def open_directory(self, path: Path) -> int:
         if not path.is_absolute():
             raise OSError("directory path must be absolute")
-        descriptor = os.open(
-            "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
-        )
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
             for component in path.parts[1:]:
                 next_descriptor = os.open(
                     component,
-                    os.O_RDONLY
-                    | os.O_DIRECTORY
-                    | os.O_CLOEXEC
-                    | os.O_NOFOLLOW,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
                     dir_fd=descriptor,
                 )
                 os.close(descriptor)
@@ -504,9 +486,7 @@ class FilesystemOps:
             dir_fd=descriptor,
         )
 
-    def replace_at(
-        self, descriptor: int, source_name: str, target_name: str
-    ) -> None:
+    def replace_at(self, descriptor: int, source_name: str, target_name: str) -> None:
         os.replace(
             source_name,
             target_name,
@@ -547,11 +527,11 @@ class FilesystemOps:
         quarantine_name: str,
     ) -> None:
         try:
-            os.mkdir(".quarantine", mode=0o700, dir_fd=staging_fd)
+            os.mkdir(_QUARANTINE_DIR, mode=0o700, dir_fd=staging_fd)
         except FileExistsError:
             pass
         quarantine_fd = os.open(
-            ".quarantine",
+            _QUARANTINE_DIR,
             os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
             dir_fd=staging_fd,
         )
@@ -593,9 +573,7 @@ class FilesystemOps:
         os.replace(source, target)
 
     def fsync_directory(self, path: Path) -> None:
-        descriptor = os.open(
-            path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        )
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             os.fsync(descriptor)
         finally:
@@ -673,9 +651,7 @@ class ModelDownloader:
             if self.filesystem.exists_at(target_fd, model_file.path):
                 raise ManifestError("runtime target already exists")
             try:
-                output = self.filesystem.open_exclusive_at(
-                    staging_fd, part_name
-                )
+                output = self.filesystem.open_exclusive_at(staging_fd, part_name)
             except OSError as error:
                 raise ManifestError(
                     "staging file could not be created exclusively"
@@ -722,9 +698,7 @@ class ModelDownloader:
                 self.filesystem.fsync_directory_fd(staging_fd)
                 if not self.filesystem.directory_matches(
                     target.parent, target_fd
-                ) or not self.filesystem.directory_matches(
-                    staging, staging_fd
-                ):
+                ) or not self.filesystem.directory_matches(staging, staging_fd):
                     raise OSError("pinned directory identity changed")
             except Exception as error:
                 if committed:
@@ -732,7 +706,7 @@ class ModelDownloader:
                         f"{model.id}--{model_file.path.replace('/', '--')}"
                         f"--{uuid4().hex}"
                     )
-                    quarantine = staging / ".quarantine" / quarantine_name
+                    quarantine = staging / _QUARANTINE_DIR / quarantine_name
                     try:
                         self.filesystem.quarantine_at(
                             target_fd,
@@ -751,9 +725,7 @@ class ModelDownloader:
                         "target commit lost an atomic no-replace race"
                     ) from error
                 if isinstance(error, OSError):
-                    raise ManifestError(
-                        "durable model installation failed"
-                    ) from error
+                    raise ManifestError("durable model installation failed") from error
                 raise ManifestError("download transport failed") from error
 
             self._completed.add((model.id, model_file.path))
@@ -773,9 +745,7 @@ class ModelDownloader:
                     continue
                 target = _target_path(model, model_file)
                 if target.exists() or target.is_symlink():
-                    self.manifest.resolve_runtime_file(
-                        model.id, model_file.path
-                    )
+                    self.manifest.resolve_runtime_file(model.id, model_file.path)
                     self._completed.add(identity)
                     continue
                 total += model_file.size_bytes
@@ -892,9 +862,7 @@ def _parse_model(raw: object, policy: ManifestPolicy) -> ModelEntry:
         raise ManifestError("model cache path must be absolute")
     if not isinstance(raw_files, list) or not raw_files:
         raise ManifestError("model file allowlist is empty")
-    files = tuple(
-        _parse_file(raw_file, source, acquisition) for raw_file in raw_files
-    )
+    files = tuple(_parse_file(raw_file, source, acquisition) for raw_file in raw_files)
     if len({model_file.path for model_file in files}) != len(files):
         raise ManifestError("model file allowlist contains duplicates")
     model = ModelEntry(
@@ -950,11 +918,21 @@ def _parse_source(raw: object) -> ModelSource:
     )
 
 
-def _parse_file(
-    raw: object, source: ModelSource, acquisition: str
-) -> ModelFile:
+def _parse_file(raw: object, source: ModelSource, acquisition: str) -> ModelFile:
     if not isinstance(raw, dict):
         raise ManifestError("model file entry must be an object")
+    file_path, size_bytes, sha256 = _parse_file_identity(raw)
+    source_url, source_path = _parse_file_download_source(raw, source, acquisition)
+    return ModelFile(
+        path=file_path,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        source_url=source_url,
+        source_path=source_path,
+    )
+
+
+def _parse_file_identity(raw: dict[str, object]) -> tuple[str, int, str]:
     try:
         file_path = raw["path"]
         size_bytes = _positive_int(raw["size_bytes"])
@@ -973,6 +951,14 @@ def _parse_file(
         raise ManifestError("model file path escapes its allowlist")
     if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
         raise ManifestError("model file checksum is invalid")
+    return file_path, size_bytes, sha256
+
+
+def _parse_file_download_source(
+    raw: dict[str, object],
+    source: ModelSource,
+    acquisition: str,
+) -> tuple[str | None, str | None]:
     source_url = raw.get("source_url")
     source_path = raw.get("source_path")
     if acquisition == "download":
@@ -986,12 +972,10 @@ def _parse_file(
         ):
             raise ManifestError("download source path is invalid")
         parsed = urlparse(source_url)
-        expected_path = (
-            f"/{source.repository}/resolve/{source.revision}/{source_path}"
-        )
+        expected_path = f"/{source.repository}/resolve/{source.revision}/{source_path}"
         if (
             parsed.scheme != "https"
-            or parsed.hostname != "huggingface.co"
+            or parsed.hostname != _HUGGINGFACE_HOST
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path != expected_path
@@ -1001,18 +985,10 @@ def _parse_file(
             raise ManifestError("download source URL is not pinned")
     elif source_url is not None or source_path is not None:
         raise ManifestError("reused model file cannot define a download URL")
-    return ModelFile(
-        path=file_path,
-        size_bytes=size_bytes,
-        sha256=sha256,
-        source_url=source_url,
-        source_path=source_path,
-    )
+    return source_url, source_path
 
 
-def _validate_license_waiver(
-    model: ModelEntry, policy: ManifestPolicy
-) -> None:
+def _validate_license_waiver(model: ModelEntry, policy: ManifestPolicy) -> None:
     if model.source.license_waiver is None:
         return
     observed_files = {

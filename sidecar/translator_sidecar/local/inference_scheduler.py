@@ -21,6 +21,7 @@ _Result = TypeVar("_Result")
 _BRIDGE_END = object()
 _BRIDGE_FAILURE = object()
 _BRIDGE_OVERFLOW = object()
+_SCHEDULER_STALE_MESSAGE = "scheduler result is stale"
 
 
 class SchedulerOverflow(RuntimeError):
@@ -90,7 +91,7 @@ class SchedulerContext:
 
     def ensure_current(self) -> None:
         if self.cancelled():
-            raise SchedulerStale("scheduler result is stale")
+            raise SchedulerStale(_SCHEDULER_STALE_MESSAGE)
 
     async def run_gpu(self, operation: Callable[[], _Result]) -> _Result:
         self.ensure_current()
@@ -102,9 +103,7 @@ class SchedulerContext:
         )
         self.ensure_current()
         if not outcome.ok:
-            raise SchedulerUnavailable(
-                "native inference is unavailable"
-            )
+            raise SchedulerUnavailable("native inference is unavailable")
         return outcome.value
 
     async def stream_tts(
@@ -117,9 +116,7 @@ class SchedulerContext:
         if frame_duration_ms <= 0 or _TTS_BRIDGE_MS % frame_duration_ms:
             raise SchedulerUnavailable("TTS bridge is unavailable")
         capacity = _TTS_BRIDGE_MS // frame_duration_ms
-        queue: asyncio.Queue[bytes | object] = asyncio.Queue(
-            maxsize=capacity
-        )
+        queue: asyncio.Queue[bytes | object] = asyncio.Queue(maxsize=capacity)
         stream_cancelled = Event()
         loop = asyncio.get_running_loop()
         producer = loop.run_in_executor(
@@ -145,13 +142,9 @@ class SchedulerContext:
                 if item is _BRIDGE_END:
                     return
                 if item is _BRIDGE_FAILURE:
-                    raise SchedulerUnavailable(
-                        "TTS inference is unavailable"
-                    )
+                    raise SchedulerUnavailable("TTS inference is unavailable")
                 if item is _BRIDGE_OVERFLOW:
-                    raise SchedulerOverflow(
-                        "TTS output limit was reached"
-                    )
+                    raise SchedulerOverflow("TTS output limit was reached")
                 yield item
         finally:
             stream_cancelled.set()
@@ -257,9 +250,9 @@ class InferenceScheduler:
         self._queues: dict[AudioDirection, deque[_Job]] = {
             direction: deque() for direction in self._directions
         }
-        self._active: dict[AudioDirection, _Job | None] = {
-            direction: None for direction in self._directions
-        }
+        self._active: dict[AudioDirection, _Job | None] = dict.fromkeys(
+            self._directions
+        )
         self._sessions: dict[UUID, _Session] = {}
         self._next_generation = 1
         self._dispatch_signal: asyncio.Event | None = None
@@ -320,7 +313,7 @@ class InferenceScheduler:
         work: Callable[[SchedulerContext], Awaitable[_Result]],
     ) -> asyncio.Future[_Result]:
         if self._closed or not self._is_current(identity):
-            raise SchedulerStale("scheduler result is stale")
+            raise SchedulerStale(_SCHEDULER_STALE_MESSAGE)
         queue = self._queues[identity.direction]
         admission_capacity = _QUEUED_PER_DIRECTION + int(
             self._active[identity.direction] is None
@@ -349,7 +342,7 @@ class InferenceScheduler:
     ) -> None:
         session = self._sessions.get(session_id)
         if session is None or utterance_id not in session.utterances:
-            raise SchedulerStale("scheduler result is stale")
+            raise SchedulerStale(_SCHEDULER_STALE_MESSAGE)
         session.utterances.pop(utterance_id)
         self._cancel_matching(
             lambda identity: (
@@ -361,17 +354,13 @@ class InferenceScheduler:
     def close_session(self, session_id: UUID) -> None:
         session = self._sessions.pop(session_id, None)
         if session is None:
-            raise SchedulerStale("scheduler result is stale")
-        self._cancel_matching(
-            lambda identity: identity.session_id == session_id
-        )
+            raise SchedulerStale(_SCHEDULER_STALE_MESSAGE)
+        self._cancel_matching(lambda identity: identity.session_id == session_id)
 
     async def shutdown(self) -> None:
         if self._shutdown_task is None:
             self._closed = True
-            self._shutdown_task = asyncio.create_task(
-                self._shutdown_impl()
-            )
+            self._shutdown_task = asyncio.create_task(self._shutdown_impl())
         shutdown_task = self._shutdown_task
         cancelled: BaseException | None = None
         while not shutdown_task.done():
@@ -430,9 +419,7 @@ class InferenceScheduler:
 
     def _dispatch_available(self) -> None:
         for offset in range(len(self._directions)):
-            index = (self._round_robin_index + offset) % len(
-                self._directions
-            )
+            index = (self._round_robin_index + offset) % len(self._directions)
             direction = self._directions[index]
             if self._active[direction] is not None:
                 continue
@@ -446,9 +433,7 @@ class InferenceScheduler:
                 task = asyncio.create_task(self._run_job(job))
                 self._running_tasks.add(task)
                 task.add_done_callback(self._task_done)
-                self._round_robin_index = (
-                    index + 1
-                ) % len(self._directions)
+                self._round_robin_index = (index + 1) % len(self._directions)
                 break
 
     def _has_dispatchable(self) -> bool:
@@ -541,4 +526,4 @@ class InferenceScheduler:
     @staticmethod
     def _set_stale(future: asyncio.Future[Any]) -> None:
         if not future.done():
-            future.set_exception(SchedulerStale("scheduler result is stale"))
+            future.set_exception(SchedulerStale(_SCHEDULER_STALE_MESSAGE))

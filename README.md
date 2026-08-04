@@ -88,6 +88,20 @@ Local provider mode does not require cloud credentials. For OpenAI provider test
 
 Cloud provider use remains opt-in in the UI/API. Selecting a cloud provider marks that audio leaves the machine.
 
+The default VAD live window is tuned for low-latency calls: continuous speech is
+forced to an `end_of_utterance` boundary around 6000 ms, and pauses after the
+first 2500 ms can close the current chunk after about 120 ms of non-speech. For
+experiments, override `TRANSLATOR_VAD_MIN_UTTERANCE_MS`,
+`TRANSLATOR_VAD_MAX_UTTERANCE_MS`, and
+`TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS` in `.env`.
+
+CTranslate2/faster-whisper GPU execution requires CUDA 12 cuBLAS and cuDNN 9
+runtime libraries. The service unit already prepends the local compatibility
+paths. Direct sidecar/debug script runs also bootstrap the same existing local
+paths, and `TRANSLATOR_CUDA_LIBRARY_PATH` can prepend another operator-owned
+directory. CUDA 13 alone is not sufficient for the current `ctranslate2==4.7.1`
+wheel because it does not provide `libcublas.so.12`.
+
 ## Validation
 
 Useful local checks:
@@ -115,15 +129,16 @@ Quality diagnostics:
 ./scripts/translator-asr-quality-debug \
   --audio output/sample.s16le \
   --language ru \
-  --asr-model faster-whisper-small,qwen3-asr-0.6b-hf
+  --asr-model faster-whisper-small,faster-whisper-large-v3-turbo-ct2
 ```
 
 The ASR-only probe can execute current faster-whisper models through the pinned
-local manifest. Qwen3-ASR is wired as an optional Transformers runtime candidate:
-if `torch`/`transformers` or model weights are unavailable, the report marks that
-candidate as `skipped` instead of failing the whole benchmark. GigaAM, Parakeet,
-Kokoro, Silero, and Qwen3-TTS are currently tracked in the quality matrix for
-controlled adapter work and are not live defaults.
+local manifest and can run the CT2 turbo candidate from Hugging Face cache when
+available. Qwen3-ASR remains wired as an optional Transformers runtime
+candidate, but current local measurements rejected it for live default use
+because latency was above real time. GigaAM, Parakeet, Kokoro, Silero, and
+Qwen3-TTS are tracked in the quality matrix for controlled adapter work and are
+not live defaults.
 
 Live application acceptance requires a running desktop audio session and real/simulated calls. Existing task scripts live under `scripts/`; local run evidence is intentionally ignored and should stay outside published git history.
 

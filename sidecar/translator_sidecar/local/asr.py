@@ -13,6 +13,8 @@ import numpy as np
 
 from translator_sidecar.provider_contract import Language, TranslationMode
 
+from .cuda_runtime import configure_cuda_runtime
+
 
 _BEAM_SIZE = {
     TranslationMode.QUALITY_FIRST: 5,
@@ -32,6 +34,7 @@ _CUDA_RUNTIME_MARKERS = (
     "cuda runtime",
     "cuda not found",
 )
+_ASR_UNAVAILABLE_MESSAGE = "local ASR is unavailable"
 
 
 class AsrUnavailable(RuntimeError):
@@ -44,6 +47,7 @@ class AsrUnsupported(RuntimeError):
 
 def _default_cuda_available() -> bool:
     try:
+        configure_cuda_runtime()
         import ctranslate2
 
         return ctranslate2.get_cuda_device_count() > 0
@@ -130,7 +134,7 @@ class AsrModelManager:
     def prepare(self) -> None:
         with self._admission_lock:
             if self._unavailable:
-                raise AsrUnavailable("local ASR is unavailable")
+                raise AsrUnavailable(_ASR_UNAVAILABLE_MESSAGE)
             if self._actual_device == "cpu" and self._selected_id != "small":
                 raise AsrUnsupported("large ASR is unsupported on the CPU runtime")
             while True:
@@ -140,7 +144,7 @@ class AsrModelManager:
                 if self._handle_cuda_failure(load_failure):
                     continue
                 self._unavailable = True
-                raise AsrUnavailable("local ASR is unavailable")
+                raise AsrUnavailable(_ASR_UNAVAILABLE_MESSAGE)
 
     def transcribe(
         self,
@@ -152,7 +156,7 @@ class AsrModelManager:
         audio = self._decode_pcm(pcm_s16le)
         with self._admission_lock:
             if self._unavailable:
-                raise AsrUnavailable("local ASR is unavailable")
+                raise AsrUnavailable(_ASR_UNAVAILABLE_MESSAGE)
             if self._actual_device == "cpu" and self._selected_id != "small":
                 raise AsrUnsupported("large ASR is unsupported on the CPU runtime")
             return self._transcribe_locked(audio, language=language, mode=mode)
@@ -178,7 +182,7 @@ class AsrModelManager:
                 if self._handle_cuda_failure(load_failure):
                     continue
                 self._unavailable = True
-                raise AsrUnavailable("local ASR is unavailable")
+                raise AsrUnavailable(_ASR_UNAVAILABLE_MESSAGE)
 
             text, inference_failure = self._run_inference(
                 audio,
@@ -189,7 +193,7 @@ class AsrModelManager:
                 return text or ""
             if self._handle_cuda_failure(inference_failure):
                 continue
-            raise AsrUnavailable("local ASR is unavailable")
+            raise AsrUnavailable(_ASR_UNAVAILABLE_MESSAGE)
 
     def _ensure_loaded(self) -> str | None:
         if self._model is not None:

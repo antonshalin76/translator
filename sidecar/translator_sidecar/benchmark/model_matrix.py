@@ -7,6 +7,9 @@ from typing import Literal
 
 
 CandidateRole = Literal["asr", "tts", "endpointing"]
+_FASTER_WHISPER_URL = "https://github.com/SYSTRAN/faster-whisper"
+_ALREADY_INTEGRATED = "already integrated"
+_APACHE_2_LICENSE = "Apache-2.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,8 +51,8 @@ _ASR_CANDIDATES = (
         license="MIT",
         languages=("ru", "en"),
         purpose="current latency baseline",
-        source_urls=("https://github.com/SYSTRAN/faster-whisper",),
-        strengths=("already integrated", "fast baseline"),
+        source_urls=(_FASTER_WHISPER_URL,),
+        strengths=(_ALREADY_INTEGRATED, "fast baseline"),
         risks=("quality bottleneck on long/noisy phrases",),
         priority=10,
     ),
@@ -61,8 +64,8 @@ _ASR_CANDIDATES = (
         license="MIT",
         languages=("ru", "en"),
         purpose="current high-quality Whisper baseline",
-        source_urls=("https://github.com/SYSTRAN/faster-whisper",),
-        strengths=("already integrated", "strong multilingual fallback"),
+        source_urls=(_FASTER_WHISPER_URL,),
+        strengths=(_ALREADY_INTEGRATED, "strong multilingual fallback"),
         risks=("heavier than the live latency target allows by default",),
         priority=20,
     ),
@@ -76,7 +79,7 @@ _ASR_CANDIDATES = (
         purpose="drop-in quality/speed candidate for the existing adapter",
         source_urls=(
             "https://huggingface.co/openai/whisper-large-v3-turbo",
-            "https://github.com/SYSTRAN/faster-whisper",
+            _FASTER_WHISPER_URL,
         ),
         strengths=("lower risk than changing ASR architecture", "faster than large-v3"),
         risks=("must be pinned in the manifest before live use",),
@@ -113,7 +116,7 @@ _ASR_CANDIDATES = (
         role="asr",
         runtime="transformers",
         repository="Qwen/Qwen3-ASR-0.6B-hf",
-        license="Apache-2.0",
+        license=_APACHE_2_LICENSE,
         languages=("ru", "en"),
         purpose="multilingual low-latency Qwen3-ASR candidate",
         source_urls=("https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf",),
@@ -126,7 +129,7 @@ _ASR_CANDIDATES = (
         role="asr",
         runtime="transformers",
         repository="Qwen/Qwen3-ASR-1.7B-hf",
-        license="Apache-2.0",
+        license=_APACHE_2_LICENSE,
         languages=("ru", "en"),
         purpose="multilingual quality reference for Qwen3-ASR",
         source_urls=("https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf",),
@@ -172,7 +175,7 @@ _TTS_CANDIDATES = (
         languages=("ru", "en"),
         purpose="current live TTS baseline",
         source_urls=("https://rhasspy.github.io/piper-samples/",),
-        strengths=("already integrated", "very fast fallback"),
+        strengths=(_ALREADY_INTEGRATED, "very fast fallback"),
         risks=("naturalness, prosody, and homographs are weak spots",),
         priority=10,
     ),
@@ -181,7 +184,7 @@ _TTS_CANDIDATES = (
         role="tts",
         runtime="kokoro",
         repository="hexgrad/Kokoro-82M",
-        license="Apache-2.0",
+        license=_APACHE_2_LICENSE,
         languages=("en",),
         purpose="English TTS speed/quality candidate",
         source_urls=("https://huggingface.co/hexgrad/Kokoro-82M",),
@@ -207,7 +210,7 @@ _TTS_CANDIDATES = (
         role="tts",
         runtime="qwen_tts",
         repository="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-        license="Apache-2.0",
+        license=_APACHE_2_LICENSE,
         languages=("ru", "en"),
         purpose="single-engine RU/EN quality TTS candidate",
         source_urls=("https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",),
@@ -220,7 +223,7 @@ _TTS_CANDIDATES = (
         role="tts",
         runtime="qwen_tts",
         repository="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-        license="Apache-2.0",
+        license=_APACHE_2_LICENSE,
         languages=("ru", "en"),
         purpose="single-engine RU/EN quality reference",
         source_urls=("https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",),
@@ -310,7 +313,9 @@ def default_tts_candidate_ids() -> list[str]:
     ]
 
 
-def candidate_by_id(model_id: str, *, role: CandidateRole | None = None) -> ModelCandidate:
+def candidate_by_id(
+    model_id: str, *, role: CandidateRole | None = None
+) -> ModelCandidate:
     candidate = _BY_ID[model_id]
     if role is not None and candidate.role != role:
         raise KeyError(model_id)

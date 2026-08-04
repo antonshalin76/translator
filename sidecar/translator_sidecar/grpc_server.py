@@ -13,7 +13,6 @@ from typing import Callable, Generic, Protocol, TypeVar
 from uuid import UUID
 
 import grpc
-from pydantic import ValidationError
 
 from .generated.translator.provider.v1 import provider_pb2, provider_pb2_grpc
 from .local.local_provider import (
@@ -67,6 +66,12 @@ _PROBE_REQUEST_VERSION = "translator.provider.probe_request.v1"
 _PROBE_RESPONSE_VERSION = "translator.provider.probe_response.v1"
 
 T = TypeVar("T")
+
+
+def _proto_events(
+    *events: provider_pb2.ProviderEvent,
+) -> tuple[provider_pb2.ProviderEvent, ...]:
+    return events
 
 
 class RuntimeProvider(Protocol):
@@ -350,7 +355,6 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                     except (
                         LocalProviderProtocolError,
                         ProviderProtocolError,
-                        ValidationError,
                         ValueError,
                     ):
                         fail(
@@ -437,9 +441,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                 if state.provider_acquired:
                     state.provider_acquired = False
                     if state.runtime_provider_id is ProviderId.LOCAL:
-                        await self._owner.release_local_provider(
-                            state.runtime_provider
-                        )
+                        await self._owner.release_local_provider(state.runtime_provider)
 
     def _handle_request(
         self,
@@ -462,7 +464,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                 model.session_id,
                 now_ns=self._config.now_ns(),
             )
-            return (_event_to_proto(opened), _event_to_proto(health))
+            return _proto_events(_event_to_proto(opened), _event_to_proto(health))
 
         if kind == "input_frame":
             frame = _frame_from_proto(request.input_frame)
@@ -473,26 +475,26 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                 now_ns=self._config.now_ns(),
             )
             if isinstance(admission, tuple):
-                return tuple(_event_to_proto(event) for event in admission)
+                return _proto_events(*(_event_to_proto(event) for event in admission))
             produced = []
             if admission is not None:
                 produced.append(_event_to_proto(admission))
             else:
                 produced.extend(self._process_pending(frame.session_id))
-            return tuple(produced)
+            return _proto_events(*produced)
 
         if kind == "cancel_utterance":
             model = _cancel_from_proto(request.cancel_utterance)
             if model.session_id != state.session_id:
                 raise ProviderProtocolError("session_identity_mismatch")
-            return (_event_to_proto(self._engine.cancel_utterance(model)),)
+            return _proto_events(_event_to_proto(self._engine.cancel_utterance(model)))
 
         if kind == "update_debug_text":
             model = _debug_from_proto(request.update_debug_text)
             if model.session_id != state.session_id:
                 raise ProviderProtocolError("session_identity_mismatch")
             self._engine.update_debug_text(model)
-            return ()
+            return _proto_events()
 
         if kind == "close_session":
             model = _close_from_proto(request.close_session)
@@ -500,7 +502,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                 raise ProviderProtocolError("session_identity_mismatch")
             closed = self._engine.close_session(model)
             state.closed = True
-            return (_event_to_proto(closed),)
+            return _proto_events(_event_to_proto(closed))
 
         raise _InvalidRequest("unknown request")
 
@@ -521,7 +523,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                 now_ns=self._config.now_ns(),
             )
         )
-        return tuple(produced)
+        return _proto_events(*produced)
 
     async def _handle_runtime_request(
         self,
@@ -553,7 +555,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
             state.runtime_provider_id = model.provider_id
             state.provider_acquired = model.provider_id is ProviderId.LOCAL
             state.session_id = model.session_id
-            return (_event_to_proto(opened), _event_to_proto(health))
+            return _proto_events(_event_to_proto(opened), _event_to_proto(health))
 
         provider = state.runtime_provider
         if provider is None:
@@ -564,21 +566,21 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
             if frame.session_id != state.session_id:
                 raise LocalProviderProtocolError("session_identity_mismatch")
             await provider.submit_frame(frame)
-            return ()
+            return _proto_events()
 
         if kind == "cancel_utterance":
             model = _cancel_from_proto(request.cancel_utterance)
             if model.session_id != state.session_id:
                 raise LocalProviderProtocolError("session_identity_mismatch")
             await provider.cancel_utterance(model)
-            return ()
+            return _proto_events()
 
         if kind == "update_debug_text":
             model = _debug_from_proto(request.update_debug_text)
             if model.session_id != state.session_id:
                 raise LocalProviderProtocolError("session_identity_mismatch")
             await provider.update_debug_text(model)
-            return ()
+            return _proto_events()
 
         if kind == "close_session":
             model = _close_from_proto(request.close_session)
@@ -587,7 +589,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
             await provider.close_session(model)
             await provider.wait_publications(model.session_id)
             state.closed = True
-            return ()
+            return _proto_events()
 
         raise _InvalidRequest("unknown request")
 

@@ -23,7 +23,7 @@ _BASE_DECODING_LENGTH = 96
 _MAX_DECODING_LENGTH = 512
 _TIME_24_RE = re.compile(r"(?<!\d)(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?!\d)")
 _PURCHASE_ORDER_ID_RE = re.compile(
-    r"\border\s+(?:number|no\.?)\s*#?\s*(?P<identifier>\d+)\b",
+    r"\border[ \t]+(?:number|no\.?)\b[ \t]*(?:#[ \t]*)?(?P<identifier>\d+)\b",
     flags=re.IGNORECASE,
 )
 _RU_RECIPIENT_ENTITY_RE = re.compile(
@@ -115,7 +115,7 @@ def _preserve_named_entity_roles(
             if correct.search(result):
                 continue
             translated_label = re.compile(
-                r"\bдокумент\s+[A-Za-zА-Яа-яЁё0-9_-]+\b",
+                r"\bдокумент\s+[\w-]+\b",
                 flags=re.IGNORECASE,
             )
             result = translated_label.sub(f"документ {entity}", result, count=1)

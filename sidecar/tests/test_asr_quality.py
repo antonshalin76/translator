@@ -99,14 +99,22 @@ def test_qwen_transformers_probe_forces_language_and_decodes_text() -> None:
     assert processor.decoded[0][1] == {"return_format": "transcription_only"}
 
 
-def test_faster_whisper_ct2_probe_uses_candidate_repository_and_mode_beam() -> None:
+def test_faster_whisper_ct2_probe_uses_candidate_repository_and_mode_beam(
+    monkeypatch,
+) -> None:
     model = FakeWhisperCt2()
     factory_calls: list[tuple[str, dict[str, object]]] = []
+    cuda_configured = []
 
     def factory(repository: str, **kwargs: object) -> FakeWhisperCt2:
         factory_calls.append((repository, kwargs))
         return model
 
+    monkeypatch.setattr(
+        asr_quality,
+        "configure_cuda_runtime",
+        lambda: cuda_configured.append(True),
+    )
     probe = asr_quality.FasterWhisperCt2AsrProbe(
         repository="deepdml/faster-whisper-large-v3-turbo-ct2",
         device="cuda",
@@ -120,6 +128,7 @@ def test_faster_whisper_ct2_probe_uses_candidate_repository_and_mode_beam() -> N
     )
 
     assert transcript == "turbo text"
+    assert cuda_configured == [True]
     assert factory_calls == [
         (
             "deepdml/faster-whisper-large-v3-turbo-ct2",
@@ -157,11 +166,14 @@ def test_faster_whisper_ct2_probe_falls_back_to_cpu_on_cuda_runtime_failure() ->
         model_factory=factory,
     )
 
-    assert probe.transcribe(
-        b"\0\0" * 160,
-        language=Language.EN,
-        mode=TranslationMode.STREAMING_FIRST,
-    ) == "turbo text"
+    assert (
+        probe.transcribe(
+            b"\0\0" * 160,
+            language=Language.EN,
+            mode=TranslationMode.STREAMING_FIRST,
+        )
+        == "turbo text"
+    )
     assert [call[1]["device"] for call in factory_calls] == ["cuda", "cpu"]
     assert factory_calls[1][1]["compute_type"] == "int8"
 
@@ -186,11 +198,14 @@ def test_faster_whisper_ct2_probe_falls_back_to_cpu_on_cuda_inference_failure() 
         model_factory=factory,
     )
 
-    assert probe.transcribe(
-        b"\0\0" * 160,
-        language=Language.RU,
-        mode=TranslationMode.STREAMING_FIRST,
-    ) == "turbo text"
+    assert (
+        probe.transcribe(
+            b"\0\0" * 160,
+            language=Language.RU,
+            mode=TranslationMode.STREAMING_FIRST,
+        )
+        == "turbo text"
+    )
     assert [call[1]["device"] for call in factory_calls] == ["cuda", "cpu"]
     assert cpu_model.calls[0][1]["language"] == "ru"
 

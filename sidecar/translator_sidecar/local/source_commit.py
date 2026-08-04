@@ -32,6 +32,7 @@ class _State(str, Enum):
 
 
 _Result = TypeVar("_Result")
+_SOURCE_COMMIT_UNAVAILABLE_MESSAGE = "source commit is unavailable"
 
 
 class SourceCommit:
@@ -81,23 +82,17 @@ class SourceCommit:
                     "end_of_utterance is required for final source commit"
                 )
             if not source_text.strip():
-                raise SourceCommitUnavailable(
-                    "source commit is unavailable"
-                )
+                raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE)
             self._state = _State.FINALIZING
 
         try:
             translation = translate(source_text).strip()
         except Exception:
             self._fail_if_in_progress(_State.FINALIZING)
-            raise SourceCommitUnavailable(
-                "source commit is unavailable"
-            ) from None
+            raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE) from None
         if not translation:
             self._fail_if_in_progress(_State.FINALIZING)
-            raise SourceCommitUnavailable(
-                "source commit is unavailable"
-            )
+            raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE)
 
         with self._lock:
             if self._state is not _State.FINALIZING:
@@ -121,23 +116,17 @@ class SourceCommit:
                     "end_of_utterance is required for final source commit"
                 )
             if not source_text.strip():
-                raise SourceCommitUnavailable(
-                    "source commit is unavailable"
-                )
+                raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE)
             self._state = _State.FINALIZING
 
         try:
             translation = (await translate(source_text)).strip()
         except Exception:
             self._fail_if_in_progress(_State.FINALIZING)
-            raise SourceCommitUnavailable(
-                "source commit is unavailable"
-            ) from None
+            raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE) from None
         if not translation:
             self._fail_if_in_progress(_State.FINALIZING)
-            raise SourceCommitUnavailable(
-                "source commit is unavailable"
-            )
+            raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE)
 
         with self._lock:
             if self._state is not _State.FINALIZING:
@@ -156,9 +145,7 @@ class SourceCommit:
             translation = self._committed_translation
             if translation is None:
                 self._state = _State.FAILED
-                raise SourceCommitUnavailable(
-                    "source commit is unavailable"
-                )
+                raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE)
             self._committed_translation = None
             self._state = _State.CONSUMING
 
@@ -166,9 +153,7 @@ class SourceCommit:
             result = synthesize(translation)
         except Exception:
             self._fail_if_in_progress(_State.CONSUMING)
-            raise SourceCommitUnavailable(
-                "source commit is unavailable"
-            ) from None
+            raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE) from None
 
         with self._lock:
             if self._state is not _State.CONSUMING:
@@ -186,9 +171,7 @@ class SourceCommit:
             translation = self._committed_translation
             if translation is None:
                 self._state = _State.FAILED
-                raise SourceCommitUnavailable(
-                    "source commit is unavailable"
-                )
+                raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE)
             self._committed_translation = None
             self._state = _State.CONSUMING
 
@@ -207,9 +190,7 @@ class SourceCommit:
     def cancel(self) -> None:
         with self._lock:
             if self._state is _State.CANCELLED:
-                raise SourceCommitProtocolError(
-                    "source commit is already cancelled"
-                )
+                raise SourceCommitProtocolError("source commit is already cancelled")
             self._committed_translation = None
             self._state = _State.CANCELLED
 
