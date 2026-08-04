@@ -89,6 +89,12 @@ def _safe_wer(reference: str | None, hypothesis: str) -> float | None:
         return None
 
 
+def _safe_error_summary(error: Exception) -> str:
+    message = str(error).strip().splitlines()
+    first_line = message[0] if message else type(error).__name__
+    return f"{type(error).__name__}: {first_line}"
+
+
 def _manifest_model_directory(manifest: ModelManifest, model_id: str) -> Path:
     model = manifest.models[model_id]
     for model_file in model.files:
@@ -251,6 +257,26 @@ def _run_candidate(
             "candidate": candidate.to_report(),
             "status": "skipped",
             "skip_reason": str(error),
+            "transcript": "",
+            "wer": None,
+            "wall_ms": None,
+        }
+    except (ImportError, ModuleNotFoundError) as error:
+        return {
+            "model_id": model_id,
+            "candidate": candidate.to_report(),
+            "status": "skipped",
+            "skip_reason": _safe_error_summary(error),
+            "transcript": "",
+            "wer": None,
+            "wall_ms": None,
+        }
+    except Exception as error:
+        return {
+            "model_id": model_id,
+            "candidate": candidate.to_report(),
+            "status": "failed",
+            "skip_reason": _safe_error_summary(error),
             "transcript": "",
             "wer": None,
             "wall_ms": None,

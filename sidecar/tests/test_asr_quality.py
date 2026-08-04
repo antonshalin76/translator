@@ -95,6 +95,58 @@ def test_asr_quality_candidate_skips_unimplemented_runtime(tmp_path: Path) -> No
     assert report["candidate"]["id"] == "gigaam-v3-e2e-rnnt"
 
 
+def test_asr_quality_candidate_reports_optional_backend_import_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class BrokenProbe:
+        def transcribe(self, *_args: object, **_kwargs: object) -> str:
+            raise ImportError("missing optional decoder")
+
+    monkeypatch.setattr(
+        asr_quality,
+        "_build_probe",
+        lambda *_args, **_kwargs: BrokenProbe(),
+    )
+
+    report = asr_quality._run_candidate(
+        "qwen3-asr-0.6b-hf",
+        b"\0\0" * 160,
+        language=Language.RU,
+        mode=TranslationMode.STREAMING_FIRST,
+        reference=None,
+        manifest_path=tmp_path / "manifest.json",
+    )
+
+    assert report["status"] == "skipped"
+    assert report["skip_reason"] == "ImportError: missing optional decoder"
+
+
+def test_asr_quality_candidate_reports_unexpected_runtime_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class BrokenProbe:
+        def transcribe(self, *_args: object, **_kwargs: object) -> str:
+            raise RuntimeError("cuda exploded")
+
+    monkeypatch.setattr(
+        asr_quality,
+        "_build_probe",
+        lambda *_args, **_kwargs: BrokenProbe(),
+    )
+
+    report = asr_quality._run_candidate(
+        "qwen3-asr-0.6b-hf",
+        b"\0\0" * 160,
+        language=Language.RU,
+        mode=TranslationMode.STREAMING_FIRST,
+        reference=None,
+        manifest_path=tmp_path / "manifest.json",
+    )
+
+    assert report["status"] == "failed"
+    assert report["skip_reason"] == "RuntimeError: cuda exploded"
+
+
 def test_asr_quality_model_parser_defaults_to_executable_local_models() -> None:
     assert asr_quality._parse_model_ids([]) == [
         "faster-whisper-small",
