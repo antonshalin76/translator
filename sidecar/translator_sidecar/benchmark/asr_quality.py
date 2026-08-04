@@ -188,6 +188,8 @@ class FasterWhisperCt2AsrProbe:
                     "faster-whisper CT2 runtime is unavailable"
                 ) from error
             factory = WhisperModel
+        self._factory = factory
+        self._repository = repository
         requested_device = device or ("cuda" if _cuda_available() else "cpu")
         try:
             self._model = self._load(
@@ -226,6 +228,27 @@ class FasterWhisperCt2AsrProbe:
         mode: TranslationMode,
     ) -> str:
         audio = _decode_pcm(pcm_s16le)
+        try:
+            return self._transcribe_audio(audio, language=language, mode=mode)
+        except Exception as error:
+            if self._device != "cuda" or not _is_cuda_runtime_error(error):
+                raise
+            self.release()
+            self._model = self._load(
+                self._factory,
+                self._repository,
+                device="cpu",
+            )
+            self._device = "cpu"
+            return self._transcribe_audio(audio, language=language, mode=mode)
+
+    def _transcribe_audio(
+        self,
+        audio: np.ndarray,
+        *,
+        language: Language,
+        mode: TranslationMode,
+    ) -> str:
         segments, _info = self._model.transcribe(
             audio,
             language=language.value,
