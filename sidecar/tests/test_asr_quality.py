@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from translator_sidecar.benchmark import asr_quality
 from translator_sidecar.provider_contract import Language, TranslationMode
 
@@ -57,6 +59,20 @@ class FakeModel:
         return self.generated
 
 
+class FakeSegment:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class FakeWhisperCt2:
+    def __init__(self) -> None:
+        self.calls: list[tuple[np.ndarray, dict[str, object]]] = []
+
+    def transcribe(self, audio: np.ndarray, **kwargs: object) -> tuple[object, object]:
+        self.calls.append((audio, kwargs))
+        return [FakeSegment(" turbo text ")], object()
+
+
 def test_qwen_transformers_probe_forces_language_and_decodes_text() -> None:
     processor = FakeProcessor()
     model = FakeModel()
@@ -78,6 +94,48 @@ def test_qwen_transformers_probe_forces_language_and_decodes_text() -> None:
     assert processor.inputs.to_calls == [("cuda:0", "float16")]
     assert model.generate_calls[0]["max_new_tokens"] == 256
     assert processor.decoded[0][1] == {"return_format": "transcription_only"}
+
+
+def test_faster_whisper_ct2_probe_uses_candidate_repository_and_mode_beam() -> None:
+    model = FakeWhisperCt2()
+    factory_calls: list[tuple[str, dict[str, object]]] = []
+
+    def factory(repository: str, **kwargs: object) -> FakeWhisperCt2:
+        factory_calls.append((repository, kwargs))
+        return model
+
+    probe = asr_quality.FasterWhisperCt2AsrProbe(
+        repository="deepdml/faster-whisper-large-v3-turbo-ct2",
+        device="cuda",
+        model_factory=factory,
+    )
+
+    transcript = probe.transcribe(
+        b"\0\0" * 160,
+        language=Language.EN,
+        mode=TranslationMode.BALANCED,
+    )
+
+    assert transcript == "turbo text"
+    assert factory_calls == [
+        (
+            "deepdml/faster-whisper-large-v3-turbo-ct2",
+            {
+                "device": "cuda",
+                "compute_type": "float16",
+                "local_files_only": False,
+                "num_workers": 1,
+            },
+        )
+    ]
+    audio, kwargs = model.calls[0]
+    assert audio.dtype == np.float32
+    assert kwargs == {
+        "language": "en",
+        "beam_size": 3,
+        "vad_filter": False,
+        "condition_on_previous_text": False,
+    }
 
 
 def test_asr_quality_candidate_skips_unimplemented_runtime(tmp_path: Path) -> None:

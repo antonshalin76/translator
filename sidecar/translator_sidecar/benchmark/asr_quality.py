@@ -15,6 +15,7 @@ from typing import Any, Callable
 import wave
 
 from jiwer import wer
+import numpy as np
 
 from translator_sidecar.benchmark.model_matrix import (
     ModelCandidate,
@@ -37,6 +38,11 @@ _LOCAL_PROVIDER_MODEL_KEYS = {
 _QWEN_LANGUAGE = {
     Language.RU: "Russian",
     Language.EN: "English",
+}
+_BEAM_SIZE = {
+    TranslationMode.QUALITY_FIRST: 5,
+    TranslationMode.BALANCED: 3,
+    TranslationMode.STREAMING_FIRST: 1,
 }
 
 
@@ -74,6 +80,14 @@ def _write_wav(path: Path, pcm_s16le: bytes, *, sample_rate_hz: int) -> None:
         output.setsampwidth(2)
         output.setframerate(sample_rate_hz)
         output.writeframes(pcm_s16le)
+
+
+def _decode_pcm(pcm_s16le: bytes) -> np.ndarray:
+    if not pcm_s16le or len(pcm_s16le) % 2:
+        raise AsrQualityError("PCM input must be non-empty s16le mono audio")
+    return np.frombuffer(pcm_s16le, dtype="<i2").astype(np.float32) / np.float32(
+        32768
+    )
 
 
 def _safe_wer(reference: str | None, hypothesis: str) -> float | None:
@@ -143,6 +157,57 @@ class FasterWhisperAsrProbe:
 
     def release(self) -> None:
         self._manager.release()
+
+
+class FasterWhisperCt2AsrProbe:
+    def __init__(
+        self,
+        *,
+        repository: str,
+        device: str | None = None,
+        model_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self._device = device or ("cuda" if _cuda_available() else "cpu")
+        compute_type = "float16" if self._device == "cuda" else "int8"
+        factory = model_factory
+        if factory is None:
+            try:
+                from faster_whisper import WhisperModel
+            except Exception as error:
+                raise AsrQualityUnavailable(
+                    "faster-whisper CT2 runtime is unavailable"
+                ) from error
+            factory = WhisperModel
+        self._model = factory(
+            repository,
+            device=self._device,
+            compute_type=compute_type,
+            local_files_only=False,
+            num_workers=1,
+        )
+
+    def transcribe(
+        self,
+        pcm_s16le: bytes,
+        *,
+        language: Language,
+        mode: TranslationMode,
+    ) -> str:
+        audio = _decode_pcm(pcm_s16le)
+        segments, _info = self._model.transcribe(
+            audio,
+            language=language.value,
+            beam_size=_BEAM_SIZE[mode],
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        return "".join(segment.text for segment in segments).strip()
+
+    def release(self) -> None:
+        native_model = getattr(self._model, "model", None)
+        unload_model = getattr(native_model, "unload_model", None)
+        if callable(unload_model):
+            unload_model()
 
 
 class QwenTransformersAsrProbe:
@@ -219,6 +284,8 @@ def _build_probe(candidate: ModelCandidate, *, manifest_path: Path) -> Any:
             model_id=candidate.id,
             manifest_path=manifest_path,
         )
+    if candidate.runtime == "faster_whisper_ct2":
+        return FasterWhisperCt2AsrProbe(repository=candidate.repository)
     if candidate.runtime == "transformers":
         return QwenTransformersAsrProbe(repository=candidate.repository)
     raise AsrQualityUnavailable(
