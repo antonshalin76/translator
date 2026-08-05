@@ -9,7 +9,6 @@ from collections.abc import (
 )
 from enum import Enum
 from threading import Lock
-from typing import TypeVar
 from uuid import UUID
 
 
@@ -31,7 +30,6 @@ class _State(str, Enum):
     FAILED = "failed"
 
 
-_Result = TypeVar("_Result")
 _SOURCE_COMMIT_UNAVAILABLE_MESSAGE = "source commit is unavailable"
 
 
@@ -135,10 +133,10 @@ class SourceCommit:
             self._state = _State.FINAL
             return translation
 
-    def synthesize_once(
+    def synthesize_once[Result](
         self,
-        synthesize: Callable[[str], _Result],
-    ) -> _Result:
+        synthesize: Callable[[str], Result],
+    ) -> Result:
         with self._lock:
             if self._state is not _State.FINAL:
                 self._raise_for_state()
@@ -161,10 +159,10 @@ class SourceCommit:
             self._state = _State.CONSUMED
             return result
 
-    async def stream_once(
+    async def stream_once[Result](
         self,
-        synthesize: Callable[[str], AsyncIterator[_Result]],
-    ) -> AsyncIterator[_Result]:
+        synthesize: Callable[[str], AsyncIterator[Result]],
+    ) -> AsyncIterator[Result]:
         with self._lock:
             if self._state is not _State.FINAL:
                 self._raise_for_state()

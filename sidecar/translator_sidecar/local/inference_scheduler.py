@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from threading import Event
-from typing import Any, TypeVar
+from typing import Any
 from uuid import UUID
 
 from translator_sidecar.provider_contract import AudioDirection
@@ -17,7 +17,6 @@ from translator_sidecar.provider_contract import AudioDirection
 _QUEUED_PER_DIRECTION = 2
 _TTS_BRIDGE_MS = 1200
 _BRIDGE_POLL_SECONDS = 0.02
-_Result = TypeVar("_Result")
 _BRIDGE_END = object()
 _BRIDGE_FAILURE = object()
 _BRIDGE_OVERFLOW = object()
@@ -93,7 +92,7 @@ class SchedulerContext:
         if self.cancelled():
             raise SchedulerStale(_SCHEDULER_STALE_MESSAGE)
 
-    async def run_gpu(self, operation: Callable[[], _Result]) -> _Result:
+    async def run_gpu[Result](self, operation: Callable[[], Result]) -> Result:
         self.ensure_current()
         loop = asyncio.get_running_loop()
         outcome = await loop.run_in_executor(
@@ -156,8 +155,8 @@ class SchedulerContext:
             await producer
 
     @staticmethod
-    def _run_native(
-        operation: Callable[[], _Result],
+    def _run_native[Result](
+        operation: Callable[[], Result],
     ) -> _NativeOutcome:
         try:
             return _NativeOutcome(ok=True, value=operation())
@@ -307,11 +306,11 @@ class InferenceScheduler:
             utterance_generation=generation,
         )
 
-    def submit(
+    def submit[Result](
         self,
         identity: JobIdentity,
-        work: Callable[[SchedulerContext], Awaitable[_Result]],
-    ) -> asyncio.Future[_Result]:
+        work: Callable[[SchedulerContext], Awaitable[Result]],
+    ) -> asyncio.Future[Result]:
         if self._closed or not self._is_current(identity):
             raise SchedulerStale(_SCHEDULER_STALE_MESSAGE)
         queue = self._queues[identity.direction]
@@ -321,7 +320,7 @@ class InferenceScheduler:
         if len(queue) >= admission_capacity:
             raise SchedulerOverflow("inference queue limit was reached")
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[_Result] = loop.create_future()
+        future: asyncio.Future[Result] = loop.create_future()
         queue.append(
             _Job(
                 identity=identity,

@@ -9,7 +9,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Generic, Protocol, TypeVar
+from typing import Callable, Protocol
 from uuid import UUID
 
 import grpc
@@ -65,9 +65,6 @@ _DEBUG_VERSION = "translator.provider.update_debug_text.v1"
 _PROBE_REQUEST_VERSION = "translator.provider.probe_request.v1"
 _PROBE_RESPONSE_VERSION = "translator.provider.probe_response.v1"
 
-T = TypeVar("T")
-
-
 def _proto_events(
     *events: provider_pb2.ProviderEvent,
 ) -> tuple[provider_pb2.ProviderEvent, ...]:
@@ -98,7 +95,7 @@ class ChannelOverflow(RuntimeError):
     pass
 
 
-class BoundedChannel(Generic[T]):
+class BoundedChannel[T]:
     def __init__(self, capacity: int = CHANNEL_CAPACITY) -> None:
         if not 1 <= capacity <= CHANNEL_CAPACITY:
             raise ValueError("channel capacity must be between 1 and 64")
@@ -845,10 +842,7 @@ class ProviderGrpcServer:
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
             )
         except OSError as error:
-            try:
-                parent_stat = os.lstat(parent)
-            except NotADirectoryError:
-                raise
+            parent_stat = os.lstat(parent)
             if stat.S_ISLNK(parent_stat.st_mode):
                 raise PermissionError(
                     "socket parent must be a real directory"
