@@ -41,6 +41,14 @@ struct FakeActive {
 }
 
 fn audio_snapshot(mode: OutputMode, aec_capability: AecCapability) -> RuntimeSnapshot {
+    audio_snapshot_with_safety(mode, aec_capability, true)
+}
+
+fn audio_snapshot_with_safety(
+    mode: OutputMode,
+    aec_capability: AecCapability,
+    full_duplex_allowed: bool,
+) -> RuntimeSnapshot {
     let selection = |id, name: &str| DeviceSelectionState {
         health: DeviceHealth::Available,
         selected: Some(PhysicalDevice {
@@ -62,7 +70,7 @@ fn audio_snapshot(mode: OutputMode, aec_capability: AecCapability) -> RuntimeSna
             acoustic: AcousticSafety {
                 mode,
                 aec_capability,
-                full_duplex_allowed: true,
+                full_duplex_allowed,
                 warning: None,
             },
         }),
@@ -121,7 +129,7 @@ fn shared_gate_blocks_production_while_human_round_trip_owns_audio() {
 }
 
 #[test]
-fn audio_targets_use_aec_for_validated_headphones_and_open_speaker_pairs() {
+fn audio_targets_use_aec_when_valid_and_physical_fallback_otherwise() {
     let headphones = resolve_duplex_audio_targets(&audio_snapshot(
         OutputMode::Headphones,
         AecCapability::Unavailable,
@@ -141,23 +149,24 @@ fn audio_targets_use_aec_for_validated_headphones_and_open_speaker_pairs() {
     assert_eq!(aec_headphones.microphone_capture, AEC_SOURCE);
     assert_eq!(aec_headphones.speaker_playback, AEC_SINK);
 
-    assert!(
-        resolve_duplex_audio_targets(&audio_snapshot(
-            OutputMode::OpenSpeaker,
-            AecCapability::AvailableUnvalidated,
-        ))
-        .is_err()
-    );
-    assert!(
-        resolve_duplex_audio_targets(&audio_snapshot(
-            OutputMode::OpenSpeaker,
-            AecCapability::ValidatedFor {
-                source_name: "alsa_input.other".to_owned(),
-                sink_name: "alsa_output.physical".to_owned(),
-            },
-        ))
-        .is_err()
-    );
+    let open_speaker = resolve_duplex_audio_targets(&audio_snapshot(
+        OutputMode::OpenSpeaker,
+        AecCapability::AvailableUnvalidated,
+    ))
+    .unwrap();
+    assert_eq!(open_speaker.microphone_capture, "alsa_input.physical");
+    assert_eq!(open_speaker.speaker_playback, "alsa_output.physical");
+
+    let stale_aec = resolve_duplex_audio_targets(&audio_snapshot(
+        OutputMode::OpenSpeaker,
+        AecCapability::ValidatedFor {
+            source_name: "alsa_input.other".to_owned(),
+            sink_name: "alsa_output.physical".to_owned(),
+        },
+    ))
+    .unwrap();
+    assert_eq!(stale_aec.microphone_capture, "alsa_input.physical");
+    assert_eq!(stale_aec.speaker_playback, "alsa_output.physical");
 
     let validated = resolve_duplex_audio_targets(&audio_snapshot(
         OutputMode::OpenSpeaker,
@@ -169,6 +178,23 @@ fn audio_targets_use_aec_for_validated_headphones_and_open_speaker_pairs() {
     .unwrap();
     assert_eq!(validated.microphone_capture, AEC_SOURCE);
     assert_eq!(validated.speaker_playback, AEC_SINK);
+}
+
+#[test]
+fn audio_targets_fall_back_to_physical_devices_when_acoustic_safety_is_not_validated() {
+    for mode in [OutputMode::OpenSpeaker, OutputMode::UnknownUnsafe] {
+        let targets = resolve_duplex_audio_targets(&audio_snapshot_with_safety(
+            mode,
+            AecCapability::Unavailable,
+            false,
+        ))
+        .unwrap();
+
+        assert_eq!(targets.microphone_capture, "alsa_input.physical");
+        assert_eq!(targets.speaker_playback, "alsa_output.physical");
+        assert_eq!(targets.microphone_playback, "translator_mic_out");
+        assert_eq!(targets.speaker_capture, "translator_remote_in.monitor");
+    }
 }
 
 #[test]

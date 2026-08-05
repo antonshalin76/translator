@@ -108,6 +108,9 @@ struct ManualRoutePatch {
 
 pub trait ManualRouteController: Send + Sync {
     fn reconcile(&self, stream_id: u32) -> Result<RoutingState, RoutingSafeError>;
+
+    fn refresh_audio_state(&self, _store: &RuntimeStore) {}
+
     fn restore(&self) -> Result<(), RoutingSafeError> {
         Ok(())
     }
@@ -299,7 +302,27 @@ async fn start_translation(State(state): State<ApiState>) -> axum::response::Res
         )
         .into_response();
     };
-    let snapshot = state.store.snapshot();
+    let snapshot = match state.manual_routes.clone() {
+        Some(manual_routes) => {
+            let store = state.store.clone();
+            match tokio::task::spawn_blocking(move || {
+                manual_routes.refresh_audio_state(&store);
+                store.snapshot()
+            })
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    return ProblemDetails::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "audio_refresh_failed",
+                    )
+                    .into_response();
+                }
+            }
+        }
+        None => state.store.snapshot(),
+    };
     match tokio::task::spawn_blocking(move || controller.start(snapshot)).await {
         Ok(Ok(())) => {
             state.store.set_translation_running(true);
@@ -325,6 +348,19 @@ async fn stop_translation(State(state): State<ApiState>) -> axum::response::Resp
     match tokio::task::spawn_blocking(move || controller.stop()).await {
         Ok(Ok(())) => {
             state.store.set_translation_running(false);
+            if let Some(manual_routes) = state.manual_routes.clone() {
+                let store = state.store.clone();
+                if tokio::task::spawn_blocking(move || manual_routes.refresh_audio_state(&store))
+                    .await
+                    .is_err()
+                {
+                    return ProblemDetails::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "audio_refresh_failed",
+                    )
+                    .into_response();
+                }
+            }
             Json(state.store.snapshot()).into_response()
         }
         Ok(Err(error)) => ProblemDetails::new(error.status, error.code).into_response(),

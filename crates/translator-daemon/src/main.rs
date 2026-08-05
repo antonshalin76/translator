@@ -115,12 +115,9 @@ impl PulseResources {
         self.ensure_original_loopbacks(store);
     }
 
-    fn refresh_graph(&self, store: &RuntimeStore) {
-        if let Some(graph) = self.graph.as_ref() {
-            match graph.inspect() {
-                Ok(state) => store.set_audio_graph(state),
-                Err(error) => store.set_audio_graph(AudioGraphState::failed(&error)),
-            }
+    fn refresh_graph(&mut self, store: &RuntimeStore) {
+        if let Some(graph) = self.graph.as_mut() {
+            maintain_audio_graph(graph, store);
         }
     }
 
@@ -156,6 +153,38 @@ impl PulseResources {
             && let Err(error) = aec_graph.cleanup_owned()
         {
             tracing::error!(event = "aec_graph_cleanup_failed", code = ?error.code());
+        }
+    }
+}
+
+fn maintain_audio_graph(graph: &mut impl AudioGraph, store: &RuntimeStore) {
+    match graph.inspect() {
+        Ok(state) if state.health == GraphHealth::Ready => {
+            store.set_audio_graph(state);
+            return;
+        }
+        Ok(state) => {
+            tracing::warn!(
+                event = "audio_graph_self_heal_needed",
+                health = ?state.health
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                event = "audio_graph_self_heal_inspection_failed",
+                code = ?error.code()
+            );
+        }
+    }
+
+    match graph.ensure_endpoints() {
+        Ok(state) => store.set_audio_graph(state),
+        Err(error) => {
+            tracing::warn!(
+                event = "audio_graph_self_heal_failed",
+                code = ?error.code()
+            );
+            store.set_audio_graph(AudioGraphState::failed(&error));
         }
     }
 }
@@ -231,6 +260,10 @@ impl PulseManualRoutes {
 }
 
 impl ManualRouteController for PulseManualRoutes {
+    fn refresh_audio_state(&self, store: &RuntimeStore) {
+        self.refresh(store);
+    }
+
     fn reconcile(
         &self,
         stream_id: u32,
@@ -460,7 +493,7 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
     };
 
     let mut requests = Vec::new();
-    if snapshot.audio_mix.speaker_original_percent > 0
+    if original_bypass_required(snapshot, snapshot.audio_mix.speaker_original_percent)
         && let Some(sink) = devices.sink.selected.as_ref()
     {
         requests.push(OriginalLoopbackRequest {
@@ -471,7 +504,7 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
         });
     }
 
-    if snapshot.audio_mix.microphone_original_percent > 0
+    if original_bypass_required(snapshot, snapshot.audio_mix.microphone_original_percent)
         && let Some(source) = devices.source.selected.as_ref()
     {
         requests.push(OriginalLoopbackRequest {
@@ -483,6 +516,23 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
     }
 
     requests
+}
+
+const fn original_bypass_required(snapshot: &RuntimeSnapshot, configured_percent: u8) -> bool {
+    !snapshot.translation_running || configured_percent > 0
+}
+
+fn effective_audio_mix_for_service(snapshot: &RuntimeSnapshot) -> AudioMixState {
+    if snapshot.translation_running {
+        return snapshot.audio_mix;
+    }
+
+    AudioMixState {
+        microphone_original_percent: 100,
+        microphone_translation_percent: 0,
+        speaker_original_percent: 100,
+        speaker_translation_percent: 0,
+    }
 }
 
 fn original_loopback_load_args(request: &OriginalLoopbackRequest) -> Vec<String> {
@@ -954,7 +1004,8 @@ async fn watcher_loop(
         let controller = controller.clone();
         let audio_mix = audio_mix.clone();
         let refresh_store = store.clone();
-        let volumes = store.snapshot().audio_mix;
+        let snapshot = store.snapshot();
+        let volumes = effective_audio_mix_for_service(&snapshot);
         if tokio::task::spawn_blocking(move || {
             controller.refresh(&refresh_store);
             if let Err(error) = audio_mix.apply(volumes) {
@@ -1051,6 +1102,7 @@ fn print_json<T: serde::Serialize>(value: &T) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
@@ -1058,12 +1110,14 @@ mod tests {
     use super::{
         DiscoveredOriginalLoopback, LifecycleProtected, MICROPHONE_ORIGINAL_LOOPBACK,
         ManualRouteAdmission, OriginalLoopbackRequest, RawPulseStream, SPEAKER_ORIGINAL_LOOPBACK,
-        discover_original_loopbacks, manual_route_admission, matching_original_loopbacks,
-        original_loopback_load_args, original_loopback_requests,
+        discover_original_loopbacks, effective_audio_mix_for_service, maintain_audio_graph,
+        manual_route_admission, matching_original_loopbacks, original_loopback_load_args,
+        original_loopback_requests,
     };
     use translator_audio::{
-        AcousticSafety, AecCapability, DeviceHealth, DeviceSelectionState, DeviceState,
-        MIC_OUT_SINK, OutputMode, PhysicalDevice, REMOTE_IN_SINK,
+        AcousticSafety, AecCapability, AudioEndpointState, AudioGraph, AudioGraphError,
+        AudioGraphState, DeviceHealth, DeviceSelectionState, DeviceState, EndpointRole,
+        GraphHealth, MIC_OUT_SINK, OutputMode, PhysicalDevice, REMOTE_IN_SINK,
     };
     use translator_daemon::{AudioMixState, AudioOperationState, RuntimeSnapshot};
     use uuid::Uuid;
@@ -1183,6 +1237,60 @@ mod tests {
             ..snapshot
         };
         assert!(original_loopback_requests(&muted_originals).is_empty());
+
+        let stopped_muted = RuntimeSnapshot {
+            translation_running: false,
+            ..muted_originals
+        };
+        assert_eq!(
+            original_loopback_requests(&stopped_muted),
+            [
+                OriginalLoopbackRequest {
+                    media_name: SPEAKER_ORIGINAL_LOOPBACK,
+                    source: format!("{REMOTE_IN_SINK}.monitor"),
+                    source_target_object: REMOTE_IN_SINK.to_owned(),
+                    sink: "alsa_output.headphones".to_owned(),
+                },
+                OriginalLoopbackRequest {
+                    media_name: MICROPHONE_ORIGINAL_LOOPBACK,
+                    source: "alsa_input.microphone".to_owned(),
+                    source_target_object: "alsa_input.microphone".to_owned(),
+                    sink: MIC_OUT_SINK.to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stopped_translation_uses_audible_bypass_mix_without_mutating_snapshot() {
+        let snapshot = RuntimeSnapshot {
+            translation_running: false,
+            audio_mix: AudioMixState {
+                microphone_original_percent: 0,
+                microphone_translation_percent: 100,
+                speaker_original_percent: 0,
+                speaker_translation_percent: 100,
+            },
+            ..RuntimeSnapshot::default()
+        };
+
+        assert_eq!(
+            effective_audio_mix_for_service(&snapshot),
+            AudioMixState {
+                microphone_original_percent: 100,
+                microphone_translation_percent: 0,
+                speaker_original_percent: 100,
+                speaker_translation_percent: 0,
+            }
+        );
+        assert_eq!(snapshot.audio_mix.microphone_original_percent, 0);
+        assert_eq!(snapshot.audio_mix.speaker_original_percent, 0);
+
+        let running = RuntimeSnapshot {
+            translation_running: true,
+            ..snapshot
+        };
+        assert_eq!(effective_audio_mix_for_service(&running), running.audio_mix);
     }
 
     #[test]
@@ -1239,6 +1347,75 @@ mod tests {
             })
         );
         assert_eq!(matching_original_loopbacks(&discovered, &request), ["42"]);
+    }
+
+    #[test]
+    fn graph_maintenance_recreates_virtual_endpoints_after_degraded_inspection() {
+        let store = translator_daemon::RuntimeStore::default();
+        let mut graph = FakeGraph {
+            inspect_health: GraphHealth::Degraded,
+            inspect_calls: Cell::new(0),
+            ensure_calls: 0,
+        };
+
+        maintain_audio_graph(&mut graph, &store);
+
+        assert_eq!(graph.inspect_calls.get(), 1);
+        assert_eq!(graph.ensure_calls, 1);
+        assert_eq!(
+            store.snapshot().audio_graph.map(|state| state.health),
+            Some(GraphHealth::Ready)
+        );
+    }
+
+    struct FakeGraph {
+        inspect_health: GraphHealth,
+        inspect_calls: Cell<usize>,
+        ensure_calls: usize,
+    }
+
+    impl AudioGraph for FakeGraph {
+        fn ensure_endpoints(&mut self) -> Result<AudioGraphState, AudioGraphError> {
+            self.ensure_calls += 1;
+            Ok(graph_state(GraphHealth::Ready))
+        }
+
+        fn inspect(&self) -> Result<AudioGraphState, AudioGraphError> {
+            self.inspect_calls.set(self.inspect_calls.get() + 1);
+            Ok(graph_state(self.inspect_health))
+        }
+
+        fn cleanup_owned(&mut self) -> Result<Vec<u32>, AudioGraphError> {
+            unreachable!("graph maintenance does not cleanup endpoints")
+        }
+    }
+
+    fn graph_state(health: GraphHealth) -> AudioGraphState {
+        AudioGraphState {
+            health,
+            endpoints: [
+                EndpointRole::MicOutSink,
+                EndpointRole::VirtualMicSource,
+                EndpointRole::RemoteInSink,
+            ]
+            .into_iter()
+            .map(|role| AudioEndpointState {
+                role,
+                kind: role.kind(),
+                name: role.name().to_owned(),
+                endpoint_id: None,
+                owner_module_id: None,
+                available: health == GraphHealth::Ready,
+                daemon_owned: health == GraphHealth::Ready,
+            })
+            .collect(),
+            owned_module_ids: if health == GraphHealth::Ready {
+                vec![101, 102, 103]
+            } else {
+                Vec::new()
+            },
+            safe_error: None,
+        }
     }
 
     fn selected_devices() -> DeviceState {

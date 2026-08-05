@@ -760,9 +760,6 @@ pub fn resolve_duplex_audio_targets(
         .devices
         .as_ref()
         .ok_or(DuplexRuntimeError::InvalidConfiguration)?;
-    if !devices.acoustic.full_duplex_allowed {
-        return Err(DuplexRuntimeError::InvalidConfiguration);
-    }
     let source = devices
         .source
         .selected
@@ -803,9 +800,7 @@ pub fn resolve_duplex_audio_targets(
         {
             (AEC_SOURCE.to_owned(), AEC_SINK.to_owned())
         }
-        OutputMode::OpenSpeaker | OutputMode::UnknownUnsafe => {
-            return Err(DuplexRuntimeError::InvalidConfiguration);
-        }
+        OutputMode::OpenSpeaker | OutputMode::UnknownUnsafe => (source, sink),
     };
     Ok(DuplexAudioTargets {
         microphone_capture,

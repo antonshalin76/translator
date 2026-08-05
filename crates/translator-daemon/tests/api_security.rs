@@ -44,6 +44,35 @@ impl ManualRouteController for FakeManualRoutes {
     }
 }
 
+struct RefreshingManualRoutes {
+    refreshes: AtomicUsize,
+    running_at_refresh: AtomicUsize,
+}
+
+impl ManualRouteController for RefreshingManualRoutes {
+    fn reconcile(&self, _stream_id: u32) -> Result<RoutingState, RoutingSafeError> {
+        Ok(RoutingState {
+            candidates: Vec::new(),
+            source_outputs: Vec::new(),
+            conflicting_stream_ids: Vec::new(),
+            active_route: None,
+            resolution: RouteResolution::NoCandidate,
+        })
+    }
+
+    fn refresh_audio_state(&self, store: &RuntimeStore) {
+        let running = usize::from(store.snapshot().translation_running);
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
+        self.running_at_refresh.store(running, Ordering::SeqCst);
+        store.set_audio_graph(AudioGraphState {
+            health: GraphHealth::Ready,
+            endpoints: Vec::new(),
+            owned_module_ids: Vec::new(),
+            safe_error: None,
+        });
+    }
+}
+
 struct FakeTranslationController {
     starts: AtomicUsize,
     stops: AtomicUsize,
@@ -1199,6 +1228,95 @@ async fn translation_controller_success_owns_running_state_and_stop_clears_debug
     assert_eq!(store.debug_text_status().event_count, 0);
     assert_eq!(controller.starts.load(Ordering::SeqCst), 1);
     assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn start_translation_refreshes_audio_state_before_launch() {
+    let store = RuntimeStore::default();
+    store.set_audio_graph(AudioGraphState {
+        health: GraphHealth::Degraded,
+        endpoints: Vec::new(),
+        owned_module_ids: Vec::new(),
+        safe_error: None,
+    });
+    let manual_routes = Arc::new(RefreshingManualRoutes {
+        refreshes: AtomicUsize::new(0),
+        running_at_refresh: AtomicUsize::new(usize::MAX),
+    });
+    let controller = Arc::new(FakeTranslationController {
+        starts: AtomicUsize::new(0),
+        stops: AtomicUsize::new(0),
+        snapshots: Mutex::new(Vec::new()),
+    });
+    let router = build_router_with_controllers(
+        store,
+        ControlToken::parse(TOKEN).unwrap(),
+        ApiLimits::default(),
+        ApiControllers {
+            manual_routes: Some(manual_routes.clone()),
+            translation: Some(controller.clone()),
+            ..ApiControllers::default()
+        },
+    );
+
+    let started = router
+        .oneshot(request(
+            Method::POST,
+            "/v1/translation/start",
+            Some(TOKEN),
+            Body::from("{}"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(json_body(started).await["translation_running"], true);
+    assert_eq!(manual_routes.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(manual_routes.running_at_refresh.load(Ordering::SeqCst), 0);
+    let snapshots = controller.snapshots.lock().unwrap();
+    assert_eq!(
+        snapshots[0].audio_graph.as_ref().map(|state| state.health),
+        Some(GraphHealth::Ready)
+    );
+}
+
+#[tokio::test]
+async fn stop_translation_refreshes_audio_state_after_clearing_running() {
+    let store = RuntimeStore::default();
+    store.set_translation_running(true);
+    let manual_routes = Arc::new(RefreshingManualRoutes {
+        refreshes: AtomicUsize::new(0),
+        running_at_refresh: AtomicUsize::new(usize::MAX),
+    });
+    let controller = Arc::new(FakeTranslationController {
+        starts: AtomicUsize::new(0),
+        stops: AtomicUsize::new(0),
+        snapshots: Mutex::new(Vec::new()),
+    });
+    let router = build_router_with_controllers(
+        store,
+        ControlToken::parse(TOKEN).unwrap(),
+        ApiLimits::default(),
+        ApiControllers {
+            manual_routes: Some(manual_routes.clone()),
+            translation: Some(controller.clone()),
+            ..ApiControllers::default()
+        },
+    );
+
+    let stopped = router
+        .oneshot(request(
+            Method::POST,
+            "/v1/translation/stop",
+            Some(TOKEN),
+            Body::from("{}"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(json_body(stopped).await["translation_running"], false);
+    assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(manual_routes.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(manual_routes.running_at_refresh.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

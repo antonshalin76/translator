@@ -169,7 +169,12 @@ function warningBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
     warnings.push(warning("cloud", "Cloud provider включен: аудио уходит во внешний сервис."));
   }
   if (model.acousticFeedbackWarning) {
-    warnings.push(warning("acoustic", "Full-duplex заблокирован для небезопасного acoustic режима."));
+    warnings.push(
+      warning(
+        "acoustic",
+        "Acoustic fallback активен: сервис продолжает аудио, но возможна обратная связь без AEC/наушников.",
+      ),
+    );
   }
   if (model.latencyDebt.classification === "fails_usable_limit") {
     warnings.push(
