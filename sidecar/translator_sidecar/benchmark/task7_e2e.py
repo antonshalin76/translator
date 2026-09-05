@@ -14,6 +14,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -35,6 +36,7 @@ from translator_sidecar.benchmark.task7 import (
     RunContext,
     run_task7_benchmark,
 )
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.local.model_manifest import load_manifest
 from translator_sidecar.local.tts import PiperTts, PiperVoiceRegistry
 from translator_sidecar.provider_contract import (
@@ -1094,64 +1096,61 @@ def build_local_fixtures(
         raise ValueError("measured fixture pool must be positive")
     manifest = load_manifest(manifest_path)
     corpus = load_quality_corpus(corpus_path)
-    voice_paths = {}
-    for language, model_id in _VOICE_IDS.items():
-        model = manifest.models[model_id]
-        for model_file in model.files:
-            manifest.resolve_runtime_file(model.id, model_file.path)
-        onnx = next(
-            model.cache_path / model_file.path
-            for model_file in model.files
-            if model_file.path.endswith(".onnx")
-        )
-        voice_paths[(language, VoiceGender.MALE)] = onnx
-    tts = PiperTts(PiperVoiceRegistry(voice_paths))
-    fixture_sets: dict[BenchmarkDirection, list[AudioFixture]] = {
-        direction: [] for direction in BenchmarkDirection
+    voice_paths = {
+        (language, VoiceGender.MALE): VerifiedModelSource(manifest, model_id)
+        for language, model_id in _VOICE_IDS.items()
     }
-    identities: list[FixtureIdentity] = []
-    source_rows = [
-        *((f"warmup-{index:03d}", value) for index, value in enumerate(corpus.warmups)),
-        *(
-            (f"measured-{index:03d}", value)
-            for index, value in enumerate(corpus.cases[:measured_pool_size])
-        ),
-    ]
-    for row_id, row in source_rows:
-        for direction, language, text in (
-            (BenchmarkDirection.RU_TO_EN, Language.RU, row.ru),
-            (BenchmarkDirection.EN_TO_RU, Language.EN, row.en),
-        ):
-            audio = bytearray(
-                b"".join(
-                    tts.synthesize_frames(
-                        text,
-                        target_language=language,
-                        voice_profile=VoiceProfile(
-                            language=language,
-                            gender=VoiceGender.MALE,
-                            engine=VoiceEngine.PIPER,
-                        ),
-                        mode=TranslationMode.QUALITY_FIRST,
-                        output_sample_rate_hz=16_000,
-                        output_channels=1,
-                        frame_duration_ms=100,
+    with closing(PiperVoiceRegistry(voice_paths)) as registry:
+        tts = PiperTts(registry)
+        fixture_sets: dict[BenchmarkDirection, list[AudioFixture]] = {
+            direction: [] for direction in BenchmarkDirection
+        }
+        identities: list[FixtureIdentity] = []
+        source_rows = [
+            *(
+                (f"warmup-{index:03d}", value)
+                for index, value in enumerate(corpus.warmups)
+            ),
+            *(
+                (f"measured-{index:03d}", value)
+                for index, value in enumerate(corpus.cases[:measured_pool_size])
+            ),
+        ]
+        for row_id, row in source_rows:
+            for direction, language, text in (
+                (BenchmarkDirection.RU_TO_EN, Language.RU, row.ru),
+                (BenchmarkDirection.EN_TO_RU, Language.EN, row.en),
+            ):
+                audio = bytearray(
+                    b"".join(
+                        tts.synthesize_frames(
+                            text,
+                            target_language=language,
+                            voice_profile=VoiceProfile(
+                                language=language,
+                                gender=VoiceGender.MALE,
+                                engine=VoiceEngine.PIPER,
+                            ),
+                            mode=TranslationMode.QUALITY_FIRST,
+                            output_sample_rate_hz=16_000,
+                            output_channels=1,
+                            frame_duration_ms=100,
+                        )
                     )
                 )
-            )
-            audio.extend(b"\0" * _TRAILING_SILENCE_BYTES)
-            identity = FixtureIdentity(
-                fixture_id=f"{row_id}-{direction.value}",
-                direction=direction,
-                pcm_sha256=hashlib.sha256(audio).hexdigest(),
-                duration_ms=len(audio) * 1_000 // (16_000 * 2),
-            )
-            fixture_sets[direction].append(AudioFixture(identity, audio))
-            identities.append(identity)
-    return (
-        {direction: tuple(values) for direction, values in fixture_sets.items()},
-        tuple(identities),
-    )
+                audio.extend(b"\0" * _TRAILING_SILENCE_BYTES)
+                identity = FixtureIdentity(
+                    fixture_id=f"{row_id}-{direction.value}",
+                    direction=direction,
+                    pcm_sha256=hashlib.sha256(audio).hexdigest(),
+                    duration_ms=len(audio) * 1_000 // (16_000 * 2),
+                )
+                fixture_sets[direction].append(AudioFixture(identity, audio))
+                identities.append(identity)
+        return (
+            {direction: tuple(values) for direction, values in fixture_sets.items()},
+            tuple(identities),
+        )
 
 
 def pulse_graph_summary(

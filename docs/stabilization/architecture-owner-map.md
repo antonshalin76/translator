@@ -2,8 +2,9 @@
 
 Baseline: `9291e8beafee3e02aaa179178ce460ac9e6c6de2`.
 
-This is the Stage A working copy. It is not architect-approved until the final
-verdict identifies and approves the same frozen candidate tree.
+Stage A was frozen at `af3410c`. This is the B1 working copy: new changes require
+a final verdict identifying the same frozen candidate tree. The table retains
+the B2-F target owners; it does not claim those later migrations are implemented.
 
 Architectural boundary remains three processes: Rust daemon owns control and the audio graph; Python sidecar owns inference/provider sessions; Tauri owns only the local authenticated proxy and views. No database, broker, outbox, scheduler, or extra orchestrator is introduced.
 
@@ -57,6 +58,24 @@ ControlApplication/RuntimeSupervisor -> RuntimeProjection -> SSE/Tauri views
 - Refactors that do not add capability must reduce maintained runtime code. No compatibility fallback remains after replacement tests pass.
 
 ## Library-first decisions
+
+- B1 uses the standard `asyncio` event loop for atomic non-awaiting provider
+  selection and acquisition, and task shielding/joining for cleanup. It adds no
+  FSM framework. Failed cleanup stays with the registry/native owner for retry.
+- B1 cloud transport adopts pinned `websockets` 17.0.1 and the existing Pydantic
+  dependency for documented wire shapes. This removes synchronous worker-thread
+  socket operations, current-ID relabelling and idle-timer finalization. The old
+  `websocket-client` dependency remains owned by the separate synthetic smoke
+  command until that command migrates; it is not a runtime fallback.
+- B1 verified model inputs reuse `ExitStack`, Linux sealed memfd descriptors,
+  and the installed loaders' file/byte APIs. Snapshot memory and cold-load cost
+  require measurement before release; lazy selected-model acquisition avoids
+  snapshotting the entire model catalogue.
+- B1 private IPC reuses the locked `rustix`
+  [`openat2` API](https://docs.rs/rustix/latest/rustix/fs/fn.openat2.html) with
+  `NO_SYMLINKS` for daemon directory admission. The sidecar uses standard
+  descriptor-relative `os.open` for each component. Neither boundary adds a
+  general path resolver or a mutable-path fallback.
 
 - Lifecycle coordinator: **no new FSM library**. `statig` and `smlang` provide async state/transition dispatch, but neither owns this service's transactional acquisition, reverse-order compensation, process/task joining, generation leases, or exact response-boundary commit. Adopting either would retain those domain effects while adding a second transition representation. The implementation therefore reuses the already locked `tokio` synchronization/task primitives plus one Rust state enum and exhaustive `match`; it is a consolidation of current code, not a new generic FSM runtime. The stage must remove the API/store/`DuplexRuntimeHandle` transition copies and finish with at least 100 fewer maintained production LOC across `api.rs`, `runtime_state.rs`, and `translation_runtime.rs`; otherwise the stage fails its architecture gate and is redesigned.
 - Configuration validation: **reuse `serde` plus existing typed domain enums; no generic validation crate**. `serde` owns shape, enum, required-field, and unknown-field rejection. The remaining rules depend on cross-field direction/acoustic constraints and the live provider/model/voice capability snapshot inside one control transaction; `garde` or `validator` would still require custom callbacks and would duplicate rather than remove that owner. One pure domain admission function replaces scattered API/UI/provider checks, and its stage must delete more handwritten validation branches than it adds.

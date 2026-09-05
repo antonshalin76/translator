@@ -19,6 +19,7 @@ dependencies = [
     "sentencepiece==0.2.1",
     "soxr==1.0.0",
     "websocket-client>=1.9,<2",
+    "websockets==17.0.1",
 ]
 
 [dependency-groups]

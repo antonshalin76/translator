@@ -14,7 +14,9 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
+from translator_sidecar.cleanup import finish_cleanup
 from translator_sidecar.provider_contract import (
+    MAX_TERMINAL_UTTERANCES_PER_SESSION,
     SAFE_ERROR_MESSAGES,
     CancelUtterance,
     CloseProviderSession,
@@ -63,7 +65,6 @@ _BASE_TRANSLATION_CHARS = 128
 _BASE_TRANSLATION_TOKENS = 96
 _BASE_OUTPUT_MS = 12_000
 _MAX_OUTPUT_MS = 30_000
-_MAX_TERMINAL_IDS = 4096
 _MAX_PENDING_EVENTS = 64
 _TERMINAL_RESERVED_EVENTS = 3
 _MAX_RETIRED_SESSIONS = 64
@@ -292,6 +293,8 @@ class LocalProvider:
         ] = {}
         self._futures: set[asyncio.Future[None]] = set()
         self._closed = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._models_to_close = [asr, translator, tts]
 
     async def open_session(
         self,
@@ -528,8 +531,18 @@ class LocalProvider:
             raise session.publication_error from None
 
     async def shutdown(self) -> None:
-        if self._closed:
-            return
+        self._closed = True
+        if self._shutdown_task is None or (
+            self._shutdown_task.done()
+            and (
+                self._shutdown_task.cancelled()
+                or self._shutdown_task.exception() is not None
+            )
+        ):
+            self._shutdown_task = asyncio.create_task(self._shutdown_impl())
+        await finish_cleanup(self._shutdown_task)
+
+    async def _shutdown_impl(self) -> None:
         self._closed = True
         publication_tasks = []
         for session in tuple(self._sessions.values()):
@@ -556,6 +569,15 @@ class LocalProvider:
                 return_exceptions=True,
             )
         self._futures.clear()
+        failed = []
+        for model in self._models_to_close:
+            try:
+                model.close()
+            except Exception:
+                failed.append(model)
+        self._models_to_close = failed
+        if failed:
+            raise RuntimeError("local_model_cleanup_failed")
 
     async def _schedule_locked(
         self,
@@ -1573,7 +1595,10 @@ class LocalProvider:
         if session.collecting_id is None:
             if frame.utterance_id in session.utterances:
                 raise LocalProviderProtocolError("utterance already reached EOU")
-            if len(session.terminal_ids) + len(session.utterances) >= _MAX_TERMINAL_IDS:
+            if (
+                len(session.terminal_ids) + len(session.utterances)
+                >= MAX_TERMINAL_UTTERANCES_PER_SESSION
+            ):
                 self._fail_session_locked(session)
                 raise LocalProviderProtocolError("terminal identity capacity reached")
             utterance = _Utterance(
@@ -1681,7 +1706,7 @@ class LocalProvider:
         utterance.purge_source()
         if (
             utterance.utterance_id not in session.terminal_ids
-            and len(session.terminal_ids) >= _MAX_TERMINAL_IDS
+            and len(session.terminal_ids) >= MAX_TERMINAL_UTTERANCES_PER_SESSION
         ):
             self._fail_session_locked(session)
             raise LocalProviderProtocolError("terminal identity capacity reached")

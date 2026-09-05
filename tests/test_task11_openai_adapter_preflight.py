@@ -8,6 +8,7 @@ import stat
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,8 +42,8 @@ def walk_keys(value: Any) -> list[str]:
     return []
 
 
-def load_preflight_module() -> Any:
-    script = ROOT / "scripts/translator-task11-openai-preflight"
+def load_preflight_module(script_name="translator-task11-openai-preflight") -> Any:
+    script = ROOT / "scripts" / script_name
     loader = importlib.machinery.SourceFileLoader(
         "task11_openai_preflight", str(script)
     )
@@ -54,6 +55,64 @@ def load_preflight_module() -> Any:
 
 
 class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
+    def test_synthetic_speech_uses_verified_sources(self):
+        module = load_preflight_module("translator-task11-openai-synthetic-smoke")
+        manifest = object()
+        with (
+            patch.object(module, "load_manifest", return_value=manifest),
+            patch.object(module, "PiperVoiceRegistry") as registry,
+            patch.object(module, "PiperTts") as tts,
+        ):
+            self.assertIs(module.build_tts(), tts.return_value)
+        sources = registry.call_args.args[0]
+        self.assertEqual(set(sources), set(module.VOICE_MODELS))
+        for profile, source in sources.items():
+            self.assertIsInstance(source, module.VerifiedModelSource)
+            self.assertIs(source.manifest, manifest)
+            self.assertEqual(source.model_id, module.VOICE_MODELS[profile])
+
+    def test_synthetic_speech_construction_failure_closes_registry(self):
+        module = load_preflight_module("translator-task11-openai-synthetic-smoke")
+        with (
+            patch.object(module, "load_manifest", return_value=object()),
+            patch.object(module, "PiperVoiceRegistry") as registry,
+            patch.object(
+                module, "PiperTts", side_effect=RuntimeError("fixture failure")
+            ),
+        ):
+            with self.assertRaises(RuntimeError):
+                module.build_tts()
+            registry.return_value.close.assert_called_once_with()
+
+    def test_synthetic_speech_comparison_closes_tts_before_network_or_on_failure(self):
+        module = load_preflight_module("translator-task11-openai-synthetic-smoke")
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                with (
+                    patch.object(module, "build_tts") as build,
+                    patch.object(module, "synthesize_frames") as synthesize,
+                    patch.object(module, "run_direction") as direction,
+                ):
+                    if fails:
+                        synthesize.side_effect = module.TtsUnavailable(
+                            "fixture failure"
+                        )
+                    else:
+                        synthesize.return_value = [b"\0\0"]
+
+                    def run(*_args):
+                        build.return_value.close.assert_called_once_with()
+                        return {"status": "passed"}
+
+                    direction.side_effect = run
+                    report = module.build_comparison("synthetic-test-key")
+                    build.return_value.close.assert_called_once_with()
+                    self.assertEqual(
+                        report["status"],
+                        "blocked_synthetic_speech_unavailable" if fails else "passed",
+                    )
+                    self.assertEqual(direction.call_count, 0 if fails else 2)
+
     def test_preflight_script_is_executable_and_offline_only(self) -> None:
         script_path = ROOT / "scripts/translator-task11-openai-preflight"
         self.assertTrue(script_path.exists(), "Task 11 preflight script is missing")

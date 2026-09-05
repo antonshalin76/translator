@@ -4,8 +4,10 @@ import hashlib
 import json
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Barrier, Lock, current_thread
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -36,6 +38,119 @@ from translator_sidecar.provider_contract import (
 )
 
 CORPUS_PATH = Path(__file__).parent / "quality_corpus" / "task6-v4.json"
+
+
+@pytest.mark.parametrize("failure", [None, "quality", "second-mt", "duplex"])
+def test_live_run_owns_model_lifetimes_and_never_reuses_closed_adapters(
+    tmp_path, monkeypatch, failure
+):
+    created = []
+    duplex_calls = []
+    models = {
+        model_id: SimpleNamespace(
+            id=model_id,
+            cache_path=tmp_path / model_id,
+            files=[SimpleNamespace(path="voice.onnx")],
+        )
+        for model_id in (
+            task6_live._SMALL_ID,
+            task6_live._LARGE_ID,
+            task6_live._MT_ID,
+            *task6_live._VOICE_IDS.values(),
+        )
+    }
+    manifest = SimpleNamespace(models=models, resolve_runtime_file=lambda *_args: None)
+
+    class Adapter:
+        actual_device = "cpu"
+        degraded = False
+
+        def __init__(self, *_args, selected_id=None, **kwargs):
+            self.closed = False
+            self.resident_model_id = selected_id
+            created.append(self)
+
+        def check(self):
+            assert not self.closed, "benchmark reused a closed model"
+
+        def close(self):
+            self.closed = True
+            self.resident_model_id = None
+
+        def release(self):
+            self.close()
+            return True
+
+    class Translator(Adapter):
+        loads = 0
+
+        @classmethod
+        def load(cls, *_args, **kwargs):
+            cls.loads += 1
+            if failure == "second-mt" and cls.loads == 2:
+                raise RuntimeError("second-mt")
+            return cls()
+
+    @dataclass
+    class Report:
+        model_id: str
+
+    def candidate(config, *, adapter_factory, **kwargs):
+        adapter_factory()
+        return Report(config.model_id)
+
+    def synthesize(tts, *_args):
+        tts.check()
+        return b"\0\0" * 160
+
+    def quality(*_args, translator, **kwargs):
+        translator.check()
+        if failure == "quality":
+            raise RuntimeError("quality")
+        return "quality-report"
+
+    def duplex(*, asr, translator, tts, model_id, on_complete=None, **kwargs):
+        for adapter in (asr, translator, tts):
+            adapter.check()
+        duplex_calls.append((translator, tts))
+        try:
+            if failure == "duplex":
+                raise RuntimeError("duplex")
+            if on_complete is not None:
+                on_complete()
+            return Report(model_id)
+        finally:
+            for adapter in (asr, translator, tts):
+                adapter.close()
+
+    monkeypatch.setattr(task6_live, "load_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(task6_live, "_cuda_available", lambda: False)
+    monkeypatch.setattr(task6_live, "PiperVoiceRegistry", lambda *_args: object())
+    monkeypatch.setattr(task6_live, "PiperTts", Adapter)
+    monkeypatch.setattr(task6_live, "_run_voice_smokes", lambda *_args: [])
+    monkeypatch.setattr(task6_live, "_synthesize_pcm", synthesize)
+    monkeypatch.setattr(task6_live, "_asr_manager", Adapter)
+    monkeypatch.setattr(task6_live, "benchmark_asr_candidate", candidate)
+    monkeypatch.setattr(task6_live, "NllbTranslator", Translator)
+    monkeypatch.setattr(task6_live, "load_quality_corpus", lambda *_args: object())
+    monkeypatch.setattr(task6_live, "run_quality_benchmark", quality)
+    monkeypatch.setattr(task6_live, "_benchmark_provider_duplex", duplex)
+    monkeypatch.setattr(task6_live, "_resource_sample", lambda: (0, 0, 0, 0))
+    monkeypatch.setattr(
+        task6_live,
+        "_build_payload",
+        lambda **kwargs: {"normal_runtime": kwargs["normal_runtime"]},
+    )
+    if failure is not None:
+        with pytest.raises(RuntimeError, match=failure):
+            task6_live.run(tmp_path / "out.json")
+    else:
+        payload = task6_live.run(tmp_path / "out.json")
+        assert payload["normal_runtime"]["resident_model_id"] == task6_live._SMALL_ID
+        assert len(duplex_calls) == 2
+        assert duplex_calls[0][0] is not duplex_calls[1][0]
+        assert duplex_calls[0][1] is not duplex_calls[1][1]
+    assert created and all(adapter.closed for adapter in created)
 
 
 def test_versioned_corpus_expands_to_ten_warmups_and_one_hundred_cases() -> None:
@@ -939,6 +1054,40 @@ def test_live_releases_quality_asr_before_creating_normal_residency(
 
     assert created is normal_asr
     assert events == ["release-large", "create-small"]
+
+
+def test_live_duplex_captures_residency_before_provider_shutdown(monkeypatch):
+    events = []
+
+    class Bridge:
+        def __init__(self, *_args):
+            pass
+
+        def run_direction(self, *_args):
+            return 0
+
+        def close(self):
+            events.append("shutdown")
+
+    def benchmark(*_args, **kwargs):
+        events.append("measured")
+        return "report"
+
+    monkeypatch.setattr(task6_live, "LocalProvider", lambda **kwargs: object())
+    monkeypatch.setattr(task6_live, "InferenceScheduler", lambda: object())
+    monkeypatch.setattr(task6_live, "_ProviderDuplexBridge", Bridge)
+    monkeypatch.setattr(task6_live, "benchmark_simultaneous_duplex", benchmark)
+    result = task6_live._benchmark_provider_duplex(
+        asr=object(),
+        model_id=task6_live._SMALL_ID,
+        translator=object(),
+        tts=object(),
+        source_pcm={},
+        device="cpu",
+        on_complete=lambda: events.append("snapshot"),
+    )
+    assert result == "report"
+    assert events == ["measured", "snapshot", "shutdown"]
 
 
 def test_live_never_creates_normal_asr_when_quality_release_fails(

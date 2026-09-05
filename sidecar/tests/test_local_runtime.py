@@ -8,6 +8,8 @@ from uuid import uuid4
 import pytest
 
 import translator_sidecar.local.runtime as runtime_module
+from translator_sidecar.local.model_lease import VerifiedModelSource
+from translator_sidecar.local.mt import LocalTranslationError, NllbTranslator
 from translator_sidecar.local.runtime import build_local_provider
 from translator_sidecar.provider_contract import (
     AudioDirection,
@@ -41,11 +43,8 @@ class FakeManifest:
     def __init__(
         self,
         root: Path,
-        *,
-        fail_on: tuple[str, str] | None = None,
     ) -> None:
         self.root = root
-        self.fail_on = fail_on
         self.models = {
             model_id: FakeModel(
                 root / model_id,
@@ -64,17 +63,80 @@ class FakeManifest:
                 "piper-en-hfc-female-medium",
             )
         }
-        self.resolved: list[tuple[str, str]] = []
 
-    def resolve_runtime_file(
-        self,
-        model_id: str,
-        file_path: str,
-    ) -> Path:
-        self.resolved.append((model_id, file_path))
-        if (model_id, file_path) == self.fail_on:
-            raise RuntimeError("private-manifest-resolution-marker")
-        return self.root / "blobs" / f"{model_id}-{file_path}"
+
+class Closable:
+    def close(self) -> None:
+        unload = getattr(self, "unload_model", None)
+        if unload is not None:
+            unload()
+
+
+@pytest.mark.parametrize("failure_phase", ["smoke", "asr"])
+def test_bootstrap_retains_failed_native_cleanup_for_unavailable_provider_shutdown(
+    tmp_path, monkeypatch, failure_phase
+):
+    manifest = FakeManifest(tmp_path)
+    loads = []
+    asr_closes = []
+
+    class Native:
+        attempts = 0
+
+        def unload_model(self):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("private-cleanup-marker")
+
+    native = Native()
+
+    class Adapter(NllbTranslator):
+        @classmethod
+        def load(cls, source, *, device):
+            loads.append(device)
+            return cls(tmp_path, translator=native, tokenizer=object())
+
+        def translate(self, *_args, **kwargs):
+            if self.unavailable:
+                raise LocalTranslationError("local MT is unavailable")
+            if failure_phase == "smoke":
+                raise LocalTranslationError("bootstrap smoke failed")
+            return "translated"
+
+    class Asr:
+        def __init__(self, **kwargs):
+            pass
+
+        def prepare(self):
+            raise RuntimeError("ASR load failed")
+
+        def close(self):
+            asr_closes.append("close")
+
+    monkeypatch.setattr(runtime_module, "load_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(runtime_module, "_cuda_available", lambda: True)
+    monkeypatch.setattr(runtime_module, "NllbTranslator", Adapter)
+    monkeypatch.setattr(runtime_module, "AsrModelManager", Asr)
+    provider = build_local_provider(now_ns=lambda: 0, manifest_path=tmp_path)
+    assert loads == ["cuda"]
+    assert native.attempts == 1
+    assert provider._translator._translator is native
+    with pytest.raises(LocalTranslationError, match="unavailable"):
+        provider._translator.translate("must not infer")
+
+    async def scenario():
+        async def publish(_batch, commit):
+            commit()
+
+        _, health = await provider.open_session(open_request(), publish)
+        assert health.state is ProviderState.UNAVAILABLE
+        assert all(model.state is ModelState.FAILED for model in health.models)
+        await provider.shutdown()
+
+    asyncio.run(scenario())
+    assert native.attempts == 2
+    assert provider._translator._translator is None
+    assert asr_closes == (["close"] if failure_phase == "asr" else [])
 
 
 def open_request() -> OpenProviderSession:
@@ -118,12 +180,12 @@ def test_build_local_provider_uses_verified_manifest_runtime(
     manifest = FakeManifest(tmp_path)
     captured = {}
 
-    class FakeAsr:
+    class FakeAsr(Closable):
         def __init__(self, **kwargs) -> None:
             captured["asr"] = kwargs
             captured["asr_instance"] = self
 
-    class FakeTranslator:
+    class FakeTranslator(Closable):
         @classmethod
         def load(cls, path, *, device: str):
             captured["mt"] = (path, device)
@@ -135,7 +197,7 @@ def test_build_local_provider_uses_verified_manifest_runtime(
             del text, kwargs
             return "translated"
 
-    class FakeRegistry:
+    class FakeRegistry(Closable):
         def __init__(self, voice_paths) -> None:
             captured["voices"] = voice_paths
             captured["registry_instance"] = self
@@ -189,26 +251,26 @@ def test_build_local_provider_uses_verified_manifest_runtime(
     assert captured["asr"] == {
         "selected_id": "small",
         "model_paths": {
-            "small": tmp_path / "faster-whisper-small",
+            "small": VerifiedModelSource(manifest, "faster-whisper-small"),
         },
         "device": device,
     }
     assert captured["mt"] == (
-        tmp_path / "nllb-200-distilled-600m-ct2-int8",
+        VerifiedModelSource(manifest, "nllb-200-distilled-600m-ct2-int8"),
         device,
     )
     assert captured["voices"] == {
         (Language.RU, VoiceGender.MALE): (
-            tmp_path / "piper-ru-dmitri-medium" / "piper-ru-dmitri-medium.bin"
+            VerifiedModelSource(manifest, "piper-ru-dmitri-medium")
         ),
         (Language.EN, VoiceGender.MALE): (
-            tmp_path / "piper-en-ryan-medium" / "piper-en-ryan-medium.bin"
+            VerifiedModelSource(manifest, "piper-en-ryan-medium")
         ),
         (Language.RU, VoiceGender.FEMALE): (
-            tmp_path / "piper-ru-irina-medium" / "piper-ru-irina-medium.bin"
+            VerifiedModelSource(manifest, "piper-ru-irina-medium")
         ),
         (Language.EN, VoiceGender.FEMALE): (
-            tmp_path / "piper-en-hfc-female-medium" / "piper-en-hfc-female-medium.bin"
+            VerifiedModelSource(manifest, "piper-en-hfc-female-medium")
         ),
     }
     assert captured["provider"]["now_ns"] is now_ns
@@ -221,22 +283,7 @@ def test_build_local_provider_uses_verified_manifest_runtime(
     assert captured["provider"]["mt_model_id"] == "nllb-200-distilled-600m-ct2-int8"
     assert captured["provider"]["tts_model_id"] == "piper-medium"
     assert captured["registry_prepared"] is captured["registry_instance"]
-    assert not any(
-        model_id == "faster-whisper-large-v3" for model_id, _ in manifest.resolved
-    )
-    expected_models = {
-        "faster-whisper-small",
-        "nllb-200-distilled-600m-ct2-int8",
-        "piper-ru-dmitri-medium",
-        "piper-en-ryan-medium",
-        "piper-ru-irina-medium",
-        "piper-en-hfc-female-medium",
-    }
-    assert set(manifest.resolved) == {
-        (model_id, f"{model_id}.{suffix}")
-        for model_id in expected_models
-        for suffix in ("bin", "json")
-    }
+    assert len(captured["asr"]["model_paths"]) == 1
 
 
 def test_build_local_provider_uses_repository_manifest_by_default(
@@ -392,7 +439,7 @@ def test_unknown_runtime_modes_do_not_bypass_inventory(
     assert inventory_called is True
 
 
-def test_build_local_provider_resolves_all_files_before_adapters(
+def test_build_local_provider_requires_all_selected_manifest_entries_before_adapters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -429,14 +476,9 @@ def test_build_local_provider_resolves_all_files_before_adapters(
         "piper-ru-irina-medium",
         "piper-en-hfc-female-medium",
     )
-    all_files = tuple(
-        (model_id, f"{model_id}.{suffix}")
-        for model_id in selected_models
-        for suffix in ("bin", "json")
-    )
-
-    for failed_file in all_files:
-        manifest = FakeManifest(tmp_path, fail_on=failed_file)
+    for missing_model in selected_models:
+        manifest = FakeManifest(tmp_path)
+        del manifest.models[missing_model]
         monkeypatch.setattr(
             runtime_module,
             "load_manifest",
@@ -452,10 +494,9 @@ def test_build_local_provider_resolves_all_files_before_adapters(
         assert captured["asr"].unavailable is True
         assert captured["translator"].unavailable is True
         assert captured["tts"].unavailable is True
-        assert manifest.resolved[-1] == failed_file
 
     assert constructed == []
-    assert "private-manifest-resolution-marker" not in caplog.text
+    assert not caplog.text
 
 
 def test_build_local_provider_fails_safely_after_cuda_and_cpu_mt_load(
@@ -501,7 +542,7 @@ def test_build_local_provider_fails_safely_after_cuda_and_cpu_mt_load(
         manifest_path=tmp_path / "manifest.json",
     )
 
-    mt_path = tmp_path / "nllb-200-distilled-600m-ct2-int8"
+    mt_path = VerifiedModelSource(manifest, "nllb-200-distilled-600m-ct2-int8")
     assert isinstance(provider, FakeProvider)
     assert mt_attempts == [(mt_path, "cuda"), (mt_path, "cpu")]
     assert asr_constructed == []
@@ -524,8 +565,12 @@ def test_adapter_construction_failure_returns_reachable_unavailable_provider(
 ) -> None:
     manifest = FakeManifest(tmp_path)
     real_provider = runtime_module.LocalProvider
+    closed = []
 
-    class FakeTranslator:
+    class FakeTranslator(Closable):
+        def close(self):
+            closed.append("mt")
+
         @classmethod
         def load(cls, path, *, device):
             return cls()
@@ -534,20 +579,30 @@ def test_adapter_construction_failure_returns_reachable_unavailable_provider(
             del text, kwargs
             return "translated"
 
-    class MaybeFailAsr:
+    class MaybeFailAsr(Closable):
+        def close(self):
+            closed.append("asr")
+
         def __init__(self, **kwargs):
             if failing_component == "asr":
                 raise RuntimeError("private-asr-construction-marker")
 
-    class MaybeFailRegistry:
+    class MaybeFailRegistry(Closable):
+        def close(self):
+            closed.append("registry")
+
         def __init__(self, voice_paths):
             if failing_component == "registry":
                 raise RuntimeError("private-registry-construction-marker")
 
     class MaybeFailTts:
         def __init__(self, registry):
+            self.registry = registry
             if failing_component == "tts":
                 raise RuntimeError("private-tts-construction-marker")
+
+        def close(self):
+            self.registry.close()
 
     def maybe_fail_provider(**kwargs):
         if failing_component == "provider" and not getattr(
@@ -567,6 +622,16 @@ def test_adapter_construction_failure_returns_reachable_unavailable_provider(
     provider = build_local_provider(
         now_ns=lambda: 0,
         manifest_path=tmp_path / "manifest.json",
+    )
+
+    assert (
+        closed
+        == {
+            "asr": ["mt"],
+            "registry": ["asr", "mt"],
+            "tts": ["registry", "asr", "mt"],
+            "provider": ["registry", "asr", "mt"],
+        }[failing_component]
     )
 
     async def scenario() -> None:
@@ -602,7 +667,7 @@ def test_build_local_provider_keeps_cuda_asr_after_cuda_mt_load_failure(
     captured = {}
     mt_attempts = []
 
-    class FallbackTranslator:
+    class FallbackTranslator(Closable):
         @classmethod
         def load(cls, path, *, device):
             mt_attempts.append((path, device))
@@ -616,12 +681,12 @@ def test_build_local_provider_keeps_cuda_asr_after_cuda_mt_load_failure(
             del text, kwargs
             return "translated"
 
-    class FakeAsr:
+    class FakeAsr(Closable):
         def __init__(self, **kwargs) -> None:
             captured["asr"] = kwargs
             captured["asr_instance"] = self
 
-    class FakeRegistry:
+    class FakeRegistry(Closable):
         def __init__(self, voice_paths) -> None:
             captured["registry"] = self
 
@@ -658,7 +723,7 @@ def test_build_local_provider_keeps_cuda_asr_after_cuda_mt_load_failure(
         manifest_path=tmp_path / "manifest.json",
     )
 
-    mt_path = tmp_path / "nllb-200-distilled-600m-ct2-int8"
+    mt_path = VerifiedModelSource(manifest, "nllb-200-distilled-600m-ct2-int8")
     assert isinstance(provider, FakeProvider)
     assert mt_attempts == [(mt_path, "cuda"), (mt_path, "cpu")]
     assert captured["asr"]["device"] == "cuda"
@@ -676,7 +741,7 @@ def test_cuda_mt_smoke_failure_reloads_and_verifies_cpu(
     loads = []
     smoke_calls = []
 
-    class SmokeTranslator:
+    class SmokeTranslator(Closable):
         def __init__(self, device: str) -> None:
             self.device = device
             self._translator = self
@@ -706,7 +771,7 @@ def test_cuda_mt_smoke_failure_reloads_and_verifies_cpu(
         def unload_model(self) -> None:
             self.unloaded = True
 
-    class FakeAdapter:
+    class FakeAdapter(Closable):
         def __init__(self, *args, **kwargs) -> None:
             if "selected_id" in kwargs:
                 captured["asr_kwargs"] = kwargs
@@ -734,7 +799,7 @@ def test_cuda_mt_smoke_failure_reloads_and_verifies_cpu(
         manifest_path=tmp_path / "manifest.json",
     )
 
-    mt_path = tmp_path / "nllb-200-distilled-600m-ct2-int8"
+    mt_path = VerifiedModelSource(manifest, "nllb-200-distilled-600m-ct2-int8")
     assert isinstance(provider, FakeProvider)
     assert [(path, device) for path, device, _ in loads] == [
         (mt_path, "cuda"),
@@ -765,7 +830,7 @@ def test_cuda_mt_smoke_success_does_not_load_cpu(
     loads = []
     smoke_calls = []
 
-    class SmokeTranslator:
+    class SmokeTranslator(Closable):
         @classmethod
         def load(cls, path, *, device):
             loads.append((path, device))
@@ -775,7 +840,7 @@ def test_cuda_mt_smoke_success_does_not_load_cpu(
             smoke_calls.append((text, kwargs))
             return "translated"
 
-    class FakeAdapter:
+    class FakeAdapter(Closable):
         def __init__(self, *args, **kwargs) -> None:
             del args, kwargs
 
@@ -827,7 +892,7 @@ def test_cpu_mt_smoke_failure_returns_unavailable_provider(
     loaded = []
     asr_constructed = False
 
-    class SmokeTranslator:
+    class SmokeTranslator(Closable):
         def __init__(self) -> None:
             self._translator = self
             self.unloaded = False

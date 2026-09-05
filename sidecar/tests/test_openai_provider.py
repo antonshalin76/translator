@@ -203,7 +203,9 @@ def test_websocket_event_builders_match_translation_session_contract() -> None:
 
     assert build_session_update_event(session) == {
         "type": "session.update",
-        "session": {"audio": {"output": {"language": "ru"}}},
+        "session": {
+            "audio": {"input": {"transcription": None}, "output": {"language": "ru"}}
+        },
     }
     assert build_input_audio_append_event(pcm) == {
         "type": "session.input_audio_buffer.append",

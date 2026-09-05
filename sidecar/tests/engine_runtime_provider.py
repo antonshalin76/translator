@@ -1,12 +1,16 @@
-"""Deterministic provider lifecycle core used by the sidecar transport."""
+"""Deterministic test engine and its explicit runtime-provider adapter."""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from .provider_contract import (
+from translator_sidecar.local.local_provider import LocalProviderProtocolError
+from translator_sidecar.provider_contract import (
     CancelUtterance,
     CloseProviderSession,
     ComputeDevice,
@@ -114,6 +118,10 @@ ProviderEngineEvent = (
     | ProviderTranslationDelta
     | ProviderUtteranceFinal
 )
+PublishEvents = Callable[
+    [tuple[ProviderEngineEvent, ...], Callable[[], None]],
+    Awaitable[None],
+]
 
 
 def _engine_events(
@@ -588,3 +596,130 @@ class ProviderEngine:
             provider_output_buffered_ms=session.output_buffered_ms,
             queue_lag_ms=queue_lag_ms,
         )
+
+
+class EngineRuntimeProvider:
+    """Adapt the deterministic test engine to the production provider protocol."""
+
+    def __init__(
+        self,
+        engine: ProviderEngine | None = None,
+        *,
+        now_ns: Callable[[], int] = time.monotonic_ns,
+    ) -> None:
+        self.engine = engine if engine is not None else ProviderEngine()
+        self._now_ns = now_ns
+        self._publishers: dict[UUID, PublishEvents] = {}
+
+    def _call(self, method, *args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except ProviderProtocolError as error:
+            raise LocalProviderProtocolError(str(error)) from None
+
+    async def open_session(
+        self,
+        request: OpenProviderSession,
+        publish: PublishEvents,
+    ) -> tuple[ProviderSessionOpened, ProviderHealth]:
+        opened = self._call(self.engine.open_session, request)
+        self._publishers[request.session_id] = publish
+        try:
+            health = self._call(
+                self.engine.health,
+                request.session_id,
+                now_ns=self._now_ns(),
+            )
+        except BaseException:
+            self._publishers.pop(request.session_id, None)
+            self._call(self.engine.release_session, request.session_id)
+            raise
+        return opened, health
+
+    async def submit_frame(self, frame: ProviderInputFrame) -> None:
+        admission = self._call(
+            self.engine.enqueue_frame,
+            frame,
+            now_ns=self._now_ns(),
+        )
+        if admission is not None:
+            events = admission if isinstance(admission, tuple) else (admission,)
+            await self._publish_events(frame.session_id, events)
+            return
+        await self._process_pending(frame.session_id)
+
+    async def _process_pending(self, session_id: UUID) -> None:
+        while True:
+            events = (
+                *self._call(
+                    self.engine.process_next,
+                    session_id,
+                    now_ns=self._now_ns(),
+                ),
+                *self._call(
+                    self.engine.drain_output,
+                    session_id,
+                    now_ns=self._now_ns(),
+                ),
+            )
+            if events:
+                await self._publish_events(session_id, events)
+            wakeup_ms = self._call(
+                self.engine.next_wakeup_ms,
+                session_id,
+                now_ns=self._now_ns(),
+            )
+            if wakeup_ms is None:
+                return
+            await asyncio.sleep(max(1, wakeup_ms) / 1000)
+
+    async def cancel_utterance(self, request: CancelUtterance) -> None:
+        event = self._call(self.engine.cancel_utterance, request)
+        await self._publish(request.session_id, (event,))
+
+    async def update_debug_text(self, request: UpdateDebugText) -> None:
+        self._call(self.engine.update_debug_text, request)
+
+    async def close_session(self, request: CloseProviderSession) -> None:
+        try:
+            event = self._call(self.engine.close_session, request)
+            await self._publish(request.session_id, (event,))
+        finally:
+            self._publishers.pop(request.session_id, None)
+            self._call(self.engine.release_session, request.session_id)
+
+    async def wait_publications(self, session_id: UUID) -> None:
+        return None
+
+    async def shutdown(self) -> None:
+        for session_id in tuple(self._publishers):
+            self._publishers.pop(session_id, None)
+            self._call(self.engine.release_session, session_id)
+
+    async def _publish(
+        self,
+        session_id: UUID,
+        events: tuple[ProviderEngineEvent, ...],
+    ) -> None:
+        publish = self._publishers.get(session_id)
+        if publish is None:
+            raise LocalProviderProtocolError("session is unavailable")
+        await publish(events, lambda: None)
+
+    async def _publish_events(
+        self,
+        session_id: UUID,
+        events: tuple[ProviderEngineEvent, ...],
+    ) -> None:
+        index = 0
+        while index < len(events):
+            batch = (events[index],)
+            if (
+                isinstance(events[index], PrivacySafeProviderError)
+                and index + 1 < len(events)
+                and isinstance(events[index + 1], ProviderUtteranceFinal)
+            ):
+                batch = (events[index], events[index + 1])
+                index += 1
+            await self._publish(session_id, batch)
+            index += 1

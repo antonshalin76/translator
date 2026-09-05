@@ -8,6 +8,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+MAX_TERMINAL_UTTERANCES_PER_SESSION = 4096
+
+
+class ProviderProtocolError(ValueError):
+    """A provider request violates the shared session contract."""
+
 
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

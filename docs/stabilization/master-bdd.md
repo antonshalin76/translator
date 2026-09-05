@@ -49,7 +49,13 @@ Owner/seam: provider contract and local-provider adapter; authenticated in-proce
 
 ### TST-3 — Provider replacement leases
 
-Given live leases on provider A and a fully prepared provider B, when the registry performs its one locked pointer swap, then a lease whose locked read completed before the swap receives A and a read completed afterward receives B. Each lease remains wholly on its selected provider, A remains alive until its last lease closes, and A shuts down exactly once. Failed B preparation performs no swap, leaves A active, and closes every partially created B resource exactly once within `2000 ms`. Across 100 injected failures there is zero net session, socket, task, process, file-descriptor, or model-lease growth.
+Given live leases on provider A and a fully prepared provider B, when the registry performs its atomic selection change, then an acquisition completed before the change receives A and an acquisition completed afterward receives B. Each lease remains wholly on its selected provider, A remains alive until its last lease closes, and A shuts down exactly once. Reselecting A before retirement starts keeps it alive; an instance whose disposal has started cannot be selected again. Local and cloud providers use the same lease rules. Failed B preparation performs no swap, leaves A active, and closes every partially created B resource exactly once within `2000 ms`. Across 100 injected failures there is zero net session, socket, task, process, file-descriptor, or model-lease growth.
+
+Shutdown attempts every owned provider even when another cleanup fails. A failed
+cleanup remains owned and retryable; successful cleanup is not repeated. Repeated
+caller cancellation does not detach cleanup. Model components close only after
+native inference and publication tasks have drained. A successful ownership
+transfer is not undone by an error while retiring the previous provider.
 
 Owner/seam: provider registry/lease owner; concurrent registry test with instrumented providers.
 
@@ -383,7 +389,14 @@ remainder, timer, pending buffer, socket, receiver task, and utterance binding.
 A fake socket that emits late A audio while B is being prepared proves that the
 audio is discarded and only the distinct B connection can publish B audio. One
 thousand sequential completed, cancelled, and failed utterances leave all
-per-utterance and retired-generation collections empty after each terminal.
+per-utterance payload and retired-generation collections empty after each
+successful disposal. Session-scoped terminal identity tombstones contain no
+content or native resources and have a shared local/cloud limit of `4096`.
+Reusing a terminal ID is rejected even with a newer capture sequence and after
+intervening utterances; reaching the limit fails closed without evicting old
+identities or opening another socket. If physical socket disposal fails, its
+revoked owner remains tracked and retryable, no replacement input is admitted,
+and shutdown cannot report success until cleanup succeeds.
 
 Owner/seam: OpenAI per-utterance connection-generation owner; fake-websocket
 test for cancel A → retire A → late A audio → open B → B audio.

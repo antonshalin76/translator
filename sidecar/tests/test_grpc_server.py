@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import grpc
 import pytest
+from engine_runtime_provider import EngineRuntimeProvider, MockInjection, ProviderEngine
 
 import translator_sidecar.__main__ as main_module
 from translator_sidecar.generated.translator.provider.v1 import (
@@ -22,6 +23,7 @@ from translator_sidecar.grpc_server import (
     ChannelOverflow,
     ProviderGrpcServer,
     SidecarServerConfig,
+    _AuthInterceptor,
     _event_to_proto,
 )
 from translator_sidecar.local.inference_scheduler import InferenceScheduler
@@ -49,12 +51,14 @@ from translator_sidecar.provider_contract import (
     VoiceProfile,
     make_provider_error,
 )
-from translator_sidecar.provider_engine import MockInjection, ProviderEngine
 
 TOKEN = "ab" * 32
 
 
 class LocalGrpcAsr:
+    def close(self) -> None:
+        pass
+
     actual_device = "cuda"
     degraded = False
     unavailable = False
@@ -78,6 +82,9 @@ class LocalGrpcAsr:
 
 
 class LocalGrpcTranslator:
+    def close(self) -> None:
+        pass
+
     unavailable = False
 
     def __init__(self) -> None:
@@ -103,6 +110,9 @@ class LocalGrpcTranslator:
 
 
 class LocalGrpcTts:
+    def close(self) -> None:
+        pass
+
     unavailable = False
 
     def __init__(self) -> None:
@@ -291,6 +301,13 @@ def secure_config(tmp_path: Path) -> SidecarServerConfig:
     )
 
 
+def engine_runtime_provider(
+    config: SidecarServerConfig,
+    engine: ProviderEngine | None = None,
+) -> EngineRuntimeProvider:
+    return EngineRuntimeProvider(engine, now_ns=config.now_ns)
+
+
 async def collect_stream(
     config: SidecarServerConfig,
     *items: provider_pb2.ProviderRequest,
@@ -347,7 +364,7 @@ def test_probe_requires_auth_and_returns_matching_generation(tmp_path: Path) -> 
             )
             assert response.schema_version == "translator.provider.probe_response.v1"
             assert response.generation_id == str(config.generation_id)
-            assert response.provider_ready is True
+            assert response.provider_ready is False
             with pytest.raises(grpc.aio.AioRpcError) as missing:
                 await stub.Probe(
                     provider_pb2.ProviderProbeRequest(),
@@ -480,6 +497,21 @@ def test_uds_parent_and_existing_inode_checks_fail_closed(
     with pytest.raises(PermissionError, match="real directory"):
         run(ProviderGrpcServer(linked_config).start())
 
+    real_ancestor = tmp_path / "real-ancestor"
+    real_ancestor.mkdir(mode=0o700)
+    ancestor_parent = real_ancestor / "private-parent"
+    ancestor_parent.mkdir(mode=0o700)
+    linked_ancestor = tmp_path / "linked-ancestor"
+    linked_ancestor.symlink_to(real_ancestor, target_is_directory=True)
+    ancestor_config = SidecarServerConfig(
+        socket_path=linked_ancestor / ancestor_parent.name / "provider.sock",
+        token=TOKEN,
+        generation_id=uuid4(),
+        now_ns=lambda: 0,
+    )
+    with pytest.raises(PermissionError, match="real directory"):
+        run(ProviderGrpcServer(ancestor_config).start())
+
     real_parent = tmp_path / "socket-symlink-parent"
     real_parent.mkdir(mode=0o700)
     target = tmp_path / "missing-target"
@@ -520,6 +552,7 @@ def test_server_binds_private_socket_and_rejects_invalid_config(
     async def scenario() -> None:
         config = secure_config(tmp_path)
         server = ProviderGrpcServer(config)
+        assert server.provider_ready is False
         await server.start()
         try:
             assert config.socket_path.stat().st_mode & 0o777 == 0o600
@@ -539,12 +572,163 @@ def test_server_binds_private_socket_and_rejects_invalid_config(
             )
 
 
+@pytest.mark.parametrize(
+    "failure",
+    ["constructor", "registration", "bind_raise", "bind_zero", "start", "chmod"],
+)
+def test_startup_failure_rolls_back_native_server_and_parent_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    instances = []
+    native_factory = grpc.aio.server
+    register_native = provider_pb2_grpc.add_ProviderTransportServicer_to_server
+
+    class NativeServer:
+        def __init__(self, native) -> None:
+            self.native = native
+            self.stop_calls = []
+            instances.append(self)
+
+        def add_insecure_port(self, address: str) -> int:
+            assert address.startswith("unix:/proc/self/fd/")
+            if failure == "bind_raise":
+                raise RuntimeError("synthetic_bind_failure")
+            return 0 if failure == "bind_zero" else 1
+
+        async def start(self) -> None:
+            if failure == "start":
+                raise RuntimeError("synthetic_start_failure")
+            await self.native.start()
+
+        async def stop(self, grace: float) -> None:
+            self.stop_calls.append(grace)
+            native = self.native
+            try:
+                await native.stop(grace)
+            finally:
+                self.native = None
+
+    def construct_server(**kwargs):
+        assert kwargs["interceptors"]
+        if failure == "constructor":
+            raise RuntimeError("synthetic_constructor_failure")
+        return NativeServer(native_factory(**kwargs))
+
+    def register_servicer(servicer, server) -> None:
+        assert servicer is not None
+        assert server in instances
+        if failure == "registration":
+            raise RuntimeError("synthetic_registration_failure")
+        register_native(servicer, server.native)
+
+    def chmod(*args, **kwargs) -> None:
+        if failure == "chmod":
+            raise PermissionError("synthetic_chmod_failure")
+        os.chmod(*args, **kwargs)
+
+    monkeypatch.setattr(grpc.aio, "server", construct_server)
+    monkeypatch.setattr(
+        provider_pb2_grpc,
+        "add_ProviderTransportServicer_to_server",
+        register_servicer,
+    )
+    if failure == "chmod":
+        monkeypatch.setattr(os, "chmod", chmod)
+
+    async def scenario() -> None:
+        config = secure_config(tmp_path)
+        warmup = native_factory(interceptors=(_AuthInterceptor(config.token),))
+        await warmup.stop(grace=0)
+        del warmup
+        await asyncio.sleep(0)
+        descriptor_count = len(os.listdir("/proc/self/fd"))
+        pending_tasks = asyncio.all_tasks()
+        for _ in range(100):
+            server = ProviderGrpcServer(config)
+            with pytest.raises((PermissionError, RuntimeError)):
+                await server.start()
+            assert server._server is None
+            assert server._parent_fd is None
+        await asyncio.sleep(0)
+        assert len(os.listdir("/proc/self/fd")) == descriptor_count
+        assert asyncio.all_tasks() == pending_tasks
+        expected_instances = 0 if failure == "constructor" else 100
+        assert len(instances) == expected_instances
+        assert all(server.stop_calls == [0] for server in instances)
+
+    run(scenario())
+
+
+def test_startup_rollback_defers_repeated_cancellation_until_native_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class NativeServer:
+        stopped = False
+
+        def add_insecure_port(self, address: str) -> int:
+            assert address.startswith("unix:/proc/self/fd/")
+            return 1
+
+        async def start(self) -> None:
+            start_entered.set()
+            await asyncio.Event().wait()
+
+        async def stop(self, grace: float) -> None:
+            assert grace == 0
+            stop_entered.set()
+            await release_stop.wait()
+            self.stopped = True
+
+    native_server = NativeServer()
+    monkeypatch.setattr(grpc.aio, "server", lambda **_: native_server)
+    monkeypatch.setattr(
+        provider_pb2_grpc,
+        "add_ProviderTransportServicer_to_server",
+        lambda *_: None,
+    )
+
+    async def scenario() -> None:
+        config = secure_config(tmp_path)
+        descriptor_count = len(os.listdir("/proc/self/fd"))
+        pending_tasks = asyncio.all_tasks()
+        server = ProviderGrpcServer(config)
+        starting = asyncio.create_task(server.start())
+        await start_entered.wait()
+        starting.cancel()
+        await stop_entered.wait()
+        for _ in range(3):
+            starting.cancel()
+            await asyncio.sleep(0)
+            assert not starting.done()
+        release_stop.set()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        assert native_server.stopped is True
+        assert server._server is None
+        assert server._parent_fd is None
+        await asyncio.sleep(0)
+        assert len(os.listdir("/proc/self/fd")) == descriptor_count
+        assert asyncio.all_tasks() == pending_tasks
+
+    run(scenario())
+
+
 def test_stream_enforces_first_open_and_single_session_identity(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
-        server = ProviderGrpcServer(config)
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config),
+        )
         await server.start()
         try:
             with pytest.raises(grpc.aio.AioRpcError) as before_open:
@@ -605,7 +789,10 @@ def test_stream_rejects_empty_and_wrong_schema_requests_without_leaks(
 ) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
-        server = ProviderGrpcServer(config)
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config),
+        )
         await server.start()
         try:
             marker = "private-wire-schema-marker"
@@ -661,7 +848,10 @@ def test_two_streams_emit_independent_ordered_audio_and_close(
 ) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
-        server = ProviderGrpcServer(config)
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config),
+        )
         await server.start()
         channel = grpc.aio.insecure_channel(f"unix://{config.socket_path}")
         try:
@@ -736,6 +926,40 @@ def test_two_streams_emit_independent_ordered_audio_and_close(
             ]
         finally:
             await channel.close()
+            await server.stop()
+
+    run(scenario())
+
+
+def test_empty_provider_registry_fails_closed_then_accepts_installed_provider(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        config = secure_config(tmp_path)
+        server = ProviderGrpcServer(config)
+        assert server.provider_ready is False
+        await server.start()
+        try:
+            session_id = uuid4()
+            with pytest.raises(grpc.aio.AioRpcError) as unavailable:
+                await collect_stream(config, open_request(session_id))
+            assert unavailable.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+            assert unavailable.value.details() == "protocol_error"
+
+            provider, *_ = local_provider_fixture()
+            server.install_local_provider(provider)
+            assert server.provider_ready is True
+            recovered = await collect_stream(
+                config,
+                open_request(session_id),
+                close_request(session_id),
+            )
+            assert [event.WhichOneof("event") for event in recovered] == [
+                "session_opened",
+                "health",
+                "session_closed",
+            ]
+        finally:
             await server.stop()
 
     run(scenario())
@@ -1000,7 +1224,8 @@ def test_provider_swap_keeps_existing_session_on_original_backend(
                     await asyncio.sleep(0.001)
 
             await asyncio.wait_for(wait_until_consumed(), timeout=1)
-            await server.replace_local_provider(replacement)
+            server.install_local_provider(replacement)
+            await server.providers.collect()
             processing_gate.set()
             assert (await replacement_call.read()).HasField("session_opened")
             assert (await replacement_call.read()).HasField("health")
@@ -1132,6 +1357,13 @@ def test_serve_delegates_to_production_server_builder(
             handlers.append((caught_signal, callback))
 
     class FakeServer:
+        @property
+        def providers(self):
+            return self
+
+        async def collect(self) -> None:
+            pass
+
         async def start(self) -> None:
             order.append("start")
             assert {item[0] for item in handlers} == {
@@ -1139,7 +1371,7 @@ def test_serve_delegates_to_production_server_builder(
                 signal.SIGTERM,
             }
 
-        async def replace_local_provider(self, provider) -> None:
+        def install_local_provider(self, provider) -> None:
             assert provider is loaded_provider
             order.append("replace")
             handlers[0][1]()
@@ -1248,7 +1480,7 @@ def test_serve_cleans_up_after_model_activation_failure(
         async def start(self) -> None:
             order.append("start")
 
-        async def replace_local_provider(self, provider) -> None:
+        def install_local_provider(self, provider) -> None:
             assert provider is built_provider
             order.append("replace")
             raise RuntimeError("safe-replace-failure")
@@ -1312,10 +1544,114 @@ def test_serve_cleans_up_after_model_activation_failure(
         assert built_provider.shutdown_count == 1
 
 
+def test_bootstrap_cancellation_reclaims_completed_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario():
+        config = secure_config(tmp_path)
+        loading = asyncio.Event()
+        release = asyncio.Event()
+        order = []
+
+        class LoopProxy:
+            def add_signal_handler(self, *args):
+                pass
+
+        class BuiltProvider:
+            async def shutdown(self):
+                order.append("model_closed")
+
+        class FakeServer:
+            async def start(self):
+                pass
+
+            async def stop(self):
+                order.append("server_stopped")
+
+        async def load(*args, **kwargs):
+            loading.set()
+            await release.wait()
+            order.append("model_loaded")
+            return BuiltProvider()
+
+        monkeypatch.setattr(
+            main_module.asyncio, "get_running_loop", lambda: LoopProxy()
+        )
+        monkeypatch.setattr(main_module.asyncio, "to_thread", load)
+        monkeypatch.setattr(main_module, "_build_server", lambda _: FakeServer())
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_SOCKET", str(config.socket_path))
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_TOKEN", config.token)
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_GENERATION", str(config.generation_id))
+        serving = asyncio.create_task(main_module._serve())
+        await loading.wait()
+        for _ in range(3):
+            serving.cancel()
+            await asyncio.sleep(0)
+            assert not serving.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await serving
+        assert order == ["model_loaded", "model_closed", "server_stopped"]
+
+    run(scenario())
+
+
+def test_retirement_failure_after_transfer_does_not_double_close_new_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario():
+        config = secure_config(tmp_path)
+
+        class LoopProxy:
+            def add_signal_handler(self, *args):
+                pass
+
+        class Backend:
+            def __init__(self, fail=False):
+                self.calls = 0
+                self.fail = fail
+
+            async def shutdown(self):
+                self.calls += 1
+                if self.fail and self.calls == 1:
+                    raise RuntimeError("synthetic retired backend failure")
+
+        original, replacement = Backend(True), Backend()
+        server = ProviderGrpcServer(config, local_provider=original)
+
+        async def start():
+            pass
+
+        async def load(*args, **kwargs):
+            return replacement
+
+        server.start = start
+        monkeypatch.setattr(
+            main_module.asyncio, "get_running_loop", lambda: LoopProxy()
+        )
+        monkeypatch.setattr(main_module.asyncio, "to_thread", load)
+        monkeypatch.setattr(main_module, "_build_server", lambda _: server)
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_SOCKET", str(config.socket_path))
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_TOKEN", config.token)
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_GENERATION", str(config.generation_id))
+        with pytest.raises(RuntimeError, match=r"^provider_shutdown_failed$"):
+            await main_module._serve()
+        assert original.calls == 2
+        assert replacement.calls == 1
+        assert not server.providers._entries
+
+    run(scenario())
+
+
 def test_runtime_debug_disable_suppresses_text_events(tmp_path: Path) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
-        server = ProviderGrpcServer(config)
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config),
+        )
         await server.start()
         try:
             disabled_id = uuid4()
@@ -1414,7 +1750,10 @@ def test_delayed_frame_completes_without_a_follow_up_request(
         )
         server = ProviderGrpcServer(
             config,
-            engine=ProviderEngine(injection=MockInjection(process_delay_ms=50)),
+            local_provider=engine_runtime_provider(
+                config,
+                ProviderEngine(injection=MockInjection(process_delay_ms=50)),
+            ),
         )
         await server.start()
         try:
@@ -1619,7 +1958,10 @@ class RetryHealthEngine(ProviderEngine):
 def test_stream_health_preserves_retry_and_safe_error(tmp_path: Path) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
-        server = ProviderGrpcServer(config, engine=RetryHealthEngine())
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config, RetryHealthEngine()),
+        )
         await server.start()
         try:
             session_id = uuid4()
@@ -1653,7 +1995,10 @@ def test_unexpected_engine_failure_is_private_and_releases_session(
 ) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
-        server = ProviderGrpcServer(config, engine=RaisingEngine())
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config, RaisingEngine()),
+        )
         await server.start()
         try:
             session_id = uuid4()
@@ -1697,7 +2042,10 @@ def test_server_atomically_delivers_terminal_pair_or_exhausts(
             now_ns=config.now_ns,
             channel_capacity=capacity,
         )
-        server = ProviderGrpcServer(config, engine=OverflowEngine())
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config, OverflowEngine()),
+        )
         await server.start()
         try:
             session_id = uuid4()
@@ -1742,7 +2090,10 @@ def test_control_channel_applies_backpressure_without_aborting_valid_burst(
             channel_capacity=1,
             control_processing_gate=processing_gate,
         )
-        server = ProviderGrpcServer(config)
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config),
+        )
         await server.start()
         channel = grpc.aio.insecure_channel(f"unix://{config.socket_path}")
         request_stream = InteractiveRequests()
@@ -1789,7 +2140,10 @@ def test_control_channel_applies_backpressure_without_aborting_valid_burst(
 def test_client_cancellation_releases_open_session(tmp_path: Path) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
-        server = ProviderGrpcServer(config)
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config),
+        )
         await server.start()
         channel = grpc.aio.insecure_channel(f"unix://{config.socket_path}")
         request_stream = InteractiveRequests()
@@ -1927,7 +2281,10 @@ def test_cleanup_releases_session_even_when_close_raises(
     async def scenario() -> None:
         config = secure_config(tmp_path)
         engine = CleanupRaisingEngine()
-        server = ProviderGrpcServer(config, engine=engine)
+        server = ProviderGrpcServer(
+            config,
+            local_provider=engine_runtime_provider(config, engine),
+        )
         await server.start()
         session_id = uuid4()
         try:
@@ -1972,7 +2329,7 @@ def test_local_provider_lease_is_released_when_cleanup_raises(
         try:
             opened = await collect_stream(config, open_request(session_id))
             assert opened[0].HasField("session_opened")
-            assert server._provider_leases[id(provider)] == 0
+            assert server.providers._entries[id(provider)].leases == 0
             assert "private-local-cleanup-marker" not in caplog.text
 
             provider.close_session = original_close  # type: ignore[method-assign]
@@ -1988,6 +2345,62 @@ def test_local_provider_lease_is_released_when_cleanup_raises(
     run(scenario())
 
 
+def test_reselecting_a_leased_provider_does_not_shutdown_the_current_backend(
+    tmp_path: Path,
+) -> None:
+    class Provider:
+        shutdown_count = 0
+
+        async def shutdown(self) -> None:
+            self.shutdown_count += 1
+
+    async def scenario() -> None:
+        original, replacement = Provider(), Provider()
+        server = ProviderGrpcServer(secure_config(tmp_path), local_provider=original)
+        leased = server.providers.acquire(ProviderId.LOCAL)
+        server.install_local_provider(replacement)
+        await server.providers.collect()
+        server.install_local_provider(original)
+        await server.providers.collect()
+        await leased.release()
+        assert original.shutdown_count == 0
+        assert replacement.shutdown_count == 1
+        await server.stop()
+        assert server.provider_ready is False
+        assert original.shutdown_count == 1
+
+    run(scenario())
+
+
+def test_shutdown_attempts_both_providers_when_local_shutdown_fails(
+    tmp_path: Path,
+) -> None:
+    class Provider:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+            self.shutdown_count = 0
+
+        async def shutdown(self) -> None:
+            self.shutdown_count += 1
+            if self.fail:
+                raise RuntimeError("synthetic-shutdown-failure")
+
+    async def scenario() -> None:
+        local, cloud = Provider(fail=True), Provider()
+        server = ProviderGrpcServer(
+            secure_config(tmp_path), local_provider=local, openai_provider=cloud
+        )
+        with pytest.raises(RuntimeError):
+            await server.stop()
+        assert cloud.shutdown_count == 1
+        local.fail = False
+        await server.stop()
+        assert local.shutdown_count == 2
+        assert cloud.shutdown_count == 1
+
+    run(scenario())
+
+
 def test_control_and_event_channels_are_bounded_to_64() -> None:
     async def scenario() -> None:
         channel: BoundedChannel[int] = BoundedChannel()
@@ -1997,17 +2410,17 @@ def test_control_and_event_channels_are_bounded_to_64() -> None:
         with pytest.raises(ChannelOverflow):
             channel.put_nowait(64)
 
-        terminal_channel: BoundedChannel[int] = BoundedChannel()
+        batch_channel: BoundedChannel[int] = BoundedChannel()
         for value in range(62):
-            terminal_channel.put_nowait(value)
-        terminal_channel.put_terminal(100, 101)
-        assert terminal_channel.qsize() == 64
+            batch_channel.put_nowait(value)
+        batch_channel.put_many_nowait((100, 101))
+        assert batch_channel.qsize() == 64
 
         exhausted: BoundedChannel[int] = BoundedChannel()
         for value in range(63):
             exhausted.put_nowait(value)
         with pytest.raises(ChannelOverflow, match="resource_exhausted"):
-            exhausted.put_terminal(100, 101)
+            exhausted.put_many_nowait((100, 101))
         assert exhausted.qsize() == 63
 
     run(scenario())

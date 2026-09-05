@@ -9,6 +9,8 @@ import gc
 import json
 import subprocess
 import time
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
@@ -29,6 +31,7 @@ from translator_sidecar.benchmark.task6 import (
 from translator_sidecar.local.asr import AsrModelManager
 from translator_sidecar.local.inference_scheduler import InferenceScheduler
 from translator_sidecar.local.local_provider import LocalProvider
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.local.model_manifest import load_manifest
 from translator_sidecar.local.mt import NllbTranslator
 from translator_sidecar.local.tts import PiperTts, PiperVoiceRegistry
@@ -168,8 +171,8 @@ def _run_voice_smokes(tts: Any) -> list[dict[str, Any]]:
 def _asr_manager(
     *,
     selected_id: str,
-    small_path: Path,
-    large_path: Path,
+    small_path: VerifiedModelSource,
+    large_path: VerifiedModelSource,
     device: str,
 ) -> AsrModelManager:
     model_paths = {
@@ -380,6 +383,7 @@ def _benchmark_provider_duplex(
     tts: PiperTts,
     source_pcm: dict[Language, bytes],
     device: str,
+    on_complete: Callable[[], None] | None = None,
 ) -> DuplexBenchmarkReport:
     provider = LocalProvider(
         asr=asr,
@@ -394,11 +398,14 @@ def _benchmark_provider_duplex(
     )
     bridge = _ProviderDuplexBridge(provider, source_pcm)
     try:
-        return benchmark_simultaneous_duplex(
+        report = benchmark_simultaneous_duplex(
             DuplexBenchmarkConfig(model_id=model_id),
             run_direction=bridge.run_direction,
             resource_sample=_resource_sample,
         )
+        if on_complete is not None:
+            on_complete()
+        return report
     finally:
         bridge.close()
 
@@ -406,8 +413,8 @@ def _benchmark_provider_duplex(
 def _release_quality_asr_then_create_normal(
     quality_asr: AsrModelManager,
     *,
-    small_path: Path,
-    large_path: Path,
+    small_path: VerifiedModelSource,
+    large_path: VerifiedModelSource,
     device: str,
 ) -> AsrModelManager:
     if not quality_asr.release():
@@ -422,28 +429,28 @@ def _release_quality_asr_then_create_normal(
 
 
 def run(output_path: Path) -> dict[str, Any]:
+    with ExitStack() as resources:
+        return _run_owned(output_path, resources)
+
+
+def _run_owned(output_path: Path, resources: ExitStack) -> dict[str, Any]:
     manifest = load_manifest(_MANIFEST_PATH)
-    for model in manifest.models.values():
-        for model_file in model.files:
-            manifest.resolve_runtime_file(model.id, model_file.path)
-    small_path = manifest.models[_SMALL_ID].cache_path
-    large_path = manifest.models[_LARGE_ID].cache_path
-    mt_path = manifest.models[_MT_ID].cache_path
+    small_path = VerifiedModelSource(manifest, _SMALL_ID)
+    large_path = VerifiedModelSource(manifest, _LARGE_ID)
+    mt_path = VerifiedModelSource(manifest, _MT_ID)
     voice_paths = {
-        profile: manifest.models[model_id].cache_path
-        / next(
-            file.path
-            for file in manifest.models[model_id].files
-            if file.path.endswith(".onnx")
-        )
+        profile: VerifiedModelSource(manifest, model_id)
         for profile, model_id in _VOICE_IDS.items()
     }
     device = "cuda" if _cuda_available() else "cpu"
     voice_smoke_tts = PiperTts(PiperVoiceRegistry(voice_paths))
+    resources.callback(voice_smoke_tts.close)
     voice_profiles = _run_voice_smokes(voice_smoke_tts)
+    voice_smoke_tts.close()
     del voice_smoke_tts
     gc.collect()
     tts = PiperTts(PiperVoiceRegistry(voice_paths))
+    resources.callback(tts.close)
     fixture_text = "The audio path is ready for the benchmark."
     fixture_pcm = _synthesize_pcm(tts, fixture_text, Language.EN)
     fixture_duration_ms = len(fixture_pcm) * 1_000 // (16_000 * 2)
@@ -463,6 +470,7 @@ def run(output_path: Path) -> dict[str, Any]:
                 large_path=large_path,
                 device=device,
             )
+            resources.callback(manager.close)
             selected_holder.append(manager)
             return manager
 
@@ -497,6 +505,7 @@ def run(output_path: Path) -> dict[str, Any]:
             gc.collect()
 
     translator = NllbTranslator.load(mt_path, device=device)
+    resources.callback(translator.close)
     corpus = load_quality_corpus(_CORPUS_PATH)
     alternate_asr = large_holder[0]
 
@@ -544,8 +553,26 @@ def run(output_path: Path) -> dict[str, Any]:
         large_path=large_path,
         device=device,
     )
+    resources.callback(normal_asr.close)
     large_holder.clear()
     del alternate_asr
+    translator = NllbTranslator.load(mt_path, device=device)
+    resources.callback(translator.close)
+    tts = PiperTts(PiperVoiceRegistry(voice_paths))
+    resources.callback(tts.close)
+    normal_runtime = {}
+
+    def capture_normal_runtime() -> None:
+        final_resources = _resource_sample()
+        normal_runtime.update(
+            {
+                "selected_asr": _SMALL_ID,
+                "actual_device": normal_asr.actual_device,
+                "resident_model_id": normal_asr.resident_model_id,
+                "vram_mib_after": final_resources[3],
+            }
+        )
+
     small_duplex = _benchmark_provider_duplex(
         asr=normal_asr,
         model_id=_SMALL_ID,
@@ -553,8 +580,8 @@ def run(output_path: Path) -> dict[str, Any]:
         tts=tts,
         source_pcm=source_pcm,
         device=device,
+        on_complete=capture_normal_runtime,
     )
-    final_resources = _resource_sample()
     payload = _build_payload(
         generated_at_unix_ns=time.time_ns(),
         environment={
@@ -571,12 +598,7 @@ def run(output_path: Path) -> dict[str, Any]:
         voice_profiles=voice_profiles,
         quality_run=quality_run,
         duplex_candidates=(small_duplex, large_duplex),
-        normal_runtime={
-            "selected_asr": _SMALL_ID,
-            "actual_device": normal_asr.actual_device,
-            "resident_model_id": normal_asr.resident_model_id,
-            "vram_mib_after": final_resources[3],
-        },
+        normal_runtime=normal_runtime,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(

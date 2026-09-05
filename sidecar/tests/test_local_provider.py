@@ -60,6 +60,9 @@ def run(coroutine):
 
 
 class FakeAsr:
+    def close(self) -> None:
+        pass
+
     actual_device = "cuda"
     degraded = False
     unavailable = False
@@ -101,6 +104,9 @@ class FakeAsr:
 
 
 class FakeTranslator:
+    def close(self) -> None:
+        pass
+
     model_path = "/models/nllb"
     actual_device = "cuda"
     unavailable = False
@@ -143,6 +149,9 @@ class FakeTranslator:
 
 
 class FakeTts:
+    def close(self) -> None:
+        pass
+
     actual_device = "cpu"
     unavailable = False
 
@@ -318,6 +327,65 @@ def build_provider(
         effective_translator,
         effective_tts,
     )
+
+
+def test_shutdown_retries_only_failed_model_closes() -> None:
+    async def scenario():
+        provider, asr, translator, tts = build_provider()
+        calls = []
+        fail = True
+
+        def close_asr():
+            calls.append("asr")
+            if fail:
+                raise RuntimeError("synthetic private model error")
+
+        asr.close = close_asr
+        translator.close = lambda: calls.append("mt")
+        tts.close = lambda: calls.append("tts")
+        with pytest.raises(RuntimeError, match=r"^local_model_cleanup_failed$"):
+            await provider.shutdown()
+        assert calls == ["asr", "mt", "tts"]
+        fail = False
+        await asyncio.gather(provider.shutdown(), provider.shutdown())
+        await provider.shutdown()
+        assert calls == ["asr", "mt", "tts", "asr"]
+
+    run(scenario())
+
+
+def test_cancelled_shutdown_drains_native_work_before_closing_models() -> None:
+    async def scenario():
+        provider, asr, translator, tts = build_provider()
+        draining = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        real_shutdown = provider._scheduler.shutdown
+
+        async def shutdown_scheduler():
+            draining.set()
+            await release.wait()
+            await real_shutdown()
+            calls.append("drained")
+
+        provider._scheduler.shutdown = shutdown_scheduler
+        asr.close = lambda: calls.append("asr")
+        translator.close = lambda: calls.append("mt")
+        tts.close = lambda: calls.append("tts")
+        stopping = asyncio.create_task(provider.shutdown())
+        await draining.wait()
+        for _ in range(3):
+            stopping.cancel()
+            await asyncio.sleep(0)
+            assert not stopping.done()
+            assert not calls
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        await provider.shutdown()
+        assert calls == ["drained", "asr", "mt", "tts"]
+
+    run(scenario())
 
 
 def test_provider_marks_voiced_eou_tail_as_tts_continuation() -> None:
@@ -2339,7 +2407,7 @@ def test_terminal_id_capacity_fails_closed_without_eviction(
     async def scenario() -> None:
         monkeypatch.setattr(
             local_provider_module,
-            "_MAX_TERMINAL_IDS",
+            "MAX_TERMINAL_UTTERANCES_PER_SESSION",
             2,
         )
         provider, _, _, _ = build_provider()
@@ -2396,7 +2464,7 @@ def test_terminal_capacity_cancels_other_active_inference(
     async def scenario() -> None:
         monkeypatch.setattr(
             local_provider_module,
-            "_MAX_TERMINAL_IDS",
+            "MAX_TERMINAL_UTTERANCES_PER_SESSION",
             1,
         )
         started = ThreadEvent()

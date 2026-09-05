@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import weakref
 from collections.abc import Callable, Iterator
-from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -19,6 +19,8 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
+
+from .model_lease import VerifiedModelSource
 
 _ALLOWED_SAMPLE_RATES = {16_000, 24_000, 48_000}
 _ALLOWED_FRAME_DURATIONS_MS = {20, 40, 60, 80, 100}
@@ -79,7 +81,7 @@ class PiperVoiceRegistry:
 
     def __init__(
         self,
-        voice_paths: dict[tuple[Language, VoiceGender], Path],
+        voice_paths: dict[tuple[Language, VoiceGender], VerifiedModelSource],
         *,
         voice_factory: Callable[..., Any] | None = None,
         load_lock: Any | None = None,
@@ -88,6 +90,13 @@ class PiperVoiceRegistry:
         self._voice_factory = voice_factory
         self._load_lock = load_lock or Lock()
         self._voices: dict[tuple[Language, VoiceGender], Any] = {}
+        self._closed = False
+
+    def close(self) -> None:
+        with self._load_lock:
+            self._closed = True
+            # Retained voices own their snapshots through their finalizers.
+            self._voices.clear()
 
     def prepare(self) -> None:
         """Load every approved local voice without synthesizing speech."""
@@ -110,33 +119,38 @@ class PiperVoiceRegistry:
             raise TtsUnsupported("voice profile override is unsupported")
         key = (voice_profile.language, voice_profile.gender)
         with self._load_lock:
+            if self._closed:
+                raise TtsUnavailable(_PIPER_VOICE_UNAVAILABLE_MESSAGE)
             loaded = self._voices.get(key)
             if loaded is not None:
                 return loaded
-            path = self._voice_paths.get(key)
-            if path is None:
-                raise TtsUnavailable(_PIPER_VOICE_UNAVAILABLE_MESSAGE)
-            config_path = path.with_suffix(".onnx.json")
-            if (
-                not path.is_absolute()
-                or not path.is_file()
-                or not config_path.is_file()
-            ):
+            source = self._voice_paths.get(key)
+            if not isinstance(source, VerifiedModelSource):
                 raise TtsUnavailable(_PIPER_VOICE_UNAVAILABLE_MESSAGE)
             os.environ.update(_OFFLINE_ENV)
             _suppress_piper_content_logs()
+            lease = None
             try:
                 factory = self._voice_factory
                 if factory is None:
                     from piper import PiperVoice
 
                     factory = PiperVoice.load
+                lease = source.acquire()
+                model_name = next(
+                    name for name in lease.names if name.endswith(".onnx")
+                )
                 voice = factory(
-                    str(path),
-                    config_path=str(config_path),
+                    lease.path(model_name),
+                    config_path=lease.path(f"{model_name}.json"),
                     use_cuda=False,
                 )
-            except Exception:
+                weakref.finalize(getattr(voice, "session", voice), lease.close)
+            except BaseException as error:
+                if lease is not None:
+                    lease.close()
+                if not isinstance(error, Exception):
+                    raise
                 raise TtsUnavailable(_PIPER_VOICE_UNAVAILABLE_MESSAGE) from None
             self._voices[key] = voice
             return voice
@@ -153,17 +167,11 @@ class PiperVoiceRegistry:
             return ModelState.FAILED
         key = (voice_profile.language, voice_profile.gender)
         with self._load_lock:
+            if self._closed:
+                return ModelState.FAILED
             if key in self._voices:
                 return ModelState.READY
-            path = self._voice_paths.get(key)
-            if path is None:
-                return ModelState.FAILED
-            config_path = path.with_suffix(".onnx.json")
-            if (
-                not path.is_absolute()
-                or not path.is_file()
-                or not config_path.is_file()
-            ):
+            if not isinstance(self._voice_paths.get(key), VerifiedModelSource):
                 return ModelState.FAILED
             return ModelState.NOT_LOADED
 
@@ -179,6 +187,13 @@ class PiperTts:
     ) -> None:
         self._registry = registry
         self._resampler_factory = resampler_factory
+
+    @property
+    def unavailable(self) -> bool:
+        return self._registry._closed
+
+    def close(self) -> None:
+        self._registry.close()
 
     def model_state(
         self,

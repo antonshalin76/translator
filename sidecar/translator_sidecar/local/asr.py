@@ -6,7 +6,6 @@ import gc
 import os
 import weakref
 from collections.abc import Callable
-from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -15,6 +14,7 @@ import numpy as np
 from translator_sidecar.provider_contract import Language, TranslationMode
 
 from .cuda_runtime import configure_cuda_runtime
+from .model_lease import VerifiedModelLease, VerifiedModelSource
 
 _BEAM_SIZE = {
     TranslationMode.QUALITY_FIRST: 5,
@@ -75,7 +75,7 @@ class AsrModelManager:
         self,
         *,
         selected_id: str,
-        model_paths: dict[str, Path],
+        model_paths: dict[str, VerifiedModelSource],
         device: str,
         model_factory: Callable[..., Any] | None = None,
         release_cuda: Callable[[], None] | None = None,
@@ -89,6 +89,8 @@ class AsrModelManager:
         self._release_cuda = release_cuda or _default_release_cuda
         self._admission_lock = admission_lock or Lock()
         self._model: Any | None = None
+        self._lease: VerifiedModelLease | None = None
+        self._retired_model_ref: Callable[[], Any | None] | None = None
         self._resident_model_id: str | None = None
         self._residency_generation = 0
         self._active_call_count = 0
@@ -130,6 +132,12 @@ class AsrModelManager:
     def release(self) -> bool:
         with self._admission_lock:
             return self._drop_resident(invalidate_without_replacement=False)
+
+    def close(self) -> None:
+        with self._admission_lock:
+            self._unavailable = True
+            if not self._drop_resident(invalidate_without_replacement=False):
+                raise AsrUnavailable("local ASR cleanup is incomplete")
 
     def prepare(self) -> None:
         with self._admission_lock:
@@ -198,28 +206,49 @@ class AsrModelManager:
     def _ensure_loaded(self) -> str | None:
         if self._model is not None:
             return None
-        path = self._model_paths.get(self._selected_id)
-        if path is None or not path.is_absolute() or not path.is_dir():
+        source = self._model_paths.get(self._selected_id)
+        if not isinstance(source, VerifiedModelSource):
             return "other"
         os.environ.update(_OFFLINE_ENV)
         compute_type = "float16" if self._actual_device == "cuda" else "int8"
         self._residency_generation += 1
+        lease = None
         try:
             factory = self._model_factory
             if factory is None:
                 from faster_whisper import WhisperModel
 
                 factory = WhisperModel
+            lease = source.acquire()
+            files: dict[str, Any] = lease.files()
+            files["tokenizer.json"] = lease.read_bytes("tokenizer.json")
+            if not files["tokenizer.json"]:
+                raise AsrUnavailable("local ASR tokenizer is empty")
+            # Explicit library defaults: never probe an ambient cache config.
+            files["preprocessor_config.json"] = (
+                lease.read_bytes("preprocessor_config.json")
+                if "preprocessor_config.json" in lease.names
+                else b"{}"
+            )
             model = factory(
-                str(path),
+                lease.identifier,
                 device=self._actual_device,
                 compute_type=compute_type,
                 local_files_only=True,
                 num_workers=1,
+                files=files,
             )
+            weakref.finalize(getattr(model, "model", model), lease.close)
         except Exception as error:
+            if lease is not None:
+                lease.close()
             return _failure_kind(error)
+        except BaseException:
+            if lease is not None:
+                lease.close()
+            raise
         self._model = model
+        self._lease = lease
         self._resident_model_id = self._selected_id
         return None
 
@@ -271,22 +300,30 @@ class AsrModelManager:
         return False
 
     def _drop_resident(self, *, invalidate_without_replacement: bool) -> bool:
+        if self._retired_model_ref is not None:
+            if self._retired_model_ref() is not None:
+                return False
+            self._retired_model_ref = None
         model = self._model
         had_resident = model is not None
         model_ref: Callable[[], Any | None] | None = None
         cleanup_ok = True
         if model is not None:
+            native_model = getattr(model, "model", model)
             try:
-                model_ref = weakref.ref(model)
+                model_ref = weakref.ref(native_model)
             except TypeError:
                 model_ref = None
+            unload_model = None
             try:
-                native_model = getattr(model, "model", None)
                 unload_model = getattr(native_model, "unload_model", None)
                 if unload_model is not None:
                     unload_model()
             except Exception:
-                cleanup_ok = False
+                self._unavailable = True
+                return False
+            del unload_model
+            del native_model
         self._model = None
         self._resident_model_id = None
         del model
@@ -300,6 +337,10 @@ class AsrModelManager:
             self._residency_generation += 1
         if model_ref is not None and model_ref() is not None:
             cleanup_ok = False
+            self._retired_model_ref = model_ref
+        elif self._lease is not None:
+            self._lease.close()
+            self._lease = None
         if not cleanup_ok:
             self._unavailable = True
         return cleanup_ok

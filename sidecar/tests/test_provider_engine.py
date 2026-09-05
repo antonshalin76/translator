@@ -2,6 +2,12 @@ from itertools import pairwise
 from uuid import UUID, uuid4
 
 import pytest
+from engine_runtime_provider import (
+    MockInjection,
+    ProviderEngine,
+    ProviderProtocolError,
+    mock_transform_pcm,
+)
 
 from translator_sidecar.provider_contract import (
     AudioDirection,
@@ -31,12 +37,6 @@ from translator_sidecar.provider_contract import (
     VoiceEngine,
     VoiceGender,
     VoiceProfile,
-)
-from translator_sidecar.provider_engine import (
-    MockInjection,
-    ProviderEngine,
-    ProviderProtocolError,
-    mock_transform_pcm,
 )
 
 

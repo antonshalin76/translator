@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 from threading import Barrier, Thread
 from typing import Any
@@ -18,9 +19,9 @@ SIDECAR = ROOT / "sidecar"
 if str(SIDECAR) not in sys.path:
     sys.path.insert(0, str(SIDECAR))
 
+from translator_sidecar.local.model_lease import VerifiedModelSource  # noqa: E402
 from translator_sidecar.local.model_manifest import (  # noqa: E402
     ManifestError,
-    ModelManifest,
     load_manifest,
 )
 from translator_sidecar.local.tts import (  # noqa: E402
@@ -135,14 +136,6 @@ def request(config: dict[str, Any]) -> OpenProviderSession:
     )
 
 
-def primary_model_file(manifest: ModelManifest, model_id: str) -> Path:
-    model = manifest.models[model_id]
-    for model_file in model.files:
-        if model_file.path.endswith(".onnx"):
-            return manifest.resolve_runtime_file(model.id, model_file.path)
-    raise ManifestError("runtime model file is missing")
-
-
 def voice_profile(language: Language) -> VoiceProfile:
     return VoiceProfile(
         language=language,
@@ -154,11 +147,15 @@ def voice_profile(language: Language) -> VoiceProfile:
 def build_tts() -> PiperTts:
     manifest = load_manifest(MANIFEST_PATH)
     voice_paths = {
-        profile: primary_model_file(manifest, model_id)
+        profile: VerifiedModelSource(manifest, model_id)
         for profile, model_id in VOICE_MODELS.items()
     }
     registry = PiperVoiceRegistry(voice_paths)
-    return PiperTts(registry)
+    try:
+        return PiperTts(registry)
+    except BaseException:
+        registry.close()
+        raise
 
 
 def synthesize_frames(tts: PiperTts, config: dict[str, Any]) -> list[bytes]:
@@ -389,11 +386,11 @@ def build_comparison(api_key: str) -> dict[str, Any]:
     if not api_key:
         return blocked_comparison("blocked_missing_credential", "provider_auth_failed")
     try:
-        tts = build_tts()
-        frames = {
-            name: synthesize_frames(tts, config)
-            for name, config in DIRECTION_CONFIGS.items()
-        }
+        with closing(build_tts()) as tts:
+            frames = {
+                name: synthesize_frames(tts, config)
+                for name, config in DIRECTION_CONFIGS.items()
+            }
     except (ManifestError, TtsUnavailable, TtsUnsupported):
         return blocked_comparison(
             "blocked_synthetic_speech_unavailable",

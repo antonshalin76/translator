@@ -108,7 +108,7 @@
     },
     "pytest": {
       "external_skip_count": 1,
-      "file_count": 22,
+      "file_count": 25,
       "files": [
         "sidecar/tests/test_asr_quality.py",
         "sidecar/tests/test_cuda_runtime.py",
@@ -120,20 +120,23 @@
         "sidecar/tests/test_local_runtime.py",
         "sidecar/tests/test_local_tts.py",
         "sidecar/tests/test_model_fetch.py",
+        "sidecar/tests/test_model_lease.py",
         "sidecar/tests/test_model_manifest.py",
         "sidecar/tests/test_openai_provider.py",
         "sidecar/tests/test_openai_runtime.py",
         "sidecar/tests/test_podcast_quality.py",
         "sidecar/tests/test_provider_contract.py",
         "sidecar/tests/test_provider_engine.py",
+        "sidecar/tests/test_provider_registry.py",
         "sidecar/tests/test_quality_model_matrix.py",
+        "sidecar/tests/test_secure_ipc.py",
         "sidecar/tests/test_source_commit.py",
         "sidecar/tests/test_task6_benchmark.py",
         "sidecar/tests/test_task7_benchmark.py",
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 633,
+      "node_count": 732,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -174,6 +177,12 @@
         {
           "file": "sidecar/tests/test_asr_quality.py",
           "id": "sidecar/tests/test_asr_quality.py::test_faster_whisper_ct2_probe_uses_candidate_repository_and_mode_beam",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_asr_quality.py",
+          "id": "sidecar/tests/test_asr_quality.py::test_local_asr_probe_passes_lazy_verified_sources_and_terminally_closes",
           "reason": "",
           "status": "deterministic"
         },
@@ -317,6 +326,12 @@
         },
         {
           "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_bootstrap_cancellation_reclaims_completed_model_load",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
           "id": "sidecar/tests/test_grpc_server.py::test_cleanup_releases_session_even_when_close_raises",
           "reason": "",
           "status": "deterministic"
@@ -342,6 +357,12 @@
         {
           "file": "sidecar/tests/test_grpc_server.py",
           "id": "sidecar/tests/test_grpc_server.py::test_delayed_frame_completes_without_a_follow_up_request",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_empty_provider_registry_fails_closed_then_accepts_installed_provider",
           "reason": "",
           "status": "deterministic"
         },
@@ -437,6 +458,18 @@
         },
         {
           "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_reselecting_a_leased_provider_does_not_shutdown_the_current_backend",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_retirement_failure_after_transfer_does_not_double_close_new_provider",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
           "id": "sidecar/tests/test_grpc_server.py::test_runtime_debug_disable_suppresses_text_events",
           "reason": "",
           "status": "deterministic"
@@ -492,6 +525,54 @@
         {
           "file": "sidecar/tests/test_grpc_server.py",
           "id": "sidecar/tests/test_grpc_server.py::test_server_stop_defers_repeated_cancellation_until_stop_finishes",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_shutdown_attempts_both_providers_when_local_shutdown_fails",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_startup_failure_rolls_back_native_server_and_parent_fd[bind_raise]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_startup_failure_rolls_back_native_server_and_parent_fd[bind_zero]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_startup_failure_rolls_back_native_server_and_parent_fd[chmod]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_startup_failure_rolls_back_native_server_and_parent_fd[constructor]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_startup_failure_rolls_back_native_server_and_parent_fd[registration]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_startup_failure_rolls_back_native_server_and_parent_fd[start]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_startup_rollback_defers_repeated_cancellation_until_native_stop",
           "reason": "",
           "status": "deterministic"
         },
@@ -989,6 +1070,12 @@
         },
         {
           "file": "sidecar/tests/test_local_provider.py",
+          "id": "sidecar/tests/test_local_provider.py::test_cancelled_shutdown_drains_native_work_before_closing_models",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_provider.py",
           "id": "sidecar/tests/test_local_provider.py::test_close_purges_session_and_prevents_late_native_events",
           "reason": "",
           "status": "deterministic"
@@ -1182,6 +1269,12 @@
         {
           "file": "sidecar/tests/test_local_provider.py",
           "id": "sidecar/tests/test_local_provider.py::test_sequential_utterances_reset_audio_sequence",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_provider.py",
+          "id": "sidecar/tests/test_local_provider.py::test_shutdown_retries_only_failed_model_closes",
           "reason": "",
           "status": "deterministic"
         },
@@ -1403,6 +1496,18 @@
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_bootstrap_retains_failed_native_cleanup_for_unavailable_provider_shutdown[asr]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_bootstrap_retains_failed_native_cleanup_for_unavailable_provider_shutdown[smoke]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
           "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_fails_safely_after_cuda_and_cpu_mt_load",
           "reason": "",
           "status": "deterministic"
@@ -1415,7 +1520,7 @@
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_resolves_all_files_before_adapters",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_requires_all_selected_manifest_entries_before_adapters",
           "reason": "",
           "status": "deterministic"
         },
@@ -2100,6 +2205,174 @@
         {
           "file": "sidecar/tests/test_model_fetch.py",
           "id": "sidecar/tests/test_model_fetch.py::test_huggingface_cache_route_uses_nested_source_path_not_local_path",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_adapter_failed_constructor_releases_snapshots[asr]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_adapter_failed_constructor_releases_snapshots[mt]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_adapter_failed_constructor_releases_snapshots[tokenizer]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_adapter_failed_constructor_releases_snapshots[tts]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_adapters_100_lifecycles_release_all_snapshot_and_reader_descriptors",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_asr_failed_native_unload_retains_owner_for_retry",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_asr_retained_inner_native_keeps_snapshot_and_blocks_release",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_installed_sentencepiece_loads_verified_model_proto",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_installed_whisper_consumes_verified_mapping_with_library_defaults",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_mt_close_retries_native_unload_and_retains_owner_on_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_mt_tokenizer_failure_transfers_failed_native_cleanup_to_owner",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_piper_retained_inner_session_keeps_snapshot_after_voice_destruction",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_retained_native_translator_keeps_snapshot_alive_until_destroyed",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_retained_native_voice_keeps_sealed_paths_alive_until_destroyed",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_runtime_admission_closes_descriptor_when_path_disappears_after_open[False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_runtime_admission_closes_descriptor_when_path_disappears_after_open[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_100_lifecycles_and_closed_lease_cannot_reuse_fd",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_fdopen_failure_closes_new_memfd",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_readers_have_independent_offsets_and_cannot_resize",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_rejects_in_place_mutation_during_acquisition",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_rejects_partial_set_and_closes_all_descriptors",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_remains_verified_after_cache_mutation[overwrite]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_remains_verified_after_cache_mutation[replace]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_remains_verified_after_cache_mutation[unlink]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_system_failure_closes_all_resources[read]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_system_failure_closes_all_resources[seal]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_verifies_sealed_destination_after_preseal_tampering",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_whisper_mapping_mutation_and_ambient_config_cannot_reopen_cache",
           "reason": "",
           "status": "deterministic"
         },
@@ -2903,25 +3176,247 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_openai_runtime_assigns_pending_audio_sequence_at_publication_time",
+          "id": "sidecar/tests/test_openai_runtime.py::test_cancel_reaps_a_before_b_and_late_a_cannot_be_relabeled",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_openai_runtime_drains_close_until_session_closed_event",
+          "id": "sidecar/tests/test_openai_runtime.py::test_cancellation_during_post_connect_handshake_closes_socket",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_openai_runtime_drops_overlapping_utterance_without_reassigning_audio",
+          "id": "sidecar/tests/test_openai_runtime.py::test_cancellation_during_retirement_still_aborts_and_releases_generation",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_openai_runtime_resamples_audio_and_suppresses_debug_text",
+          "id": "sidecar/tests/test_openai_runtime.py::test_capture_sequence_is_monotonic_across_utterances_and_vad_gaps",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_close_drains_audio_and_requires_server_terminal",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_concurrent_duplicate_open_reserves_before_connect_100_iterations",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[[]]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.closed\"}]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.input_transcript.delta\", \"event_id\": \"event_synthetic\", \"delta\": \"unconfigured\"}]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.output_audio.delta\", \"event_id\": \"event_synthetic\", \"delta\": \"!\"}]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.output_audio.delta\", \"event_id\": \"event_synthetic\", \"delta\": \"AA==\", \"sample_rate\": 16000}]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.output_audio.delta\", \"event_id\": \"event_synthetic\", \"delta\": 1}]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_close_and_abort_retain_owner_until_shutdown_retry[False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_close_and_abort_retain_owner_until_shutdown_retry[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_open_100_iterations_release_every_resource[handshake]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_open_100_iterations_release_every_resource[insert]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_open_100_iterations_release_every_resource[send]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_open_100_iterations_release_every_resource[task]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_open_disposal_is_owned_and_shutdown_retries_without_publication",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_open_quarantine_does_not_interrupt_existing_healthy_session",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates2]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates3]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates4]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates5]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates6]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_no_close_ack_has_bounded_failure_not_success",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_noncommitting_publication_fails_logical_session_and_releases_generation",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_real_async_transport_failed_handshake_releases_sockets_and_fds",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_replay_split_audio_debug_error_unknown_and_partial_tail",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_shutdown_cancels_pending_open_without_publishing_ready",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_supersession_retires_generation_before_new_input",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_identity_capacity_fails_closed_without_eviction_or_socket_mutation[False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_identity_capacity_fails_closed_without_eviction_or_socket_mutation[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_uuid_replay_with_new_capture_sequence_is_rejected[False-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_uuid_replay_with_new_capture_sequence_is_rejected[False-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_uuid_replay_with_new_capture_sequence_is_rejected[True-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_uuid_replay_with_new_capture_sequence_is_rejected[True-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_thousand_terminal_generations_leave_no_per_utterance_state",
           "reason": "",
           "status": "deterministic"
         },
@@ -3172,6 +3667,30 @@
           "status": "deterministic"
         },
         {
+          "file": "sidecar/tests/test_provider_registry.py",
+          "id": "sidecar/tests/test_provider_registry.py::test_concurrent_shutdown_retains_only_failed_cleanup_for_retry",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_registry.py",
+          "id": "sidecar/tests/test_provider_registry.py::test_lease_pins_retired_backend_and_release_is_idempotent[local]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_registry.py",
+          "id": "sidecar/tests/test_provider_registry.py::test_lease_pins_retired_backend_and_release_is_idempotent[openai]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_registry.py",
+          "id": "sidecar/tests/test_provider_registry.py::test_repeated_cancellation_joins_retirement_and_rejects_resurrection",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
           "file": "sidecar/tests/test_quality_model_matrix.py",
           "id": "sidecar/tests/test_quality_model_matrix.py::test_candidate_report_is_public_and_does_not_embed_local_chat_export",
           "reason": "",
@@ -3204,6 +3723,42 @@
         {
           "file": "sidecar/tests/test_quality_model_matrix.py",
           "id": "sidecar/tests/test_quality_model_matrix.py::test_registry_report_serializes_tuple_fields_as_string_lists",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_secure_ipc.py",
+          "id": "sidecar/tests/test_secure_ipc.py::test_invalid_private_path_fails_without_descriptor_leak[ancestor_link]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_secure_ipc.py",
+          "id": "sidecar/tests/test_secure_ipc.py::test_invalid_private_path_fails_without_descriptor_leak[file]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_secure_ipc.py",
+          "id": "sidecar/tests/test_secure_ipc.py::test_invalid_private_path_fails_without_descriptor_leak[leaf_link]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_secure_ipc.py",
+          "id": "sidecar/tests/test_secure_ipc.py::test_invalid_private_path_fails_without_descriptor_leak[missing]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_secure_ipc.py",
+          "id": "sidecar/tests/test_secure_ipc.py::test_invalid_private_path_fails_without_descriptor_leak[mode]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_secure_ipc.py",
+          "id": "sidecar/tests/test_secure_ipc.py::test_private_parent_remains_pinned_after_path_replacement",
           "reason": "",
           "status": "deterministic"
         },
@@ -3401,6 +3956,12 @@
         },
         {
           "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_live_duplex_captures_residency_before_provider_shutdown",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
           "id": "sidecar/tests/test_task6_benchmark.py::test_live_never_creates_normal_asr_when_quality_release_fails",
           "reason": "",
           "status": "deterministic"
@@ -3426,6 +3987,30 @@
         {
           "file": "sidecar/tests/test_task6_benchmark.py",
           "id": "sidecar/tests/test_task6_benchmark.py::test_live_resource_telemetry_reuses_primed_process",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_live_run_owns_model_lifetimes_and_never_reuses_closed_adapters[None]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_live_run_owns_model_lifetimes_and_never_reuses_closed_adapters[duplex]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_live_run_owns_model_lifetimes_and_never_reuses_closed_adapters[quality]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_live_run_owns_model_lifetimes_and_never_reuses_closed_adapters[second-mt]",
           "reason": "",
           "status": "deterministic"
         },
@@ -3743,6 +4328,18 @@
         },
         {
           "file": "sidecar/tests/test_task7_e2e.py",
+          "id": "sidecar/tests/test_task7_e2e.py::test_local_fixture_builder_uses_sources_and_closes_voices_on_every_exit[False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task7_e2e.py",
+          "id": "sidecar/tests/test_task7_e2e.py::test_local_fixture_builder_uses_sources_and_closes_voices_on_every_exit[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task7_e2e.py",
           "id": "sidecar/tests/test_task7_e2e.py::test_pair_adapter_executes_one_simultaneous_pair_for_two_direction_calls",
           "reason": "",
           "status": "deterministic"
@@ -3973,7 +4570,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 381,
+      "node_count": 383,
       "nodes": [
         {
           "file": "crates/translator-audio/src/lib.rs",
@@ -5077,6 +5674,11 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_token.rs",
+          "id": "translator-daemon::test::control_token::runtime_ancestor_symlink_is_rejected_before_creating_state",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_token.rs",
           "id": "translator-daemon::test::control_token::runtime_parent_symlink_is_rejected_without_touching_target",
           "status": "deterministic"
         },
@@ -5637,6 +6239,11 @@
         },
         {
           "file": "crates/translator-daemon/tests/stale_sidecar_socket.rs",
+          "id": "translator-daemon::test::stale_sidecar_socket::socket_ancestor_symlink_is_rejected_without_unlinking",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/stale_sidecar_socket.rs",
           "id": "translator-daemon::test::stale_sidecar_socket::unsafe_socket_and_parent_inodes_fail_closed",
           "status": "deterministic"
         },
@@ -5900,7 +6507,7 @@
         "tests/test_task9_desktop_run_mode.py",
         "tests/test_translator_ui_compact_layout.py"
       ],
-      "node_count": 267,
+      "node_count": 270,
       "nodes": [
         {
           "file": "tests/test_ci_contract.py",
@@ -7254,13 +7861,31 @@
         },
         {
           "file": "tests/test_task11_openai_adapter_preflight.py",
+          "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_synthetic_speech_comparison_closes_tts_before_network_or_on_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_task11_openai_adapter_preflight.py",
           "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_synthetic_speech_comparison_report_is_privacy_safe",
           "reason": "missing_external_prerequisite:private_human_evidence",
           "status": "external_skip"
         },
         {
           "file": "tests/test_task11_openai_adapter_preflight.py",
+          "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_synthetic_speech_construction_failure_closes_registry",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_task11_openai_adapter_preflight.py",
           "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_synthetic_speech_smoke_script_is_executable_and_privacy_bounded",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_task11_openai_adapter_preflight.py",
+          "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_synthetic_speech_uses_verified_sources",
           "reason": "",
           "status": "deterministic"
         },

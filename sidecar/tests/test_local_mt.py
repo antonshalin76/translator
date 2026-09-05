@@ -6,6 +6,7 @@ import traceback
 from pathlib import Path
 
 import pytest
+from test_model_lease import model_source
 
 from translator_sidecar.local.mt import (
     LocalTranslationError,
@@ -352,14 +353,16 @@ def test_nllb_factory_receives_offline_local_runtime_configuration(
         calls.append((path, kwargs))
         return FakeCTranslate2()
 
-    def tokenizer_factory(path: str) -> FakeSentencePiece:
-        calls.append((path, {}))
+    def tokenizer_factory(payload: bytes) -> FakeSentencePiece:
+        calls.append((payload, {}))
         return FakeSentencePiece()
 
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     translator = NllbTranslator.load(
-        tmp_path,
+        model_source(
+            tmp_path, {"model.bin": b"model", "sentencepiece.bpe.model": b"sp"}
+        ),
         device=device,
         translator_factory=translator_factory,
         tokenizer_factory=tokenizer_factory,
@@ -368,17 +371,21 @@ def test_nllb_factory_receives_offline_local_runtime_configuration(
     assert isinstance(translator, NllbTranslator)
     assert calls == [
         (
-            str(tmp_path),
+            str(translator.model_path),
             {
                 "device": device,
                 "compute_type": compute_type,
                 "inter_threads": 1,
+                "files": calls[0][1]["files"],
             },
         ),
-        (str(tmp_path / "sentencepiece.bpe.model"), {}),
+        (b"sp", {}),
     ]
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+    assert str(translator.model_path).startswith("/proc/self/fd/")
+    assert calls[0][1]["files"]["model.bin"].read() == b"model"
+    translator.close()
 
 
 @pytest.mark.parametrize("missing_module", ["ctranslate2", "sentencepiece"])
@@ -412,7 +419,9 @@ def test_nllb_load_sanitizes_missing_dependency_traceback(
 
     with pytest.raises(LocalTranslationError, match="could not be loaded") as raised:
         NllbTranslator.load(
-            tmp_path,
+            model_source(
+                tmp_path, {"model.bin": b"model", "sentencepiece.bpe.model": b"sp"}
+            ),
             device="cpu",
             translator_factory=translator_factory,
             tokenizer_factory=tokenizer_factory,

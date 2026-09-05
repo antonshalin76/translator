@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import os
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +16,12 @@ from translator_sidecar.local.asr import (
 from translator_sidecar.local.cuda_runtime import configure_cuda_runtime
 from translator_sidecar.local.inference_scheduler import InferenceScheduler
 from translator_sidecar.local.local_provider import LocalProvider
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.local.model_manifest import (
-    ModelManifest,
     load_manifest,
 )
 from translator_sidecar.local.mt import (
+    LocalTranslationCleanupPending,
     LocalTranslationError,
     NllbTranslator,
 )
@@ -62,6 +64,10 @@ class _UnavailableAsr:
     resident_model_id = None
 
     @staticmethod
+    def close() -> None:
+        pass
+
+    @staticmethod
     def transcribe(*args: Any, **kwargs: Any) -> str:
         raise AsrUnavailable("local ASR is unavailable")
 
@@ -69,6 +75,10 @@ class _UnavailableAsr:
 class _UnavailableTranslator:
     unavailable = True
     model_state = ModelState.FAILED
+
+    @staticmethod
+    def close() -> None:
+        pass
 
     @staticmethod
     def translate(*args: Any, **kwargs: Any) -> str:
@@ -82,6 +92,10 @@ class _UnavailableTranslator:
 
 class _UnavailableTts:
     unavailable = True
+
+    @staticmethod
+    def close() -> None:
+        pass
 
     @staticmethod
     def model_state(*args: Any, **kwargs: Any) -> ModelState:
@@ -106,42 +120,15 @@ def _default_manifest_path() -> Path:
     return Path(__file__).resolve().parents[3] / "models" / "manifest.json"
 
 
-def _model_directory(manifest: ModelManifest, model_id: str) -> Path:
-    model = manifest.models[model_id]
-    if not model.files:
-        raise ValueError("model has no declared runtime files")
-    for model_file in model.files:
-        manifest.resolve_runtime_file(model_id, model_file.path)
-    return model.cache_path
-
-
-def _primary_model_file(manifest: ModelManifest, model_id: str) -> Path:
-    model = manifest.models[model_id]
-    primary = next(
-        (
-            model_file
-            for model_file in model.files
-            if not model_file.path.endswith(".json")
-        ),
-        None,
-    )
-    if primary is None:
-        raise ValueError("model has no primary runtime file")
-    return model.cache_path / primary.path
-
-
 def _release_translator(translator: NllbTranslator) -> None:
-    backend = getattr(translator, "_translator", None)
-    unload_model = getattr(backend, "unload_model", None)
-    if callable(unload_model):
-        try:
-            unload_model()
-        except Exception:
-            pass
+    try:
+        translator.close()
+    except Exception:
+        raise LocalTranslationCleanupPending(translator) from None
 
 
 def _load_verified_translator(
-    model_path: Path,
+    model_path: VerifiedModelSource,
     *,
     device: str,
 ) -> NllbTranslator:
@@ -170,11 +157,13 @@ def _unavailable_provider(
     *,
     now_ns: Callable[[], int],
     asr_model_id: str,
+    failed_components: dict[str, Any] | None = None,
 ) -> LocalProvider:
+    failed = failed_components or {}
     return LocalProvider(
-        asr=_UnavailableAsr(),
-        translator=_UnavailableTranslator(),
-        tts=_UnavailableTts(),
+        asr=failed.get("asr", _UnavailableAsr()),
+        translator=failed.get("translator", _UnavailableTranslator()),
+        tts=failed.get("tts", _UnavailableTts()),
         scheduler=InferenceScheduler(),
         now_ns=now_ns,
         asr_model_id=asr_model_id,
@@ -182,6 +171,15 @@ def _unavailable_provider(
         tts_model_id=_TTS_MODEL_ID,
         mt_device=ComputeDevice.CPU,
     )
+
+
+def _close_bootstrap_component(
+    name: str, component: Any, failed: dict[str, Any]
+) -> None:
+    try:
+        component.close()
+    except Exception:
+        failed[name] = component
 
 
 def build_unavailable_local_provider(
@@ -230,12 +228,15 @@ def build_local_provider(
             _MT_MODEL_ID,
             *_VOICE_MODELS.values(),
         )
-        model_directories = {
-            model_id: _model_directory(manifest, model_id)
+        for model_id in required_model_ids:
+            if not manifest.models[model_id].files:
+                raise ValueError("model has no declared runtime files")
+        model_sources = {
+            model_id: VerifiedModelSource(manifest, model_id)
             for model_id in required_model_ids
         }
         voice_paths = {
-            profile: _primary_model_file(manifest, model_id)
+            profile: model_sources[model_id]
             for profile, model_id in _VOICE_MODELS.items()
         }
     except Exception:
@@ -248,8 +249,14 @@ def build_local_provider(
     mt_device = asr_device
     try:
         translator = _load_verified_translator(
-            model_directories[_MT_MODEL_ID],
+            model_sources[_MT_MODEL_ID],
             device=mt_device,
+        )
+    except LocalTranslationCleanupPending as error:
+        return _unavailable_provider(
+            now_ns=now_ns,
+            asr_model_id=selected_asr_id,
+            failed_components={"translator": error.translator},
         )
     except Exception:
         if mt_device != "cuda":
@@ -260,8 +267,14 @@ def build_local_provider(
         mt_device = "cpu"
         try:
             translator = _load_verified_translator(
-                model_directories[_MT_MODEL_ID],
+                model_sources[_MT_MODEL_ID],
                 device=mt_device,
+            )
+        except LocalTranslationCleanupPending as error:
+            return _unavailable_provider(
+                now_ns=now_ns,
+                asr_model_id=selected_asr_id,
+                failed_components={"translator": error.translator},
             )
         except Exception:
             return _unavailable_provider(
@@ -269,27 +282,36 @@ def build_local_provider(
                 asr_model_id=selected_asr_id,
             )
 
+    resources = ExitStack()
+    failed: dict[str, Any] = {}
+    resources.callback(_close_bootstrap_component, "translator", translator, failed)
     try:
         selected_key = _ASR_MODELS[selected_asr_id]
         asr_paths = {
-            selected_key: model_directories[selected_asr_id],
+            selected_key: model_sources[selected_asr_id],
         }
         if selected_key == "large-v3":
-            asr_paths["small"] = model_directories[_DEFAULT_ASR_MODEL_ID]
+            asr_paths["small"] = model_sources[_DEFAULT_ASR_MODEL_ID]
         asr = AsrModelManager(
             selected_id=selected_key,
             model_paths=asr_paths,
             device=asr_device,
         )
+        resources.callback(_close_bootstrap_component, "asr", asr, failed)
         prepare_asr = getattr(asr, "prepare", None)
         if prepare_asr is not None:
             prepare_asr()
         registry = PiperVoiceRegistry(voice_paths)
+        try:
+            tts = PiperTts(registry)
+        except BaseException:
+            registry.close()
+            raise
+        resources.callback(_close_bootstrap_component, "tts", tts, failed)
         prepare_tts = getattr(registry, "prepare", None)
         if prepare_tts is not None:
             prepare_tts()
-        tts = PiperTts(registry)
-        return LocalProvider(
+        provider = LocalProvider(
             asr=asr,
             translator=translator,
             tts=tts,
@@ -300,8 +322,14 @@ def build_local_provider(
             tts_model_id=_TTS_MODEL_ID,
             mt_device=ComputeDevice(mt_device),
         )
+        resources.pop_all()
+        return provider
     except Exception:
+        resources.close()
         return _unavailable_provider(
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
+            failed_components=failed,
         )
+    finally:
+        resources.close()

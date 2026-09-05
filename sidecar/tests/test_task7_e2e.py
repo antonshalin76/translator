@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,7 +35,65 @@ from translator_sidecar.benchmark.task7_e2e import (
     run_live_e2e,
     run_smoke_pairs,
 )
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.provider_contract import TranslationMode
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_local_fixture_builder_uses_sources_and_closes_voices_on_every_exit(
+    tmp_path, monkeypatch, failure
+):
+    manifest = SimpleNamespace(
+        models={
+            model_id: SimpleNamespace(
+                id=model_id,
+                cache_path=tmp_path,
+                files=[SimpleNamespace(path="voice.onnx")],
+            )
+            for model_id in task7_e2e._VOICE_IDS.values()
+        },
+        resolve_runtime_file=lambda *_args: None,
+    )
+    observed = {}
+
+    class Registry:
+        def __init__(self, sources):
+            observed["sources"] = sources
+
+        def close(self):
+            observed["closed"] = True
+
+    class Tts:
+        def __init__(self, registry):
+            pass
+
+        def synthesize_frames(self, *_args, **kwargs):
+            assert observed.get("closed") is not True, "fixture used a closed voice"
+            if failure:
+                raise RuntimeError("synthesis failed")
+            return iter([b"\0\0" * 160])
+
+    monkeypatch.setattr(task7_e2e, "load_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(
+        task7_e2e,
+        "load_quality_corpus",
+        lambda *_args: SimpleNamespace(
+            warmups=[], cases=[SimpleNamespace(ru="fixture", en="fixture")]
+        ),
+    )
+    monkeypatch.setattr(task7_e2e, "PiperVoiceRegistry", Registry)
+    monkeypatch.setattr(task7_e2e, "PiperTts", Tts)
+    if failure:
+        with pytest.raises(RuntimeError, match="synthesis failed"):
+            task7_e2e.build_local_fixtures(tmp_path, tmp_path)
+    else:
+        fixtures, identities = task7_e2e.build_local_fixtures(tmp_path, tmp_path)
+        assert len(fixtures) == len(identities) == 2
+    assert observed.get("closed") is True
+    assert all(
+        isinstance(source, VerifiedModelSource)
+        for source in observed["sources"].values()
+    )
 
 
 def _context(direction: BenchmarkDirection, pair_index: int = 10) -> RunContext:

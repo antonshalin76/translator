@@ -12,13 +12,16 @@ from typing import Any
 import numpy as np
 import pytest
 import soxr
+from test_model_lease import model_source
 
 from translator_sidecar.local.tts import (
     PiperTts,
-    PiperVoiceRegistry,
     TtsOutputLimit,
     TtsUnavailable,
     TtsUnsupported,
+)
+from translator_sidecar.local.tts import (
+    PiperVoiceRegistry as NativeVoiceRegistry,
 )
 from translator_sidecar.provider_contract import (
     Language,
@@ -28,6 +31,20 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
+
+
+def PiperVoiceRegistry(paths, **kwargs):
+    sources = {
+        key: model_source(
+            path.parent,
+            {path.name: b"model", f"{path.name}.json": b"{}"},
+            write=False,
+        )
+        if path.is_absolute()
+        else path
+        for key, path in paths.items()
+    }
+    return NativeVoiceRegistry(sources, **kwargs)
 
 
 class Chunk:
@@ -149,14 +166,14 @@ def test_voice_registry_loads_each_exact_language_gender_preset(
 
     for key, path in paths.items():
         assert registry.get(profile(*key)) is registry.get(profile(*key))
-        assert calls[-1] == (
-            str(path),
-            {
-                "config_path": str(path.with_suffix(".onnx.json")),
-                "use_cuda": False,
-            },
-        )
+        model_path, kwargs = calls[-1]
+        assert model_path.startswith("/proc/self/fd/")
+        assert kwargs["config_path"].startswith("/proc/self/fd/")
+        assert Path(model_path).read_bytes() == path.read_bytes()
+        assert Path(kwargs["config_path"]).read_bytes() == b"{}"
+        assert kwargs["use_cuda"] is False
     assert len(calls) == 4
+    registry.close()
 
 
 def test_voice_registry_prepare_loads_all_presets_without_synthesis(

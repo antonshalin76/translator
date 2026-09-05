@@ -11,8 +11,10 @@ import binascii
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from .provider_contract import (
     SAFE_ERROR_MESSAGES,
@@ -43,6 +45,107 @@ OPENAI_REALTIME_TRANSLATION_ENDPOINT = "wss://api.openai.com/v1/realtime/transla
 OPENAI_PROVIDER_NAME = "openai-realtime-translation"
 _DEFAULT_CREDENTIAL_ENV = "OPENAI_API_KEY"
 _DEFAULT_FRAME_DURATION_MS = 20
+OPENAI_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
+
+
+class _WireModel(BaseModel):
+    model_config = ConfigDict(strict=True, extra="ignore", hide_input_in_errors=True)
+
+
+class _Transcription(_WireModel):
+    model: str
+
+
+class _InputAudio(_WireModel):
+    transcription: _Transcription | None = None
+
+
+class _OutputAudio(_WireModel):
+    language: str | None = None
+
+
+class _SessionAudio(_WireModel):
+    input: _InputAudio | None = None
+    output: _OutputAudio | None = None
+
+
+class TranslationSession(_WireModel):
+    id: str = Field(min_length=1)
+    type: Literal["translation"]
+    model: str
+    expires_at: float = Field(allow_inf_nan=False)
+    audio: _SessionAudio
+
+
+class _EventEnvelope(_WireModel):
+    type: str
+
+
+class TranslationEvent(_EventEnvelope):
+    event_id: str = Field(min_length=1)
+
+
+class TranslationSessionEvent(TranslationEvent):
+    type: Literal["session.created", "session.updated"]
+    session: TranslationSession
+
+
+class TranslationClosed(TranslationEvent):
+    type: Literal["session.closed"]
+
+
+class TranslationDelta(TranslationEvent):
+    type: Literal[
+        "session.output_audio.delta",
+        "session.output_transcript.delta",
+        "session.input_transcript.delta",
+    ]
+    delta: str
+    elapsed_ms: float | None = Field(default=None, allow_inf_nan=False)
+    sample_rate: int | float = Field(default=24000, ge=24000, le=24000)
+    channels: int | float = Field(default=1, ge=1, le=1)
+    format: Literal["pcm16"] = "pcm16"
+
+
+class _WireError(_WireModel):
+    type: str
+    message: str
+    code: str | None = None
+    event_id: str | None = None
+    param: str | None = None
+
+
+class TranslationError(TranslationEvent):
+    type: Literal["error"]
+    error: _WireError
+
+
+_WIRE_EVENT = TypeAdapter(
+    Annotated[
+        TranslationSessionEvent
+        | TranslationClosed
+        | TranslationDelta
+        | TranslationError,
+        Field(discriminator="type"),
+    ]
+)
+_EVENT_TYPES = {
+    "session.created",
+    "session.updated",
+    "session.closed",
+    "error",
+    "session.output_audio.delta",
+    "session.output_transcript.delta",
+    "session.input_transcript.delta",
+}
+
+
+def parse_translation_event(raw: str | bytes) -> TranslationEvent | None:
+    envelope = _EventEnvelope.model_validate_json(raw)
+    if envelope.type not in _EVENT_TYPES:
+        return None
+    return _WIRE_EVENT.validate_json(raw)
+
 
 RealtimeProviderEvent = (
     ProviderAudioDelta | ProviderTranscriptDelta | ProviderTranslationDelta
@@ -117,9 +220,16 @@ def build_session_update_event(
         "type": "session.update",
         "session": {
             "audio": {
+                "input": {
+                    "transcription": (
+                        {"model": OPENAI_TRANSCRIPTION_MODEL}
+                        if request.debug_text_enabled
+                        else None
+                    ),
+                },
                 "output": {
                     "language": request.target_language.value,
-                }
+                },
             }
         },
     }
@@ -171,7 +281,7 @@ class OpenAIRealtimeAdapter:
                 negotiated_input_format=openai_pcm_format(),
                 negotiated_output_format=openai_pcm_format(),
                 capabilities=ProviderCapabilities(
-                    transcript_delta=True,
+                    transcript_delta=request.debug_text_enabled,
                     translation_delta=True,
                     cancellation=True,
                     cloud_egress=True,
@@ -326,6 +436,13 @@ class OpenAIRealtimeAdapter:
 
     def _credential_present(self) -> bool:
         return bool(self._environ.get(self._config.credential_env_name, "").strip())
+
+    def release_session(self, session_id: UUID) -> None:
+        self._event_sequences.pop(session_id, None)
+        for mapping in (self._audio_sequences, self._audio_remainders):
+            for key in tuple(mapping):
+                if key[0] == session_id:
+                    del mapping[key]
 
     @staticmethod
     def _preflight_failure_code(

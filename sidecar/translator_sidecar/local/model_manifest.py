@@ -7,7 +7,8 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -134,21 +135,24 @@ class RuntimeFileOps:
             resolved = path.resolve(strict=True)
             _require_within(resolved, allowed_symlink_root)
             descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
-            final = path.lstat()
-            if (initial.st_dev, initial.st_ino) != (final.st_dev, final.st_ino):
-                os.close(descriptor)
-                raise OSError("runtime symlink changed during open")
         else:
             descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
             resolved = path
-        descriptor_stat = os.fstat(descriptor)
-        resolved_stat = resolved.stat()
-        if not stat.S_ISREG(descriptor_stat.st_mode) or (
-            descriptor_stat.st_dev,
-            descriptor_stat.st_ino,
-        ) != (resolved_stat.st_dev, resolved_stat.st_ino):
+        try:
+            if stat.S_ISLNK(initial.st_mode):
+                final = path.lstat()
+                if (initial.st_dev, initial.st_ino) != (final.st_dev, final.st_ino):
+                    raise OSError("runtime symlink changed during open")
+            descriptor_stat = os.fstat(descriptor)
+            resolved_stat = resolved.stat()
+            if not stat.S_ISREG(descriptor_stat.st_mode) or (
+                descriptor_stat.st_dev,
+                descriptor_stat.st_ino,
+            ) != (resolved_stat.st_dev, resolved_stat.st_ino):
+                raise OSError("runtime file identity changed during open")
+        except BaseException:
             os.close(descriptor)
-            raise OSError("runtime file identity changed during open")
+            raise
         return descriptor, resolved
 
 
@@ -210,8 +214,29 @@ class ModelManifest:
         *,
         filesystem: RuntimeFileOps | None = None,
     ) -> Path:
+        """Inspect cache integrity; native consumers must acquire a model lease."""
+        with self.open_runtime_file(model_id, file_path, filesystem=filesystem) as (
+            descriptor,
+            resolved,
+        ):
+            _, model_file = self.model_file(model_id, file_path)
+            if _sha256_fd(descriptor) != model_file.sha256:
+                raise ManifestError("runtime model file checksum mismatch")
+            return resolved
+
+    @contextmanager
+    def open_runtime_file(
+        self,
+        model_id: str,
+        file_path: str,
+        *,
+        filesystem: RuntimeFileOps | None = None,
+    ) -> Iterator[tuple[int, Path]]:
+        """Admit an opened source for verification, retaining its descriptor."""
         model, model_file = self.model_file(model_id, file_path)
         target = _target_path(model, model_file)
+        if not target.is_absolute():
+            raise ManifestError("runtime model path is not absolute")
         try:
             metadata = target.lstat()
         except OSError as error:
@@ -234,9 +259,7 @@ class ModelManifest:
             descriptor_stat = os.fstat(descriptor)
             if descriptor_stat.st_size != model_file.size_bytes:
                 raise ManifestError("runtime model file size mismatch")
-            if _sha256_fd(descriptor) != model_file.sha256:
-                raise ManifestError("runtime model file checksum mismatch")
-            return resolved
+            yield descriptor, resolved
         except ManifestError:
             raise
         except OSError as error:

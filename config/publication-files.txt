@@ -102,6 +102,7 @@ docs/stabilization/architecture-owner-map.md
 docs/stabilization/defect-register.md
 docs/stabilization/master-bdd.md
 docs/stabilization/stage-a-evidence.md
+docs/stabilization/stage-b1-evidence.md
 models/manifest.json
 proto/translator/provider/v1/provider.proto
 rust-toolchain.toml
@@ -123,6 +124,7 @@ scripts/translator-test-manifest
 scripts/translator-validate
 sidecar/.python-version
 sidecar/pyproject.toml
+sidecar/tests/engine_runtime_provider.py
 sidecar/tests/quality_corpus/task6-v4.json
 sidecar/tests/test_asr_quality.py
 sidecar/tests/test_cuda_runtime.py
@@ -134,13 +136,16 @@ sidecar/tests/test_local_provider.py
 sidecar/tests/test_local_runtime.py
 sidecar/tests/test_local_tts.py
 sidecar/tests/test_model_fetch.py
+sidecar/tests/test_model_lease.py
 sidecar/tests/test_model_manifest.py
 sidecar/tests/test_openai_provider.py
 sidecar/tests/test_openai_runtime.py
 sidecar/tests/test_podcast_quality.py
 sidecar/tests/test_provider_contract.py
 sidecar/tests/test_provider_engine.py
+sidecar/tests/test_provider_registry.py
 sidecar/tests/test_quality_model_matrix.py
+sidecar/tests/test_secure_ipc.py
 sidecar/tests/test_source_commit.py
 sidecar/tests/test_task6_benchmark.py
 sidecar/tests/test_task7_benchmark.py
@@ -157,6 +162,7 @@ sidecar/translator_sidecar/benchmark/task6_live.py
 sidecar/translator_sidecar/benchmark/task7.py
 sidecar/translator_sidecar/benchmark/task7_e2e.py
 sidecar/translator_sidecar/benchmark/task7_live.py
+sidecar/translator_sidecar/cleanup.py
 sidecar/translator_sidecar/generated/__init__.py
 sidecar/translator_sidecar/generated/translator/__init__.py
 sidecar/translator_sidecar/generated/translator/provider/__init__.py
@@ -170,6 +176,7 @@ sidecar/translator_sidecar/local/cuda_runtime.py
 sidecar/translator_sidecar/local/inference_scheduler.py
 sidecar/translator_sidecar/local/local_provider.py
 sidecar/translator_sidecar/local/model_fetch.py
+sidecar/translator_sidecar/local/model_lease.py
 sidecar/translator_sidecar/local/model_manifest.py
 sidecar/translator_sidecar/local/mt.py
 sidecar/translator_sidecar/local/runtime.py
@@ -178,7 +185,8 @@ sidecar/translator_sidecar/local/tts.py
 sidecar/translator_sidecar/openai_provider.py
 sidecar/translator_sidecar/openai_runtime.py
 sidecar/translator_sidecar/provider_contract.py
-sidecar/translator_sidecar/provider_engine.py
+sidecar/translator_sidecar/provider_registry.py
+sidecar/translator_sidecar/secure_ipc.py
 sidecar/uv.lock
 sonar-project.properties
 systemd/translator.service

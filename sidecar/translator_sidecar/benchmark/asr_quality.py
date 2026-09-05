@@ -24,7 +24,8 @@ from translator_sidecar.benchmark.model_matrix import (
 )
 from translator_sidecar.local.asr import AsrModelManager
 from translator_sidecar.local.cuda_runtime import configure_cuda_runtime
-from translator_sidecar.local.model_manifest import ModelManifest, load_manifest
+from translator_sidecar.local.model_lease import VerifiedModelSource
+from translator_sidecar.local.model_manifest import load_manifest
 from translator_sidecar.provider_contract import Language, TranslationMode
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -120,13 +121,6 @@ def _is_cuda_runtime_error(error: Exception) -> bool:
     return any(marker in message for marker in _CUDA_RUNTIME_MARKERS)
 
 
-def _manifest_model_directory(manifest: ModelManifest, model_id: str) -> Path:
-    model = manifest.models[model_id]
-    for model_file in model.files:
-        manifest.resolve_runtime_file(model_id, model_file.path)
-    return model.cache_path
-
-
 class FasterWhisperAsrProbe:
     def __init__(
         self,
@@ -140,10 +134,10 @@ class FasterWhisperAsrProbe:
             raise AsrQualityUnavailable("candidate is not a local faster-whisper model")
         manifest = load_manifest(manifest_path)
         model_paths = {
-            selected_key: _manifest_model_directory(manifest, model_id),
+            selected_key: VerifiedModelSource(manifest, model_id),
         }
         if selected_key == "large-v3":
-            model_paths["small"] = _manifest_model_directory(
+            model_paths["small"] = VerifiedModelSource(
                 manifest,
                 "faster-whisper-small",
             )
@@ -167,7 +161,7 @@ class FasterWhisperAsrProbe:
         )
 
     def release(self) -> None:
-        self._manager.release()
+        self._manager.close()
 
 
 class FasterWhisperCt2AsrProbe:

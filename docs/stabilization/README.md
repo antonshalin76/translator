@@ -48,8 +48,9 @@ These numbers are discovery evidence, not release evidence.
 
 | Stage | Scope | Status |
 | --- | --- | --- |
-| A | deterministic suites, manifests, CI parity, bounded SCA | source contract complete; close is valid only with same-tree external 18-gate and architect receipts |
-| B | process/session ownership, safety, atomic controls, IPC | blocked on A |
+| A | deterministic suites, manifests, CI parity, bounded SCA | complete at `af3410c`; full 18-gate PASS and two exact-tree review receipts; pushed to the fork branch |
+| B1 | Python provider/model ownership and private IPC | source checkpoint complete; close requires same-tree full-gate and final architect receipts |
+| B2 | daemon authority, safety, atomic controls | follows reviewed B1 close |
 | C | canonical modes, deadlines, flow control, real endpointing | blocked on B |
 | D | semantic accuracy, audible oracle, debug, readiness, metrics | blocked on C |
 | E | portable bundle, systemd lifecycle, rollback, API/docs | blocked on D |
@@ -61,3 +62,6 @@ and push. Merge, production activation, tag push, and release publication remain
 forbidden until Stage F binds all evidence to one exact SHA and annotated-tag
 object. The local annotated tag needed by the Stage F release-mode publication
 gate is created only after the exact candidate tree is reviewed.
+
+The B1 working evidence packet is [`stage-b1-evidence.md`](stage-b1-evidence.md).
+It is not a release or live-quality receipt.
