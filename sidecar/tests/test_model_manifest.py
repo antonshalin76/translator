@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
-from typing import BinaryIO, Iterable
+from collections.abc import Iterable
+from copy import deepcopy
+from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
@@ -18,11 +19,12 @@ from translator_sidecar.local.model_manifest import (
     ManifestError,
     ModelDownloader,
     load_manifest,
+    resolve_model_cache_root,
 )
-
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+GPU_MODEL_CACHE_TEST_ENV = "TRANSLATOR_RUN_GPU_MODEL_CACHE_TEST"
 
 
 def _sha256(payload: bytes) -> str:
@@ -89,6 +91,15 @@ def _write_manifest(tmp_path: Path, document: dict[str, object]) -> Path:
     return path
 
 
+def _portable_manifest(
+    tmp_path: Path, cache_path: str = "selected-model"
+) -> dict[str, object]:
+    document = _manifest(tmp_path / "synthetic-model-cache")
+    document["policy"]["staging_path"] = ".staging"  # type: ignore[index]
+    document["models"][0]["cache_path"] = cache_path  # type: ignore[index]
+    return document
+
+
 def _irina_manifest(tmp_path: Path) -> dict[str, object]:
     revision = "0d907f158acc877ddeebcbf827659ee13bea8bcd"
     cache_path = tmp_path / "cache" / "piper"
@@ -119,9 +130,7 @@ def _irina_manifest(tmp_path: Path) -> dict[str, object]:
                         f"{revision}/ru/ru_RU/irina/medium/"
                         "ru_RU-irina-medium.onnx"
                     ),
-                    "source_path": (
-                        "ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx"
-                    ),
+                    "source_path": ("ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx"),
                 },
                 {
                     "path": "ru_RU-irina-medium.onnx.json",
@@ -136,8 +145,7 @@ def _irina_manifest(tmp_path: Path) -> dict[str, object]:
                         "ru_RU-irina-medium.onnx.json"
                     ),
                     "source_path": (
-                        "ru/ru_RU/irina/medium/"
-                        "ru_RU-irina-medium.onnx.json"
+                        "ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json"
                     ),
                 },
             ],
@@ -155,8 +163,7 @@ def _two_file_manifest(tmp_path: Path) -> dict[str, object]:
             "size_bytes": 2,
             "sha256": _sha256(b"{}"),
             "source_url": (
-                "https://huggingface.co/owner/model/resolve/"
-                f"{revision}/config.json"
+                f"https://huggingface.co/owner/model/resolve/{revision}/config.json"
             ),
             "source_path": "config.json",
         }
@@ -300,17 +307,11 @@ class RecordingFilesystemOps(FilesystemOps):
         return super().open_exclusive_at(descriptor, name)
 
     def open_readonly_at(self, descriptor: int, name: str) -> int:
-        self.calls.append(
-            ("open_readonly", self.fd_paths[descriptor] / name)
-        )
+        self.calls.append(("open_readonly", self.fd_paths[descriptor] / name))
         return super().open_readonly_at(descriptor, name)
 
-    def replace_at(
-        self, descriptor: int, source_name: str, target_name: str
-    ) -> None:
-        self.calls.append(
-            ("atomic_replace", self.fd_paths[descriptor] / target_name)
-        )
+    def replace_at(self, descriptor: int, source_name: str, target_name: str) -> None:
+        self.calls.append(("atomic_replace", self.fd_paths[descriptor] / target_name))
         if self.fail_at == "atomic_replace":
             raise OSError("rename failed")
         super().replace_at(descriptor, source_name, target_name)
@@ -322,14 +323,10 @@ class RecordingFilesystemOps(FilesystemOps):
         target_fd: int,
         target_name: str,
     ) -> None:
-        self.calls.append(
-            ("commit_noreplace", self.fd_paths[target_fd] / target_name)
-        )
+        self.calls.append(("commit_noreplace", self.fd_paths[target_fd] / target_name))
         if self.fail_at == "atomic_replace":
             raise OSError("rename failed")
-        super().commit_noreplace(
-            staging_fd, part_name, target_fd, target_name
-        )
+        super().commit_noreplace(staging_fd, part_name, target_fd, target_name)
         self.model_committed = True
 
     def fsync_directory_fd(self, descriptor: int) -> None:
@@ -354,9 +351,7 @@ class RecordingFilesystemOps(FilesystemOps):
         self.calls.append(
             (
                 "quarantine",
-                self.fd_paths[staging_fd]
-                / ".quarantine"
-                / quarantine_name,
+                self.fd_paths[staging_fd] / ".quarantine" / quarantine_name,
             )
         )
         super().quarantine_at(
@@ -389,9 +384,7 @@ class CompetingTargetFilesystemOps(RecordingFilesystemOps):
             os.write(descriptor, b"competitor")
         finally:
             os.close(descriptor)
-        super().commit_noreplace(
-            staging_fd, part_name, target_fd, target_name
-        )
+        super().commit_noreplace(staging_fd, part_name, target_fd, target_name)
 
 
 class ParentSwapFilesystemOps(RecordingFilesystemOps):
@@ -417,9 +410,7 @@ class ParentSwapFilesystemOps(RecordingFilesystemOps):
         target_name: str,
     ) -> None:
         self._swap()
-        super().commit_noreplace(
-            staging_fd, part_name, target_fd, target_name
-        )
+        super().commit_noreplace(staging_fd, part_name, target_fd, target_name)
 
 
 class LedgerParentSwapFilesystemOps(RecordingFilesystemOps):
@@ -441,9 +432,7 @@ class LedgerParentSwapFilesystemOps(RecordingFilesystemOps):
         self._swap()
         super().atomic_replace(source, target)
 
-    def replace_at(
-        self, descriptor: int, source_name: str, target_name: str
-    ) -> None:
+    def replace_at(self, descriptor: int, source_name: str, target_name: str) -> None:
         self._swap()
         super().replace_at(descriptor, source_name, target_name)
 
@@ -518,7 +507,11 @@ def _assert_fd_closed(descriptor: int | None) -> None:
         os.fstat(descriptor)
 
 
-def test_repository_manifest_matches_approved_task6_inventory() -> None:
+def test_repository_manifest_matches_approved_task6_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_root = tmp_path / "model-cache"
+    monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(model_root))
     manifest_path = Path(__file__).resolve().parents[2] / "models" / "manifest.json"
     manifest = load_manifest(manifest_path)
 
@@ -538,9 +531,10 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "Systran/faster-whisper-small",
             "536b0662742c02347bc0e980a01041f333bce120",
             ("ru", "en"),
-            "/home/anton/.cache/huggingface/hub/"
-            "models--Systran--faster-whisper-small/snapshots/"
-            "536b0662742c02347bc0e980a01041f333bce120",
+            str(
+                model_root / "huggingface/hub/models--Systran--faster-whisper-small/"
+                "snapshots/536b0662742c02347bc0e980a01041f333bce120"
+            ),
         ),
         "faster-whisper-large-v3": (
             "asr",
@@ -548,9 +542,10 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "Systran/faster-whisper-large-v3",
             "edaa852ec7e145841d8ffdb056a99866b5f0a478",
             ("ru", "en"),
-            "/home/anton/Source/uncle-freud-bot/.data/faster-whisper/"
-            "models--Systran--faster-whisper-large-v3/snapshots/"
-            "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+            str(
+                model_root / "huggingface/hub/models--Systran--faster-whisper-large-v3/"
+                "snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
+            ),
         ),
         "piper-ru-dmitri-medium": (
             "tts",
@@ -558,7 +553,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "rhasspy/piper-voices",
             "0d907f158acc877ddeebcbf827659ee13bea8bcd",
             ("ru",),
-            "/home/anton/Source/uncle-freud-bot/.data/piper-voices",
+            str(model_root / "piper-voices"),
         ),
         "piper-en-ryan-medium": (
             "tts",
@@ -566,7 +561,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "rhasspy/piper-voices",
             "0d907f158acc877ddeebcbf827659ee13bea8bcd",
             ("en",),
-            "/home/anton/Source/uncle-freud-bot/.data/piper-voices",
+            str(model_root / "piper-voices"),
         ),
         "nllb-200-distilled-600m-ct2-int8": (
             "mt",
@@ -574,8 +569,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "mijuanlo/nllb-200-distilled-600M-ct2-int8",
             "16bc5ff0482f9f1c0d35bdef950721ce58640789",
             ("ru", "en"),
-            "/home/anton/Source/translator/models/cache/"
-            "nllb-200-distilled-600M-ct2-int8",
+            str(model_root / "nllb-200-distilled-600M-ct2-int8"),
         ),
         "piper-ru-irina-medium": (
             "tts",
@@ -583,7 +577,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "rhasspy/piper-voices",
             "0d907f158acc877ddeebcbf827659ee13bea8bcd",
             ("ru",),
-            "/home/anton/Source/translator/models/cache/piper",
+            str(model_root / "piper"),
         ),
         "piper-en-hfc-female-medium": (
             "tts",
@@ -591,7 +585,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "rhasspy/piper-voices",
             "0d907f158acc877ddeebcbf827659ee13bea8bcd",
             ("en",),
-            "/home/anton/Source/translator/models/cache/piper",
+            str(model_root / "piper"),
         ),
     }
     observed_metadata = {
@@ -640,8 +634,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "nllb-200-distilled-600m-ct2-int8",
             "mijuanlo/nllb-200-distilled-600M-ct2-int8",
             "16bc5ff0482f9f1c0d35bdef950721ce58640789",
-            "/home/anton/Source/translator/models/cache/"
-            "nllb-200-distilled-600M-ct2-int8",
+            str(model_root / "nllb-200-distilled-600M-ct2-int8"),
         ): {
             "config.json": (
                 1_065,
@@ -664,7 +657,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "piper-ru-irina-medium",
             "rhasspy/piper-voices",
             "0d907f158acc877ddeebcbf827659ee13bea8bcd",
-            "/home/anton/Source/translator/models/cache/piper",
+            str(model_root / "piper"),
         ): {
             "ru_RU-irina-medium.onnx": (
                 63_201_294,
@@ -679,7 +672,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             "piper-en-hfc-female-medium",
             "rhasspy/piper-voices",
             "0d907f158acc877ddeebcbf827659ee13bea8bcd",
-            "/home/anton/Source/translator/models/cache/piper",
+            str(model_root / "piper"),
         ): {
             "en_US-hfc_female-medium.onnx": (
                 63_201_294,
@@ -691,9 +684,7 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
             ),
         },
     }
-    observed_downloads: dict[
-        tuple[str, str, str, str], dict[str, tuple[int, str]]
-    ] = {}
+    observed_downloads: dict[tuple[str, str, str, str], dict[str, tuple[int, str]]] = {}
     for model in manifest.models.values():
         if model.acquisition != "download":
             continue
@@ -890,9 +881,8 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
     assert manifest.policy.usage_mode == "personal_noncommercial"
     assert manifest.policy.redistribution is False
     assert manifest.policy.certified_or_safety_critical is False
-    assert str(manifest.policy.staging_path) == (
-        "/home/anton/Source/translator/models/cache/.staging"
-    )
+    assert manifest.cache_root == model_root
+    assert manifest.policy.staging_path == model_root / ".staging"
     assert set(manifest.policy.redirect_hosts) == {
         "cdn-lfs.huggingface.co",
         "cdn-lfs-us-1.hf.co",
@@ -902,14 +892,38 @@ def test_repository_manifest_matches_approved_task6_inventory() -> None:
     }
 
 
+def test_repository_manifest_contains_only_portable_model_paths() -> None:
+    manifest_path = Path(__file__).resolve().parents[2] / "models" / "manifest.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    path_references = [
+        document["policy"]["staging_path"],
+        *(model["cache_path"] for model in document["models"]),
+    ]
+
+    assert all(isinstance(value, str) for value in path_references)
+    assert all(not Path(value).is_absolute() for value in path_references)
+    assert all(".." not in Path(value).parts for value in path_references)
+    serialized = json.dumps(document)
+    private_markers = (
+        "/" + "home" + "/",
+        "/" + "Source" + "/",
+        "uncle" + "-freud",
+    )
+    assert all(marker not in serialized for marker in private_markers)
+
+
+@pytest.mark.skipif(
+    os.environ.get(GPU_MODEL_CACHE_TEST_ENV) != "1",
+    reason="missing_external_prerequisite:gpu_model_cache",
+)
 def test_repository_reused_assets_resolve_through_pinned_integrity_policy() -> None:
     manifest_path = Path(__file__).resolve().parents[2] / "models" / "manifest.json"
     manifest = load_manifest(manifest_path)
+    assert manifest.cache_root is not None
+    assert manifest.cache_root.exists()
 
     resolved = {
-        (model.id, file.path): manifest.resolve_runtime_file(
-            model.id, file.path
-        )
+        (model.id, file.path): manifest.resolve_runtime_file(model.id, file.path)
         for model in manifest.models.values()
         if model.acquisition == "reuse"
         for file in model.files
@@ -944,10 +958,8 @@ def test_hf_snapshot_symlink_rejects_same_content_outside_blob_root(
     manifest = load_manifest(_write_manifest(tmp_path, document))
     filesystem = TrackingRuntimeFileOps()
 
-    with pytest.raises(ManifestError, match="runtime|blob"):
-        manifest.resolve_runtime_file(
-            "selected-mt", "model.bin", filesystem=filesystem
-        )
+    with pytest.raises(ManifestError, match=r"runtime|blob"):
+        manifest.resolve_runtime_file("selected-mt", "model.bin", filesystem=filesystem)
     _assert_fd_closed(filesystem.last_fd)
 
 
@@ -960,10 +972,8 @@ def test_hf_snapshot_link_swap_before_stable_open_fails_closed(
     manifest = load_manifest(_write_manifest(tmp_path, document))
     filesystem = SwappingRuntimeFileOps(target, outside)
 
-    with pytest.raises(ManifestError, match="runtime|blob"):
-        manifest.resolve_runtime_file(
-            "selected-mt", "model.bin", filesystem=filesystem
-        )
+    with pytest.raises(ManifestError, match=r"runtime|blob"):
+        manifest.resolve_runtime_file("selected-mt", "model.bin", filesystem=filesystem)
     assert filesystem.swapped
     _assert_fd_closed(filesystem.last_fd)
 
@@ -1005,11 +1015,107 @@ def test_manifest_rejects_unknown_file_evidence(
         load_manifest(_write_manifest(tmp_path, document))
 
 
-def test_manifest_requires_absolute_cache_path(tmp_path: Path) -> None:
-    document = _manifest(Path("models/cache/model"))
+def test_relative_manifest_paths_resolve_below_explicit_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_root = tmp_path / "operator-models"
+    monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(cache_root))
+    manifest = load_manifest(_write_manifest(tmp_path, _portable_manifest(tmp_path)))
 
-    with pytest.raises(ManifestError, match="absolute"):
+    assert manifest.cache_root == cache_root
+    assert manifest.policy.staging_path == cache_root / ".staging"
+    assert manifest.models["selected-mt"].cache_path == cache_root / "selected-model"
+
+
+def test_absolute_paths_remain_supported_for_custom_manifests(tmp_path: Path) -> None:
+    cache_path = tmp_path / "custom-model"
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(cache_path)))
+
+    assert manifest.cache_root is None
+    assert manifest.models["selected-mt"].cache_path == cache_path
+
+
+def test_model_cache_root_prefers_explicit_then_xdg_then_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit = tmp_path / "explicit"
+    xdg = tmp_path / "xdg"
+    home = tmp_path / "home"
+    monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(explicit))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(xdg))
+    monkeypatch.setenv("HOME", str(home))
+    assert resolve_model_cache_root() == explicit
+
+    monkeypatch.delenv("TRANSLATOR_MODEL_CACHE_ROOT")
+    assert resolve_model_cache_root() == xdg / "translator" / "models"
+
+    monkeypatch.delenv("XDG_CACHE_HOME")
+    assert resolve_model_cache_root() == home / ".cache" / "translator" / "models"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("TRANSLATOR_MODEL_CACHE_ROOT", ""),
+        ("TRANSLATOR_MODEL_CACHE_ROOT", "relative/cache"),
+        ("TRANSLATOR_MODEL_CACHE_ROOT", "/tmp/cache/../escape"),
+        ("TRANSLATOR_MODEL_CACHE_ROOT", "/"),
+        ("XDG_CACHE_HOME", "relative/cache"),
+        ("HOME", "relative/home"),
+    ],
+    ids=(
+        "explicit-empty",
+        "explicit-relative",
+        "explicit-parent-traversal",
+        "explicit-filesystem-root",
+        "xdg-relative",
+        "home-relative",
+    ),
+)
+def test_model_cache_root_rejects_unsafe_environment_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.delenv("TRANSLATOR_MODEL_CACHE_ROOT", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ManifestError, match=r"absolute|root|HOME"):
+        resolve_model_cache_root()
+
+
+@pytest.mark.parametrize("field", ["staging_path", "cache_path"])
+def test_relative_manifest_path_cannot_escape_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(tmp_path / "model-root"))
+    document = _portable_manifest(tmp_path)
+    if field == "staging_path":
+        document["policy"][field] = "../escape"  # type: ignore[index]
+    else:
+        document["models"][0][field] = "../escape"  # type: ignore[index]
+
+    with pytest.raises(ManifestError, match="escapes"):
         load_manifest(_write_manifest(tmp_path, document))
+
+
+def test_relative_manifest_path_rejects_existing_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_root = tmp_path / "model-root"
+    outside = tmp_path / "outside"
+    cache_root.mkdir()
+    outside.mkdir()
+    (cache_root / "linked").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(cache_root))
+
+    with pytest.raises(ManifestError, match="escapes"):
+        load_manifest(
+            _write_manifest(tmp_path, _portable_manifest(tmp_path, "linked/model"))
+        )
 
 
 def test_manifest_rejects_path_escape_and_unallowlisted_file(tmp_path: Path) -> None:
@@ -1068,7 +1174,7 @@ def test_unapproved_dataset_license_variants_fail_closed(
     source = document["models"][0]["source"]  # type: ignore[index]
     source["dataset_license"] = dataset_license  # type: ignore[index]
 
-    with pytest.raises(ManifestError, match="license|waiver"):
+    with pytest.raises(ManifestError, match=r"license|waiver"):
         load_manifest(_write_manifest(tmp_path, document))
 
 
@@ -1182,9 +1288,7 @@ def test_irina_waiver_is_bound_to_every_approved_field(
         "repository": lambda: source.__setitem__("repository", "other/repo"),
         "revision": lambda: source.__setitem__("revision", "b" * 40),
         "license": lambda: source.__setitem__("license", "CC0"),
-        "dataset_license": lambda: source.__setitem__(
-            "dataset_license", "CC0"
-        ),
+        "dataset_license": lambda: source.__setitem__("dataset_license", "CC0"),
         "waiver": lambda: source.__setitem__("license_waiver", "OTHER"),
         "usage_mode": lambda: policy.__setitem__("usage_mode", "commercial"),
         "redistribution": lambda: policy.__setitem__("redistribution", True),
@@ -1359,9 +1463,7 @@ def test_download_ledger_update_uses_durable_atomic_operations(
     operations = [name for name, _ in filesystem.calls]
     assert operations.index("open_exclusive") < operations.index("fsync_file")
     assert operations.index("fsync_file") < operations.index("atomic_replace")
-    assert operations.index("atomic_replace") < operations.index(
-        "fsync_directory"
-    )
+    assert operations.index("atomic_replace") < operations.index("fsync_directory")
     assert not list(tmp_path.glob(".download-ledger.*.tmp"))
 
 
@@ -1438,9 +1540,7 @@ def test_download_ledger_parent_swap_uses_pinned_directory_and_fails_closed(
     with pytest.raises(ManifestError, match="ledger"):
         ledger.record_received(1)
     assert not (outside / ".download-ledger.json").exists()
-    state = json.loads(
-        (moved / ".download-ledger.json").read_text(encoding="utf-8")
-    )
+    state = json.loads((moved / ".download-ledger.json").read_text(encoding="utf-8"))
     assert state["transferred_bytes"] == 3
     assert filesystem.open_fds == set()
 
@@ -1529,9 +1629,7 @@ def test_preflight_rejects_one_byte_below_free_space_floor(tmp_path: Path) -> No
     "invalid_initial_url",
     [
         "http://huggingface.co/owner/model/resolve/" + "a" * 40 + "/model.bin",
-        "https://user@huggingface.co/owner/model/resolve/"
-        + "a" * 40
-        + "/model.bin",
+        "https://user@huggingface.co/owner/model/resolve/" + "a" * 40 + "/model.bin",
         "https://huggingface.co/other/model/resolve/" + "a" * 40 + "/model.bin",
         "https://huggingface.co/owner/model/resolve/" + "b" * 40 + "/model.bin",
         "https://huggingface.co/owner/model/resolve/" + "a" * 40 + "/other.bin",
@@ -1540,9 +1638,7 @@ def test_preflight_rejects_one_byte_below_free_space_floor(tmp_path: Path) -> No
 def test_initial_download_url_must_match_exact_pinned_source(
     tmp_path: Path, invalid_initial_url: str
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(tmp_path / "cache"))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(tmp_path / "cache")))
     with pytest.raises(ManifestError, match="source"):
         manifest.validate_download_chain(
             "selected-mt",
@@ -1563,8 +1659,7 @@ def test_redirect_chain_fails_closed_outside_pinned_hugging_face_hosts(
         "model.bin",
         [
             source_url,
-            "https://cas-bridge.xethub.hf.co/"
-            "xet-bridge-us/owner/model/pinned-content",
+            "https://cas-bridge.xethub.hf.co/xet-bridge-us/owner/model/pinned-content",
         ],
     )
     with pytest.raises(ManifestError, match="redirect"):
@@ -1633,9 +1728,7 @@ def test_downloader_repeats_preflight_for_every_file_transfer(
     downloader.install_bytes("selected-mt", "model.bin", [b"payload"])
     downloader.install_bytes("selected-mt", "config.json", [b"{}"])
 
-    available_calls = [
-        path for name, path in fs.calls if name == "available_bytes"
-    ]
+    available_calls = [path for name, path in fs.calls if name == "available_bytes"]
     assert available_calls == [
         tmp_path / "cache" / ".staging",
         tmp_path / "cache" / ".staging",
@@ -1645,9 +1738,7 @@ def test_downloader_repeats_preflight_for_every_file_transfer(
 def test_first_preflight_reserves_all_remaining_manifest_bytes(
     tmp_path: Path,
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _two_file_manifest(tmp_path))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _two_file_manifest(tmp_path)))
     fs = RecordingFilesystemOps(free_bytes=20 * GIB + 8)
 
     with pytest.raises(ManifestError, match="free space"):
@@ -1661,48 +1752,46 @@ def test_first_preflight_reserves_all_remaining_manifest_bytes(
 def test_second_preflight_accepts_exact_still_missing_bytes(
     tmp_path: Path,
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _two_file_manifest(tmp_path))
-    )
-    fs = RecordingFilesystemOps(
-        free_bytes=[20 * GIB + 9, 20 * GIB + 2]
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _two_file_manifest(tmp_path)))
+    fs = RecordingFilesystemOps(free_bytes=[20 * GIB + 9, 20 * GIB + 2])
     downloader = ModelDownloader(manifest, filesystem=fs)
 
     downloader.install_bytes("selected-mt", "model.bin", [b"payload"])
     downloader.install_bytes("selected-mt", "config.json", [b"{}"])
 
-    assert len(
-        [
-            path
-            for name, path in fs.calls
-            if name == "open_exclusive" and path.name.endswith(".part")
-        ]
-    ) == 2
+    assert (
+        len(
+            [
+                path
+                for name, path in fs.calls
+                if name == "open_exclusive" and path.name.endswith(".part")
+            ]
+        )
+        == 2
+    )
 
 
 def test_second_preflight_rejects_one_byte_below_still_missing_bytes(
     tmp_path: Path,
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _two_file_manifest(tmp_path))
-    )
-    fs = RecordingFilesystemOps(
-        free_bytes=[20 * GIB + 9, 20 * GIB + 1]
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _two_file_manifest(tmp_path)))
+    fs = RecordingFilesystemOps(free_bytes=[20 * GIB + 9, 20 * GIB + 1])
     downloader = ModelDownloader(manifest, filesystem=fs)
 
     downloader.install_bytes("selected-mt", "model.bin", [b"payload"])
     with pytest.raises(ManifestError, match="free space"):
         downloader.install_bytes("selected-mt", "config.json", [b"{}"])
 
-    assert len(
-        [
-            path
-            for name, path in fs.calls
-            if name == "open_exclusive" and path.name.endswith(".part")
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                path
+                for name, path in fs.calls
+                if name == "open_exclusive" and path.name.endswith(".part")
+            ]
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -1722,9 +1811,7 @@ def test_downloader_fails_closed_before_transfer_when_probe_is_unsafe(
     filesystem: RecordingFilesystemOps,
     message: str,
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(tmp_path / "cache"))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(tmp_path / "cache")))
 
     with pytest.raises(ManifestError, match=message):
         ModelDownloader(manifest, filesystem=filesystem).install_bytes(
@@ -1736,12 +1823,10 @@ def test_downloader_fails_closed_before_transfer_when_probe_is_unsafe(
 def test_downloader_uses_atomic_noreplace_against_competing_target(
     tmp_path: Path,
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(tmp_path / "cache"))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(tmp_path / "cache")))
     filesystem = CompetingTargetFilesystemOps()
 
-    with pytest.raises(ManifestError, match="target|commit"):
+    with pytest.raises(ManifestError, match=r"target|commit"):
         ModelDownloader(manifest, filesystem=filesystem).install_bytes(
             "selected-mt", "model.bin", [b"payload"]
         )
@@ -1758,14 +1843,10 @@ def test_downloader_fails_closed_after_parent_path_swap_without_escape(
     moved = tmp_path / "cache-pinned"
     outside = tmp_path / "outside"
     outside.mkdir()
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(target_path))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(target_path)))
     filesystem = ParentSwapFilesystemOps(target_path, moved, outside)
 
-    with pytest.raises(
-        ManifestError, match="filesystem|durability|durable|identity"
-    ):
+    with pytest.raises(ManifestError, match=r"filesystem|durability|durable|identity"):
         ModelDownloader(manifest, filesystem=filesystem).install_bytes(
             "selected-mt", "model.bin", [b"payload"]
         )
@@ -1784,9 +1865,7 @@ def test_declared_size_mismatch_removes_staging_and_final(
     manifest = load_manifest(_write_manifest(tmp_path, document))
 
     with pytest.raises(ManifestError, match="size"):
-        ModelDownloader(manifest).install_bytes(
-            "selected-mt", "model.bin", [payload]
-        )
+        ModelDownloader(manifest).install_bytes("selected-mt", "model.bin", [payload])
 
     assert not (tmp_path / "cache" / "model.bin").exists()
     assert not (tmp_path / "cache" / ".staging" / "model.bin.part").exists()
@@ -1815,9 +1894,7 @@ def test_checksum_failure_removes_part_and_never_exposes_final(
 def test_transport_iterator_failure_cleans_partial_and_is_typed(
     tmp_path: Path, failure: Exception
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(tmp_path / "cache"))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(tmp_path / "cache")))
 
     def failing_chunks() -> Iterable[bytes]:
         yield b"pay"
@@ -1842,9 +1919,7 @@ def test_transport_iterator_failure_cleans_partial_and_is_typed(
 def test_install_failure_before_commit_cleans_part_and_final(
     tmp_path: Path, fail_at: str
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(tmp_path / "cache"))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(tmp_path / "cache")))
     fs = RecordingFilesystemOps(fail_at=fail_at)
 
     with pytest.raises(ManifestError):
@@ -1859,9 +1934,7 @@ def test_install_failure_before_commit_cleans_part_and_final(
 def test_directory_fsync_failure_quarantines_indeterminate_target(
     tmp_path: Path,
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(tmp_path / "cache"))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(tmp_path / "cache")))
     fs = RecordingFilesystemOps(fail_at="fsync_directory")
 
     with pytest.raises(InstallDurabilityError) as error:
@@ -1871,13 +1944,9 @@ def test_directory_fsync_failure_quarantines_indeterminate_target(
 
     quarantine_path = error.value.quarantine_path
     operation_names = [name for name, _ in fs.calls]
-    assert operation_names.index("atomic_replace") < operation_names.index(
-        "quarantine"
-    )
+    assert operation_names.index("atomic_replace") < operation_names.index("quarantine")
     assert error.value.state == "durability_indeterminate"
-    assert quarantine_path.parent == (
-        tmp_path / "cache" / ".staging" / ".quarantine"
-    )
+    assert quarantine_path.parent == (tmp_path / "cache" / ".staging" / ".quarantine")
     assert quarantine_path.is_file()
     assert not quarantine_path.is_symlink()
     assert quarantine_path.read_bytes() == b"payload"
@@ -1909,9 +1978,7 @@ def test_verified_file_is_atomically_installed_and_runtime_is_offline(
     }.items() <= manifest.runtime_environment().items()
     operation_names = [name for name, _ in fs.calls]
     assert "open_exclusive" in operation_names
-    assert operation_names.index("fsync_file") < operation_names.index(
-        "atomic_replace"
-    )
+    assert operation_names.index("fsync_file") < operation_names.index("atomic_replace")
     assert operation_names.index("atomic_replace") < operation_names.index(
         "fsync_directory"
     )
@@ -1948,9 +2015,7 @@ def test_runtime_resolution_rejects_non_regular_or_missing_asset(
 def test_runtime_resolution_rejects_regular_file_size_or_hash_mismatch(
     tmp_path: Path, payload: bytes, message: str
 ) -> None:
-    manifest = load_manifest(
-        _write_manifest(tmp_path, _manifest(tmp_path / "cache"))
-    )
+    manifest = load_manifest(_write_manifest(tmp_path, _manifest(tmp_path / "cache")))
     target = tmp_path / "cache" / "model.bin"
     target.parent.mkdir(parents=True)
     target.write_bytes(payload)
@@ -2003,9 +2068,7 @@ def test_quarantine_fsyncs_quarantine_target_and_staging_directories(
             follow_symlinks=follow_symlinks,
         )
 
-    def recording_unlink(
-        path: str, *, dir_fd: int | None = None
-    ) -> None:
+    def recording_unlink(path: str, *, dir_fd: int | None = None) -> None:
         events.append(("unlink", dir_fd))
         original_unlink(path, dir_fd=dir_fd)
 

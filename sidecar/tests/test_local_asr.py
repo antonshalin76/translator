@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import builtins
-from concurrent.futures import ThreadPoolExecutor
 import os
-from pathlib import Path
-from threading import Event, Lock
 import traceback
 import weakref
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Event, Lock
 
 import numpy as np
 import pytest

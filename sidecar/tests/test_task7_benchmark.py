@@ -349,8 +349,7 @@ def test_failed_samples_do_not_contribute_partial_output_latency() -> None:
                 capture_ns=observation.capture_ns,
                 first_audio_ns=observation.capture_ns + 9_000_000_000,
                 last_audio_ns=observation.capture_ns + 10_000_000_000,
-                first_audible_ns=observation.speech_onset_ns
-                + 10_000_000_000,
+                first_audible_ns=observation.speech_onset_ns + 10_000_000_000,
                 queue_lag_ms=observation.queue_lag_ms,
                 provider_latency_ms=observation.provider_latency_ms,
                 dropped=True,
@@ -374,9 +373,7 @@ def test_restart_quality_and_resource_failures_block_usable_classification() -> 
         return _observation(
             context,
             restarted=not context.is_warmup and context.pair_index == 10,
-            quality_passed=not (
-                not context.is_warmup and context.pair_index == 11
-            ),
+            quality_passed=not (not context.is_warmup and context.pair_index == 11),
         )
 
     report = run_task7_benchmark(
@@ -452,15 +449,9 @@ def test_serialization_contains_telemetry_but_no_content_text() -> None:
         if isinstance(value, str):
             return [value]
         if isinstance(value, dict):
-            return [
-                item
-                for nested in value.values()
-                for item in string_values(nested)
-            ]
+            return [item for nested in value.values() for item in string_values(nested)]
         if isinstance(value, list):
-            return [
-                item for nested in value for item in string_values(nested)
-            ]
+            return [item for nested in value for item in string_values(nested)]
         return []
 
     assert set(string_values(payload)) <= allowed_strings

@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -24,7 +23,7 @@ def read_json(path: str) -> dict[str, Any]:
 def requires_local_artifacts(*paths: str):
     return unittest.skipUnless(
         all((ROOT / path).exists() for path in paths),
-        "local planning/run evidence is not published",
+        "missing_external_prerequisite:private_human_evidence",
     )
 
 
@@ -44,7 +43,9 @@ def walk_keys(value: Any) -> list[str]:
 
 def load_preflight_module() -> Any:
     script = ROOT / "scripts/translator-task11-openai-preflight"
-    loader = importlib.machinery.SourceFileLoader("task11_openai_preflight", str(script))
+    loader = importlib.machinery.SourceFileLoader(
+        "task11_openai_preflight", str(script)
+    )
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -78,9 +79,13 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         self.assertNotIn("frame_duration_ms=100", script)
         self.assertNotRegex(script, re.compile(r"sk-[A-Za-z0-9_-]+"))
 
-    def test_synthetic_speech_smoke_script_is_executable_and_privacy_bounded(self) -> None:
+    def test_synthetic_speech_smoke_script_is_executable_and_privacy_bounded(
+        self,
+    ) -> None:
         script_path = ROOT / "scripts/translator-task11-openai-synthetic-smoke"
-        self.assertTrue(script_path.exists(), "Task 11 synthetic smoke script is missing")
+        self.assertTrue(
+            script_path.exists(), "Task 11 synthetic smoke script is missing"
+        )
         self.assertTrue(script_path.stat().st_mode & stat.S_IXUSR)
         script = script_path.read_text()
 
@@ -138,13 +143,17 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         self.assertTrue(runtime["daemon_openai_launch_allowed"])
         self.assertTrue(runtime["grpc_provider_dispatches_openai_sessions"])
         self.assertTrue(runtime["runtime_websocket_payloads_exclude_credential"])
-        self.assertEqual(runtime["daemon_provider_pcm_format"], "16000hz_mono_s16le_20ms")
+        self.assertEqual(
+            runtime["daemon_provider_pcm_format"], "16000hz_mono_s16le_20ms"
+        )
         self.assertEqual(runtime["openai_wire_pcm_format"], "24000hz_mono_s16le")
 
         task7 = report["task7_debt_carried"]
         self.assertFalse(task7["task7_complete"])
         self.assertTrue(task7["requires_mvp_b_provider_comparison"])
-        self.assertEqual(task7["local_provider_latency_classification"], "fails_usable_limit")
+        self.assertEqual(
+            task7["local_provider_latency_classification"], "fails_usable_limit"
+        )
 
         task10 = report["task10_debt_carried"]
         self.assertTrue(task10["mvp_a_gate_satisfied"])
@@ -154,26 +163,38 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         )
 
     @requires_local_artifacts("docs/benchmarks/task11-openai-adapter-preflight.json")
-    def test_report_records_safe_preflight_cases_without_secret_or_spoken_payload(self) -> None:
+    def test_report_records_safe_preflight_cases_without_secret_or_spoken_payload(
+        self,
+    ) -> None:
         report = read_json("docs/benchmarks/task11-openai-adapter-preflight.json")
         cases = {case["case"]: case for case in report["preflight_cases"]}
 
-        self.assertEqual(cases["cloud_opt_in_required"]["safe_error_code"], "cloud_not_enabled")
+        self.assertEqual(
+            cases["cloud_opt_in_required"]["safe_error_code"], "cloud_not_enabled"
+        )
         self.assertFalse(cases["cloud_opt_in_required"]["network_session_started"])
         self.assertEqual(
             cases["missing_credentials_safe_error"]["safe_error_code"],
             "provider_auth_failed",
         )
-        self.assertFalse(cases["missing_credentials_safe_error"]["network_session_started"])
+        self.assertFalse(
+            cases["missing_credentials_safe_error"]["network_session_started"]
+        )
         self.assertTrue(
             cases["audio_leaves_machine_visible_before_session"]["audio_leaves_machine"]
         )
         self.assertFalse(
-            cases["audio_leaves_machine_visible_before_session"]["network_session_started"]
+            cases["audio_leaves_machine_visible_before_session"][
+                "network_session_started"
+            ]
         )
         if "credential_model_probe" in report:
-            self.assertEqual(report["credential_model_probe"]["model"], "gpt-realtime-translate")
-            self.assertFalse(report["credential_model_probe"]["plaintext_credential_persisted"])
+            self.assertEqual(
+                report["credential_model_probe"]["model"], "gpt-realtime-translate"
+            )
+            self.assertFalse(
+                report["credential_model_probe"]["plaintext_credential_persisted"]
+            )
         if "realtime_websocket_smoke" in report:
             self.assertFalse(report["realtime_websocket_smoke"]["stored_audio"])
             self.assertFalse(
@@ -287,11 +308,15 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         "docs/planning/translator-live-duplex-task-prompts.md",
         "docs/planning/translator-live-duplex-tasks.md",
     )
-    def test_planning_notes_record_preflight_without_marking_task11_complete(self) -> None:
+    def test_planning_notes_record_preflight_without_marking_task11_complete(
+        self,
+    ) -> None:
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")
 
-        prompt_section = prompts.split("## Task 11 Prompt", 1)[1].split("## Task 12 Prompt", 1)[0]
+        prompt_section = prompts.split("## Task 11 Prompt", 1)[1].split(
+            "## Task 12 Prompt", 1
+        )[0]
         task_section = tasks.split("## Task 11.", 1)[1].split("## Task 12.", 1)[0]
 
         self.assertIn("task11-openai-adapter-preflight.json", prompt_section)

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import os
+import struct
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-import math
-import os
-import struct
 from typing import Any
 from uuid import UUID
 
@@ -56,7 +56,6 @@ from .inference_scheduler import (
 )
 from .source_commit import SourceCommit
 from .tts import TtsOutputLimit
-
 
 _BASE_SOURCE_UTTERANCE_MS: int = 12_000
 _MAX_SOURCE_UTTERANCE_MS: int = 30_000
@@ -127,7 +126,7 @@ def _pcm_rms(pcm: bytes) -> float:
     if sample_count == 0:
         return 0.0
     total = 0
-    for sample, in struct.iter_unpack("<h", pcm[: sample_count * 2]):
+    for (sample,) in struct.iter_unpack("<h", pcm[: sample_count * 2]):
         total += sample * sample
     return math.sqrt(total / sample_count)
 

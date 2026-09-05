@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import datetime as dt
 import json
-from pathlib import Path
 import sys
 import tempfile
 import time
-from typing import Any, Callable
 import wave
+from collections.abc import Callable
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
 
-from jiwer import wer
 import numpy as np
+from jiwer import wer
 
 from translator_sidecar.benchmark.model_matrix import (
     ModelCandidate,
@@ -25,7 +26,6 @@ from translator_sidecar.local.asr import AsrModelManager
 from translator_sidecar.local.cuda_runtime import configure_cuda_runtime
 from translator_sidecar.local.model_manifest import ModelManifest, load_manifest
 from translator_sidecar.provider_contract import Language, TranslationMode
-
 
 _ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_OUTPUT = _ROOT / "output" / "asr-quality-debug.json"
@@ -62,7 +62,7 @@ class AsrQualityUnavailable(AsrQualityError):
 
 
 def _utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def _cuda_available() -> bool:

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
 
 from translator_sidecar.provider_contract import Language, TranslationMode
-
 
 _LANGUAGE_TOKENS = {
     Language.RU: "rus_Cyrl",

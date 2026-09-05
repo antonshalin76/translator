@@ -75,7 +75,9 @@ def request(
     )
 
 
-def test_openai_preflight_blocks_without_cloud_opt_in_and_never_starts_network() -> None:
+def test_openai_preflight_blocks_without_cloud_opt_in_and_never_starts_network() -> (
+    None
+):
     network_started = False
 
     def mark_network_started() -> None:
@@ -104,10 +106,13 @@ def test_openai_preflight_blocks_without_cloud_opt_in_and_never_starts_network()
 
 
 def test_openai_config_pins_the_official_translation_endpoint() -> None:
-    assert OpenAIRealtimeConfig(
-        cloud_opt_in=True,
-        endpoint=OPENAI_REALTIME_TRANSLATION_ENDPOINT,
-    ).endpoint == OPENAI_REALTIME_TRANSLATION_ENDPOINT
+    assert (
+        OpenAIRealtimeConfig(
+            cloud_opt_in=True,
+            endpoint=OPENAI_REALTIME_TRANSLATION_ENDPOINT,
+        ).endpoint
+        == OPENAI_REALTIME_TRANSLATION_ENDPOINT
+    )
 
     with pytest.raises(ValueError, match="translation_endpoint_must_be_official"):
         OpenAIRealtimeConfig(
@@ -139,7 +144,9 @@ def test_openai_preflight_blocks_missing_credentials_without_network_session() -
     assert rendered["credential_present"] is False
 
 
-def test_openai_ready_preflight_negotiates_cloud_capabilities_without_secret_leak() -> None:
+def test_openai_ready_preflight_negotiates_cloud_capabilities_without_secret_leak() -> (
+    None
+):
     adapter = OpenAIRealtimeAdapter(
         OpenAIRealtimeConfig(cloud_opt_in=True),
         environ={"OPENAI_API_KEY": "credential-present-secret"},
@@ -168,7 +175,9 @@ def test_openai_ready_preflight_negotiates_cloud_capabilities_without_secret_lea
     assert not re.search(r"sk-[A-Za-z0-9_-]+", rendered)
 
 
-def test_openai_preflight_rejects_provider_identity_mismatch_without_network_session() -> None:
+def test_openai_preflight_rejects_provider_identity_mismatch_without_network_session() -> (
+    None
+):
     adapter = OpenAIRealtimeAdapter(
         OpenAIRealtimeConfig(cloud_opt_in=True),
         environ={"OPENAI_API_KEY": "credential-present-secret"},
@@ -194,9 +203,7 @@ def test_websocket_event_builders_match_translation_session_contract() -> None:
 
     assert build_session_update_event(session) == {
         "type": "session.update",
-        "session": {
-            "audio": {"output": {"language": "ru"}}
-        },
+        "session": {"audio": {"output": {"language": "ru"}}},
     }
     assert build_input_audio_append_event(pcm) == {
         "type": "session.input_audio_buffer.append",
@@ -217,7 +224,10 @@ def test_openai_event_mapping_respects_debug_text_gate_and_audio_contract() -> N
     pcm = b"\x01\x02" * (24_000 * 200 // 1000)
     audio_events = adapter.map_realtime_events(
         session,
-        {"type": "session.output_audio.delta", "delta": build_input_audio_append_event(pcm)["audio"]},
+        {
+            "type": "session.output_audio.delta",
+            "delta": build_input_audio_append_event(pcm)["audio"],
+        },
         stream_id=stream_id,
         utterance_id=utterance_id,
         now_ns=123_000_000,

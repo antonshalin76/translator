@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import gc
 import os
+import weakref
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable
-import weakref
+from typing import Any
 
 import numpy as np
 
 from translator_sidecar.provider_contract import Language, TranslationMode
 
 from .cuda_runtime import configure_cuda_runtime
-
 
 _BEAM_SIZE = {
     TranslationMode.QUALITY_FIRST: 5,

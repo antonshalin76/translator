@@ -1,0 +1,121 @@
+schema_version = 1
+
+[[skip]]
+framework = "rust"
+id = "translator-audio::test::aec_graph::workstation_aec_graph_is_owned_and_tears_down"
+code = "missing_external_prerequisite:physical_audio_graph"
+
+[[skip]]
+framework = "pytest"
+id = "sidecar/tests/test_model_manifest.py::test_repository_reused_assets_resolve_through_pinned_integrity_policy"
+code = "missing_external_prerequisite:gpu_model_cache"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_real_app_smoke.Task10RealAppSmokeTests.test_real_app_smoke_reports_record_blockers_without_spoken_content"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_real_app_smoke.Task10RealAppSmokeTests.test_separate_telegram_and_meet_runs_can_satisfy_future_live_gate"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_real_app_smoke.Task10RealAppSmokeTests.test_task10_carries_task7_latency_debt_verbatim"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_real_app_smoke.Task10RealAppSmokeTests.test_task10_planning_stays_open_until_real_second_endpoint_passes"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_real_app_smoke.Task10RealAppSmokeTests.test_task10_reports_exist_and_record_live_acceptance_completion"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_real_app_smoke.Task10RealAppSmokeTests.test_virtual_microphone_presence_is_not_live_call_app_proof"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_simulated_app_stream_smoke.SimulatedAppStreamSmokeTests.test_browser_move_without_call_like_candidate_is_not_task10_route_pass"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_simulated_app_stream_smoke.SimulatedAppStreamSmokeTests.test_planning_notes_do_not_mark_task10_complete"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_simulated_app_stream_smoke.SimulatedAppStreamSmokeTests.test_report_carries_task7_debt_and_no_sensitive_payload"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task10_simulated_app_stream_smoke.SimulatedAppStreamSmokeTests.test_report_shape_keeps_synthetic_evidence_separate"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_planning_notes_record_preflight_without_marking_task11_complete"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_preflight_module_builds_report_from_current_task_debt"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_report_records_safe_preflight_cases_without_secret_or_spoken_payload"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_report_shape_carries_debts_and_keeps_task11_open"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_synthetic_speech_comparison_report_is_privacy_safe"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task12_zoom_acceptance.Task12ZoomAcceptanceTests.test_planning_notes_record_completed_zoom_duplex_without_closing_debts"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task12_zoom_acceptance.Task12ZoomAcceptanceTests.test_zoom_diagnostic_report_has_setup_notes_without_private_payload"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task12_zoom_acceptance.Task12ZoomAcceptanceTests.test_zoom_diagnostic_report_records_completed_acceptance_and_carries_debts"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task12_zoom_acceptance.Task12ZoomAcceptanceTests.test_zoom_live_translation_report_records_full_duplex_acceptance"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task12_zoom_acceptance.Task12ZoomAcceptanceTests.test_zoom_module_builds_report_from_current_debt_reports"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task9_desktop_run_mode.Task9DesktopRunModeTests.test_planning_documents_record_terminal_lifecycle_command"
+code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "unittest"
+id = "test_task9_desktop_run_mode.Task9DesktopRunModeTests.test_task9_validation_report_carries_task7_latency_debt"
+code = "missing_external_prerequisite:private_human_evidence"

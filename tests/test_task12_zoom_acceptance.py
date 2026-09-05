@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_PRIVATE_REPORT_KEYS = {
     "pcm",
@@ -49,7 +48,7 @@ def read_json(path: str) -> dict[str, Any]:
 def requires_local_artifacts(*paths: str):
     return unittest.skipUnless(
         all((ROOT / path).exists() for path in paths),
-        "local planning/run evidence is not published",
+        "missing_external_prerequisite:private_human_evidence",
     )
 
 
@@ -80,7 +79,9 @@ def load_zoom_module() -> Any:
 class Task12ZoomAcceptanceTests(unittest.TestCase):
     def test_zoom_diagnostic_script_is_executable_and_scope_safe(self) -> None:
         script_path = ROOT / "scripts/translator-task12-zoom-diagnostic"
-        self.assertTrue(script_path.exists(), "Task 12 Zoom diagnostic script is missing")
+        self.assertTrue(
+            script_path.exists(), "Task 12 Zoom diagnostic script is missing"
+        )
         self.assertTrue(script_path.stat().st_mode & stat.S_IXUSR)
         script = script_path.read_text()
 
@@ -101,10 +102,14 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", script)
 
     @requires_local_artifacts("docs/benchmarks/task12-zoom-diagnostic-report.json")
-    def test_zoom_diagnostic_report_records_completed_acceptance_and_carries_debts(self) -> None:
+    def test_zoom_diagnostic_report_records_completed_acceptance_and_carries_debts(
+        self,
+    ) -> None:
         report = read_json("docs/benchmarks/task12-zoom-diagnostic-report.json")
 
-        self.assertEqual(report["schema_version"], "translator.task12-zoom-diagnostic.v1")
+        self.assertEqual(
+            report["schema_version"], "translator.task12-zoom-diagnostic.v1"
+        )
         self.assertTrue(report["task12_completed"])
         self.assertFalse(report["does_not_satisfy_task12_acceptance"])
         self.assertEqual(report["blockers"], [])
@@ -116,7 +121,9 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
                 any(
                     candidate["on_translator_remote_in"]
                     or candidate["pipewire_linked_to_translator_remote_in"]
-                    for candidate in report["zoom_desktop"]["route_discovery"]["candidates"]
+                    for candidate in report["zoom_desktop"]["route_discovery"][
+                        "candidates"
+                    ]
                 )
             )
         self.assertIn(
@@ -127,8 +134,12 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
                 "superseded_by_live_duplex_confirmation",
             },
         )
-        self.assertEqual(report["acceptance"]["zoom_outgoing_translation"]["status"], "passed")
-        self.assertEqual(report["acceptance"]["zoom_incoming_translation"]["status"], "passed")
+        self.assertEqual(
+            report["acceptance"]["zoom_outgoing_translation"]["status"], "passed"
+        )
+        self.assertEqual(
+            report["acceptance"]["zoom_incoming_translation"]["status"], "passed"
+        )
 
         self.assertFalse(report["task7_debt_carried"]["task7_complete"])
         self.assertEqual(
@@ -147,14 +158,21 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
         )
 
     @requires_local_artifacts("docs/benchmarks/task12-zoom-diagnostic-report.json")
-    def test_zoom_diagnostic_report_has_setup_notes_without_private_payload(self) -> None:
+    def test_zoom_diagnostic_report_has_setup_notes_without_private_payload(
+        self,
+    ) -> None:
         report = read_json("docs/benchmarks/task12-zoom-diagnostic-report.json")
 
         notes = report["zoom_setup_notes"]
         self.assertIn("microphone", notes)
         self.assertIn("speaker", notes)
-        self.assertEqual(notes["microphone"], "Select Translator_Virtual_Mic in Zoom audio settings")
-        self.assertEqual(notes["speaker"], "Keep Zoom playback on the normal physical sink; translator routes only the selected sink-input")
+        self.assertEqual(
+            notes["microphone"], "Select Translator_Virtual_Mic in Zoom audio settings"
+        )
+        self.assertEqual(
+            notes["speaker"],
+            "Keep Zoom playback on the normal physical sink; translator routes only the selected sink-input",
+        )
 
         self.assertFalse(FORBIDDEN_PRIVATE_REPORT_KEYS.intersection(walk_keys(report)))
         rendered = json.dumps(report, ensure_ascii=False)
@@ -172,8 +190,12 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
         )
         self.assertTrue(report["task12_completed"])
         self.assertFalse(report["does_not_satisfy_task12_acceptance"])
-        self.assertEqual(report["acceptance"]["zoom_route_selection"]["status"], "passed")
-        self.assertEqual(report["acceptance"]["zoom_incoming_translation"]["status"], "passed")
+        self.assertEqual(
+            report["acceptance"]["zoom_route_selection"]["status"], "passed"
+        )
+        self.assertEqual(
+            report["acceptance"]["zoom_incoming_translation"]["status"], "passed"
+        )
         self.assertEqual(
             report["acceptance"]["zoom_outgoing_translation"]["status"],
             "passed",
@@ -259,8 +281,14 @@ class Task12ZoomAcceptanceTests(unittest.TestCase):
         self.assertTrue(module.is_call_like({"media.role": "communication"}))
         self.assertTrue(module.is_call_like({"media.name": "WebRTC Voice"}))
         self.assertTrue(module.is_call_like({"stream.description": "Meet Audio"}))
-        self.assertTrue(module.is_call_like({"media.role": "music", "media.name": "Meeting Lobby"}))
-        self.assertFalse(module.is_call_like({"media.role": "music", "media.name": "Zoom Notification"}))
+        self.assertTrue(
+            module.is_call_like({"media.role": "music", "media.name": "Meeting Lobby"})
+        )
+        self.assertFalse(
+            module.is_call_like(
+                {"media.role": "music", "media.name": "Zoom Notification"}
+            )
+        )
 
     def test_zoom_diagnostic_detects_pipewire_link_routing(self) -> None:
         module = load_zoom_module()
@@ -276,7 +304,9 @@ ZOOM VoiceEngine:output_FR
 """
 
         self.assertTrue(module.pipewire_link_route_present("ZOOM VoiceEngine", links))
-        self.assertFalse(module.pipewire_link_route_present("ZOOM VoiceEngine:bad", links))
+        self.assertFalse(
+            module.pipewire_link_route_present("ZOOM VoiceEngine:bad", links)
+        )
         self.assertFalse(module.pipewire_link_route_present("Other App", links))
 
     def test_zoom_diagnostic_uses_pipewire_node_name_for_link_routing(self) -> None:
@@ -345,7 +375,9 @@ ZOOM VoiceEngine:output_FR
         "docs/planning/translator-live-duplex-task-prompts.md",
         "docs/planning/translator-live-duplex-tasks.md",
     )
-    def test_planning_notes_record_completed_zoom_duplex_without_closing_debts(self) -> None:
+    def test_planning_notes_record_completed_zoom_duplex_without_closing_debts(
+        self,
+    ) -> None:
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")
 
@@ -356,10 +388,18 @@ ZOOM VoiceEngine:output_FR
         self.assertIn("task12-zoom-diagnostic-report.json", task_section)
         self.assertIn("task12-zoom-live-translation-check.json", prompt_section)
         self.assertIn("task12-zoom-live-translation-check.json", task_section)
-        self.assertIn("Full Task 12 Zoom duplex acceptance is user-confirmed", prompt_section)
-        self.assertIn("Full Task 12 Zoom duplex acceptance is user-confirmed", task_section)
-        self.assertIn("Task 7 latency and Task 11 OpenAI comparison debts", prompt_section)
-        self.assertIn("Task 7 latency and Task 11 OpenAI comparison debts", task_section)
+        self.assertIn(
+            "Full Task 12 Zoom duplex acceptance is user-confirmed", prompt_section
+        )
+        self.assertIn(
+            "Full Task 12 Zoom duplex acceptance is user-confirmed", task_section
+        )
+        self.assertIn(
+            "Task 7 latency and Task 11 OpenAI comparison debts", prompt_section
+        )
+        self.assertIn(
+            "Task 7 latency and Task 11 OpenAI comparison debts", task_section
+        )
         self.assertNotIn("- [x] Completed", prompt_section)
         self.assertNotIn("- [x] Completed", task_section)
 

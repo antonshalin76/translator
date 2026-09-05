@@ -13,7 +13,6 @@ from uuid import UUID
 
 from translator_sidecar.provider_contract import AudioDirection
 
-
 _QUEUED_PER_DIRECTION = 2
 _TTS_BRIDGE_MS = 1200
 _BRIDGE_POLL_SECONDS = 0.02

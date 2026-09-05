@@ -8,13 +8,11 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK7_REPORT = ROOT / "docs/benchmarks/task7-live-human-round-trip.json"
@@ -38,8 +36,19 @@ APP_DEFINITIONS = {
     },
     "google_meet_browser": {
         "display_name": "Google Meet via Firefox/Chromium/Chrome",
-        "required_binaries": ["firefox", "chromium", "chromium-browser", "google-chrome"],
-        "process_binaries": ["firefox", "chromium", "chromium-browser", "google-chrome", "chrome"],
+        "required_binaries": [
+            "firefox",
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+        ],
+        "process_binaries": [
+            "firefox",
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+            "chrome",
+        ],
     },
 }
 
@@ -57,7 +66,7 @@ FORBIDDEN_REPORT_KEYS = {
 
 
 def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def run_command(args: list[str], timeout: float = 20.0) -> dict[str, Any]:
@@ -84,7 +93,9 @@ def run_command(args: list[str], timeout: float = 20.0) -> dict[str, Any]:
     }
 
 
-def command_json(args: list[str], timeout: float = 20.0) -> tuple[list[dict[str, Any]], str | None]:
+def command_json(
+    args: list[str], timeout: float = 20.0
+) -> tuple[list[dict[str, Any]], str | None]:
     result = run_command(args, timeout=timeout)
     if not result["ok"]:
         return [], result["safe_error"] or "command_failed"
@@ -111,8 +122,12 @@ def active_processes(names: list[str]) -> list[str]:
 
 
 def service_state() -> dict[str, Any]:
-    enabled = run_command(["systemctl", "--user", "is-enabled", "translator.service"], timeout=5.0)
-    active = run_command(["systemctl", "--user", "is-active", "translator.service"], timeout=5.0)
+    enabled = run_command(
+        ["systemctl", "--user", "is-enabled", "translator.service"], timeout=5.0
+    )
+    active = run_command(
+        ["systemctl", "--user", "is-active", "translator.service"], timeout=5.0
+    )
     show = run_command(
         [
             "systemctl",
@@ -133,7 +148,9 @@ def service_state() -> dict[str, Any]:
             key, value = line.split("=", 1)
             properties[key] = value
     return {
-        "enabled": enabled["stdout"].strip() if enabled["stdout"].strip() else "unknown",
+        "enabled": enabled["stdout"].strip()
+        if enabled["stdout"].strip()
+        else "unknown",
         "active": active["stdout"].strip() if active["stdout"].strip() else "unknown",
         "properties": properties,
     }
@@ -143,11 +160,16 @@ def ensure_service(start_service: bool) -> tuple[dict[str, Any], bool]:
     before = service_state()
     if not start_service or before["active"] == "active":
         return before, False
-    start = run_command(["systemctl", "--user", "start", "translator.service"], timeout=20.0)
+    start = run_command(
+        ["systemctl", "--user", "start", "translator.service"], timeout=20.0
+    )
     for _ in range(40):
         current = service_state()
         if current["active"] == "active":
-            current["start_command"] = {"ok": start["ok"], "safe_error": start["safe_error"]}
+            current["start_command"] = {
+                "ok": start["ok"],
+                "safe_error": start["safe_error"],
+            }
             return current, True
         time.sleep(0.25)
     after = service_state()
@@ -155,10 +177,14 @@ def ensure_service(start_service: bool) -> tuple[dict[str, Any], bool]:
     return after, False
 
 
-def stop_service_if_needed(started_by_script: bool, stop_after: bool) -> dict[str, Any] | None:
+def stop_service_if_needed(
+    started_by_script: bool, stop_after: bool
+) -> dict[str, Any] | None:
     if not started_by_script or not stop_after:
         return None
-    stop = run_command(["systemctl", "--user", "stop", "translator.service"], timeout=20.0)
+    stop = run_command(
+        ["systemctl", "--user", "stop", "translator.service"], timeout=20.0
+    )
     cleanup = run_command(["translator-daemon", "--audio-graph-cleanup"], timeout=20.0)
     return {
         "stop_command": {"ok": stop["ok"], "safe_error": stop["safe_error"]},
@@ -181,7 +207,9 @@ def daemon_token() -> str | None:
     return None
 
 
-def daemon_request(path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def daemon_request(
+    path: str, method: str = "GET", payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
     token = daemon_token()
     if token is None:
         return {"ok": False, "safe_error": "control_token_unavailable"}
@@ -253,9 +281,13 @@ def classify_task10_stream(
         return None
     if "telegram" in binary or "telegram desktop" in application:
         return "telegram_desktop"
-    browser = binary in {"firefox", "chromium", "chromium-browser", "google-chrome", "chrome"} or (
-        application in {"firefox", "chromium", "google chrome", "chrome"}
-    )
+    browser = binary in {
+        "firefox",
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "chrome",
+    } or (application in {"firefox", "chromium", "google chrome", "chrome"})
     if browser and (stream_id == confirmed_meet_stream_id or "meet" in media):
         return "google_meet_browser"
     return None
@@ -275,7 +307,9 @@ def call_like(properties: dict[str, str]) -> bool:
 
 
 def collect_audio_state(confirmed_meet_stream_id: int | None = None) -> dict[str, Any]:
-    sink_inputs, sink_input_error = command_json(["pactl", "--format=json", "list", "sink-inputs"])
+    sink_inputs, sink_input_error = command_json(
+        ["pactl", "--format=json", "list", "sink-inputs"]
+    )
     sinks, sink_error = command_json(["pactl", "--format=json", "list", "sinks"])
     sources, source_error = command_json(["pactl", "--format=json", "list", "sources"])
     sink_names = {
@@ -290,8 +324,16 @@ def collect_audio_state(confirmed_meet_stream_id: int | None = None) -> dict[str
         properties = props(stream)
         stream_id = int(stream.get("index", 0) or 0)
         binary = properties.get("application.process.binary", "").lower()
-        browser = binary in {"firefox", "chromium", "chromium-browser", "google-chrome", "chrome"}
-        app_key = classify_task10_stream(stream_id, properties, confirmed_meet_stream_id)
+        browser = binary in {
+            "firefox",
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+            "chrome",
+        }
+        app_key = classify_task10_stream(
+            stream_id, properties, confirmed_meet_stream_id
+        )
         if app_key is None:
             if browser and call_like(properties) and not translator_owned(properties):
                 unconfirmed_browser_call_count += 1
@@ -317,7 +359,8 @@ def collect_audio_state(confirmed_meet_stream_id: int | None = None) -> dict[str
                     ]
                 ).lower(),
                 "current_sink_name": sink_names.get(sink_index, ""),
-                "on_translator_remote_in": sink_names.get(sink_index, "") == "translator_remote_in",
+                "on_translator_remote_in": sink_names.get(sink_index, "")
+                == "translator_remote_in",
             }
         )
     virtual_mic_present = any(
@@ -352,12 +395,17 @@ def collect_audio_state_with_settle(
         attempt += 1
         state = collect_audio_state(confirmed_meet_stream_id)
         state["settle_attempts"] = attempt
-        if state["virtual_microphone"]["source_present"] or time.monotonic() >= deadline:
+        if (
+            state["virtual_microphone"]["source_present"]
+            or time.monotonic() >= deadline
+        ):
             return state
         time.sleep(0.25)
 
 
-def select_manual_route(stream_id: int | None, audio_state: dict[str, Any]) -> dict[str, Any]:
+def select_manual_route(
+    stream_id: int | None, audio_state: dict[str, Any]
+) -> dict[str, Any]:
     if stream_id is None:
         return {"attempted": False, "status": "not_attempted"}
     candidates = audio_state["task10_route_candidates"]
@@ -377,7 +425,10 @@ def select_manual_route(stream_id: int | None, audio_state: dict[str, Any]) -> d
             "status": "blocked",
             "safe_error": "stream_id_is_not_call_like",
         }
-    if candidate["app_key"] == "google_meet_browser" and not candidate["meet_confirmed"]:
+    if (
+        candidate["app_key"] == "google_meet_browser"
+        and not candidate["meet_confirmed"]
+    ):
         return {
             "attempted": True,
             "status": "blocked",
@@ -430,7 +481,9 @@ def task7_debt(task7: dict[str, Any]) -> dict[str, Any]:
     return {
         "task7_complete": acceptance["task7_complete"],
         "local_provider_latency_classification": task7["classification"],
-        "requires_mvp_b_provider_comparison": acceptance["requires_mvp_b_provider_comparison"],
+        "requires_mvp_b_provider_comparison": acceptance[
+            "requires_mvp_b_provider_comparison"
+        ],
         "canonical_evidence": "docs/benchmarks/task7-live-human-round-trip.json",
         "blocked_acceptance_item": acceptance["blocked_acceptance_item"],
     }
@@ -495,13 +548,17 @@ def app_report(
             "required_binaries": binary_status(definition["required_binaries"]),
             "running_processes": active_processes(definition["process_binaries"]),
             "candidate_count": len(candidates),
-            "call_like_candidate_count": sum(1 for candidate in candidates if candidate["call_like"]),
+            "call_like_candidate_count": sum(
+                1 for candidate in candidates if candidate["call_like"]
+            ),
             "candidates": candidates,
         },
         "incoming_route_selection": manual_route,
         "virtual_microphone": {
             **audio_state["virtual_microphone"],
-            "call_app_selection_confirmed": virtual_mic_selected_confirmed if live_selected else False,
+            "call_app_selection_confirmed": virtual_mic_selected_confirmed
+            if live_selected
+            else False,
             "remote_outgoing_translation_confirmed": (
                 remote_outgoing_translation_confirmed if live_selected else False
             ),
@@ -514,7 +571,9 @@ def app_report(
         "live_second_endpoint": {
             "status": "passed" if live_passed else "blocked",
             "recording": recording if live_selected else {"provided": False},
-            "overlapping_speech_confirmed": overlapping_speech_confirmed if live_selected else False,
+            "overlapping_speech_confirmed": overlapping_speech_confirmed
+            if live_selected
+            else False,
         },
         "privacy": {
             "external_provider_started": False,
@@ -582,7 +641,12 @@ def privacy_scan(
         scanned_logs.append({"path": str(path), "bytes": path.stat().st_size})
         for marker in privacy_markers:
             if marker and marker in text:
-                log_matches.append({"path": str(path), "marker_sha256": hashlib.sha256(marker.encode()).hexdigest()})
+                log_matches.append(
+                    {
+                        "path": str(path),
+                        "marker_sha256": hashlib.sha256(marker.encode()).hexdigest(),
+                    }
+                )
     log_scan_passed = bool(log_files) and not missing_logs and not log_matches
     report_key_scan_passed = not forbidden_matches
     return {
@@ -594,7 +658,11 @@ def privacy_scan(
             "forbidden_report_key_matches": forbidden_matches,
         },
         "log_scan": {
-            "status": "passed" if log_scan_passed else "blocked" if not log_files else "failed",
+            "status": "passed"
+            if log_scan_passed
+            else "blocked"
+            if not log_files
+            else "failed",
             "scanned_logs": scanned_logs,
             "missing_logs": missing_logs,
             "marker_matches": log_matches,
@@ -613,12 +681,33 @@ def repo_c4_status(run_scan: bool) -> dict[str, Any]:
             "result": "not_run_by_smoke_script",
             "required_at_task_close": True,
         }
-    generator = Path("/home/anton/.agents/skills/repo-c4-scan/scripts/generate_repo_c4.py")
-    validator = Path("/home/anton/.agents/skills/repo-c4-scan/scripts/validate_repo_c4.py")
+    configured_tools = {
+        "generator": os.environ.get("TRANSLATOR_REPO_C4_GENERATOR"),
+        "validator": os.environ.get("TRANSLATOR_REPO_C4_VALIDATOR"),
+    }
+    if not all(configured_tools.values()):
+        return {
+            "result": "unavailable",
+            "safe_error": "repo_c4_tools_not_configured",
+            "required_at_task_close": True,
+        }
+    generator = Path(configured_tools["generator"] or "")
+    validator = Path(configured_tools["validator"] or "")
+    if not generator.is_file() or not validator.is_file():
+        return {
+            "result": "unavailable",
+            "safe_error": "repo_c4_tools_unavailable",
+            "required_at_task_close": True,
+        }
     generate = run_command(["python3", str(generator), str(ROOT)], timeout=120.0)
-    validate = run_command(["python3", str(validator), str(ROOT / "repo-c4.json")], timeout=120.0)
+    validate = run_command(
+        ["python3", str(validator), str(ROOT / "repo-c4.json")], timeout=120.0
+    )
     status: dict[str, Any] = {
-        "command": "python3 generate_repo_c4.py /home/anton/Source/translator && python3 validate_repo_c4.py /home/anton/Source/translator/repo-c4.json",
+        "command_contract": [
+            "python3 $TRANSLATOR_REPO_C4_GENERATOR <repository-root>",
+            "python3 $TRANSLATOR_REPO_C4_VALIDATOR <repository-root>/repo-c4.json",
+        ],
         "result": "passed" if generate["ok"] and validate["ok"] else "failed",
         "generate_ok": generate["ok"],
         "validate_ok": validate["ok"],
@@ -639,9 +728,9 @@ def repo_c4_status(run_scan: bool) -> dict[str, Any]:
     status["architecture_fidelity_partial_reasons"] = architecture_fidelity.get(
         "partial_reasons", []
     )
-    status["tool_orchestration_partial_reasons"] = (
-        meta.get("tool_orchestration", {}).get("partial_reasons", [])
-    )
+    status["tool_orchestration_partial_reasons"] = meta.get(
+        "tool_orchestration", {}
+    ).get("partial_reasons", [])
     return status
 
 
@@ -723,7 +812,9 @@ def validation_report(
         ],
         "latency": {
             "classification": task7["classification"],
-            "task11_mandatory": task7["acceptance"]["requires_mvp_b_provider_comparison"],
+            "task11_mandatory": task7["acceptance"][
+                "requires_mvp_b_provider_comparison"
+            ],
         },
         "critic": {
             "verdict": "pending",
@@ -808,7 +899,9 @@ def report_path(output_dir: Path, key: str) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Collect Task 10 real-app smoke evidence.")
+    parser = argparse.ArgumentParser(
+        description="Collect Task 10 real-app smoke evidence."
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--start-service", action="store_true")
     parser.add_argument("--stop-after", action="store_true")
@@ -821,7 +914,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--virtual-mic-selected-confirmed", action="store_true")
     parser.add_argument("--remote-outgoing-translation-confirmed", action="store_true")
     parser.add_argument("--log-file", action="append", default=[])
-    parser.add_argument("--privacy-marker", action="append", default=["private-spoken-marker", "task10-spoken-marker"])
+    parser.add_argument(
+        "--privacy-marker",
+        action="append",
+        default=["private-spoken-marker", "task10-spoken-marker"],
+    )
     parser.add_argument("--repo-c4-scan", action="store_true")
     parser.add_argument("--require-live-evidence", action="store_true")
     return parser.parse_args()
@@ -834,11 +931,15 @@ def main() -> int:
     service, started_by_script = ensure_service(args.start_service)
     try:
         audio_state = (
-            collect_audio_state_with_settle(args.settle_seconds, args.confirm_meet_stream_id)
+            collect_audio_state_with_settle(
+                args.settle_seconds, args.confirm_meet_stream_id
+            )
             if service["active"] == "active"
             else collect_audio_state(args.confirm_meet_stream_id)
         )
-        daemon_status = daemon_request("/v1/status") if service["active"] == "active" else None
+        daemon_status = (
+            daemon_request("/v1/status") if service["active"] == "active" else None
+        )
         environment = {
             "generated_by": "scripts/translator-task10-real-app-smoke",
             "service": service,

@@ -1,0 +1,4226 @@
+#!/usr/bin/python3 -I
+"""Generate and verify the repository's deterministic test collection manifest."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import ctypes
+import fnmatch
+import functools
+import gc
+import hashlib
+import inspect
+import io
+import json
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tomllib
+import unittest
+import warnings
+import xml.etree.ElementTree as ET
+from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Self
+
+ROOT = Path(__file__).resolve().parent.parent
+MANIFEST_PATH = ROOT / "tests" / "test-manifest.json"
+ALLOWLIST_PATH = ROOT / "tests" / "external-prerequisites.toml"
+SIDECAR_PYTHON = ROOT / "sidecar" / ".venv" / "bin" / "python"
+UI_ROOT = ROOT / "apps" / "translator-ui"
+SCHEMA_VERSION = 1
+PORTABLE_HOST_EXECUTABLES = frozenset({"/usr/bin/systemd-analyze"})
+COLLECTION_POLICY = {
+    "executed_outcomes": "exact",
+    "expected_failures": "forbidden",
+    "rust_doctests": "forbidden",
+    "unexpected_runtime_skips": "forbidden",
+}
+PRESERVED_VALIDATION_ENVIRONMENT = frozenset(
+    {
+        "TRANSLATOR_BUN",
+        "TRANSLATOR_CARGO_AUDIT",
+        "TRANSLATOR_GITLEAKS_BIN",
+        "TRANSLATOR_OSV_SCANNER",
+        "TRANSLATOR_SCA_BUN_TIMEOUT",
+        "TRANSLATOR_SCA_OSV_TIMEOUT",
+        "TRANSLATOR_SCA_RUST_TIMEOUT",
+        "TRANSLATOR_UV",
+    }
+)
+INHERITED_VALIDATION_ENVIRONMENT = frozenset({"HOME", "PATH"})
+DECLARED_VALIDATION_ENVIRONMENT = frozenset({"RUST_TEST_THREADS"})
+FIXED_VALIDATION_ENVIRONMENT = {
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "NO_COLOR": "1",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    "TZ": "UTC",
+}
+SANITIZED_ENVIRONMENT = {
+    "inherit": sorted(INHERITED_VALIDATION_ENVIRONMENT),
+    "fixed": FIXED_VALIDATION_ENVIRONMENT,
+    "preserve": sorted(PRESERVED_VALIDATION_ENVIRONMENT),
+    "declared": sorted(DECLARED_VALIDATION_ENVIRONMENT),
+}
+INTERNAL_MANIFEST_SHA_ENV = "TRANSLATOR_INTERNAL_TEST_MANIFEST_SHA256"
+OUTCOME_RECEIPT_PREFIX = "TRANSLATOR_TEST_OUTCOME_JSON="
+COLLECTOR_RECEIPT_PREFIX = "TRANSLATOR_MANIFEST_JSON="
+OUTCOME_RECEIPT_COMMANDS = {
+    "sidecar-test": "pytest",
+    "repository-test": "unittest",
+}
+
+_UNITTEST_PROTOCOL_NAMES = (
+    "__call__",
+    "run",
+    "_callSetUp",
+    "_callTestMethod",
+    "_callTearDown",
+    "_callCleanup",
+    "doCleanups",
+    "addCleanup",
+    "doClassCleanups",
+    "addClassCleanup",
+    "id",
+    "__getattribute__",
+)
+_UNITTEST_SYNC_PROTOCOL = tuple(
+    (name, inspect.getattr_static(unittest.TestCase, name))
+    for name in _UNITTEST_PROTOCOL_NAMES
+)
+_UNITTEST_ASYNC_PROTOCOL = tuple(
+    (name, inspect.getattr_static(unittest.IsolatedAsyncioTestCase, name))
+    for name in (
+        *_UNITTEST_PROTOCOL_NAMES,
+        "_callAsync",
+        "_callMaybeAsync",
+        "addAsyncCleanup",
+        "_setupAsyncioRunner",
+        "_tearDownAsyncioRunner",
+    )
+)
+_UNITTEST_SUITE_TYPE = unittest.TestSuite
+_UNITTEST_SUITE_PROTOCOL_NAMES = (
+    "__call__",
+    "__iter__",
+    "run",
+    "_handleClassSetUp",
+    "_handleModuleFixture",
+    "_handleModuleTearDown",
+    "_tearDownPreviousClass",
+    "_get_previous_module",
+    "_createClassOrModuleLevelException",
+    "_addClassOrModuleLevelException",
+    "_removeTestAtIndex",
+)
+_UNITTEST_SUITE_PROTOCOL = tuple(
+    (name, inspect.getattr_static(unittest.TestSuite, name))
+    for name in _UNITTEST_SUITE_PROTOCOL_NAMES
+)
+_UNITTEST_RUNNER_TYPE = unittest.TextTestRunner
+_UNITTEST_RUNNER_PROTOCOL = inspect.getattr_static(unittest.TextTestRunner, "run")
+_UNITTEST_CLASS_CLEANUP_PROTOCOL = inspect.getattr_static(
+    unittest.TestCase, "doClassCleanups"
+)
+_UNITTEST_MODULE_CLEANUP_PROTOCOL = unittest.case.doModuleCleanups
+_UNITTEST_SUITE_GLOBAL_PROTOCOL = tuple(
+    (name, inspect.getattr_static(unittest.suite, name))
+    for name in ("_isnotsuite", "_call_if_exists", "_DebugResult", "_ErrorHolder")
+)
+
+ALLOWED_FRAMEWORKS = frozenset({"rust", "pytest", "unittest", "bun"})
+ALLOWED_PREREQUISITES = frozenset(
+    {
+        "physical_audio_graph",
+        "real_call_endpoint",
+        "openai_credentials",
+        "gpu_model_cache",
+        "private_human_evidence",
+    }
+)
+DEFAULT_GATE_TIMEOUT_SECONDS = 900
+MAX_GATE_TIMEOUT_SECONDS = 3600
+GATE_TERMINATION_GRACE_SECONDS = 0.5
+GATE_ADOPTED_REAP_POLL_SECONDS = 0.05
+_PR_SET_CHILD_SUBREAPER = 36
+_GATE_PROCESS_LOCK = threading.Lock()
+
+
+def _gate(
+    command_id: str,
+    argv: list[str],
+    *,
+    cwd: str = ".",
+    env: dict[str, str] | None = None,
+    timeout_seconds: int = DEFAULT_GATE_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return {
+        "id": command_id,
+        "cwd": cwd,
+        "env": env or {},
+        "argv": argv,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+RUFF_TARGETS = [
+    "sidecar/translator_sidecar",
+    "sidecar/tests",
+    "tests",
+    "scripts/translator-browser-live-stream-smoke",
+    "scripts/translator-simulated-app-stream-smoke",
+    "scripts/translator-task10-real-app-smoke",
+    "scripts/translator-task11-openai-preflight",
+    "scripts/translator-task11-openai-synthetic-smoke",
+    "scripts/translator-task12-zoom-diagnostic",
+    "scripts/translator-publication-check",
+    "scripts/translator-test-manifest",
+    "scripts/translator-validate",
+]
+SHELLCHECK_TARGETS = [
+    "scripts/translator-asr-quality-debug",
+    "scripts/translator-desktop",
+    "scripts/translator-podcast-quality-debug",
+    "scripts/translator-publication-check.bash",
+    "scripts/translator-sca",
+    "scripts/translator-schema-check",
+    "scripts/translator-task9-smoke",
+]
+
+EXPECTED_COMMANDS: list[dict[str, Any]] = [
+    _gate("sidecar-sync", ["uv", "sync", "--locked", "--all-groups"], cwd="sidecar"),
+    _gate(
+        "ui-install",
+        ["bun", "install", "--frozen-lockfile"],
+        cwd="apps/translator-ui",
+    ),
+    _gate("ui-test", ["bun", "test", "src"], cwd="apps/translator-ui"),
+    _gate("ui-build", ["bun", "run", "build"], cwd="apps/translator-ui"),
+    _gate("rust-format", ["cargo", "fmt", "--all", "--", "--check"]),
+    _gate(
+        "rust-clippy",
+        [
+            "cargo",
+            "clippy",
+            "--locked",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    ),
+    _gate(
+        "rust-test",
+        ["cargo", "test", "--locked", "--workspace", "--all-targets"],
+        env={"RUST_TEST_THREADS": "1"},
+    ),
+    _gate(
+        "rust-doc-test",
+        ["cargo", "test", "--locked", "--workspace", "--doc"],
+        env={"RUST_TEST_THREADS": "1"},
+    ),
+    _gate(
+        "python-lint",
+        [
+            "sidecar/.venv/bin/ruff",
+            "check",
+            "--config",
+            "sidecar/pyproject.toml",
+            *RUFF_TARGETS,
+        ],
+    ),
+    _gate(
+        "python-format",
+        [
+            "sidecar/.venv/bin/ruff",
+            "format",
+            "--check",
+            "--config",
+            "sidecar/pyproject.toml",
+            *RUFF_TARGETS,
+        ],
+    ),
+    _gate(
+        "sidecar-test",
+        [
+            "sidecar/.venv/bin/python",
+            "-I",
+            "-W",
+            "error::ResourceWarning",
+            "-W",
+            "error::RuntimeWarning",
+            "scripts/translator-test-manifest",
+            "_run-pytest",
+        ],
+    ),
+    _gate(
+        "repository-test",
+        [
+            "sidecar/.venv/bin/python",
+            "-I",
+            "-W",
+            "error::ResourceWarning",
+            "-W",
+            "error::RuntimeWarning",
+            "scripts/translator-test-manifest",
+            "_run-unittest",
+        ],
+    ),
+    _gate("shellcheck", ["shellcheck", *SHELLCHECK_TARGETS]),
+    _gate(
+        "systemd-verify",
+        ["/usr/bin/systemd-analyze", "verify", "systemd/translator.service"],
+    ),
+    _gate("sca", ["./scripts/translator-sca"]),
+    _gate("schema-check", ["./scripts/translator-schema-check"]),
+    _gate(
+        "publication-check",
+        ["./scripts/translator-publication-check", "candidate"],
+    ),
+    _gate("manifest-check", ["./scripts/translator-test-manifest", "check"]),
+]
+
+
+class ManifestError(RuntimeError):
+    """A stable, non-sensitive validation failure."""
+
+
+class _GateTerminationRequested(BaseException):
+    pass
+
+
+@dataclass(frozen=True)
+class _RepositorySnapshot:
+    index: bytes
+    files: tuple[tuple[bytes, int, int, str], ...]
+    refs: bytes
+    head: str
+    tree: str
+    refs_sha256: str
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    environment = _validation_environment()
+    for name in tuple(environment):
+        if name.startswith("GIT_"):
+            del environment[name]
+    environment.update(
+        {
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+    )
+    return environment
+
+
+def _source_git(*args: str, allow_status: set[int] | None = None) -> bytes:
+    completed = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-C",
+            str(ROOT),
+            *args,
+        ],
+        env=_trusted_git_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+    accepted = allow_status or {0}
+    if completed.returncode not in accepted:
+        raise ManifestError("trusted repository state cannot be inspected")
+    return completed.stdout
+
+
+def _tracked_file_snapshot(index: bytes) -> tuple[tuple[bytes, int, int, str], ...]:
+    files: list[tuple[bytes, int, int, str]] = []
+    root_fd = os.open(ROOT, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+    try:
+        for entry in (value for value in index.split(b"\0") if value):
+            try:
+                metadata, raw_path = entry.split(b"\t", 1)
+                raw_mode, _, raw_stage = metadata.split(b" ")
+            except ValueError as error:
+                raise ManifestError("tracked repository index is malformed") from error
+            parts = raw_path.split(b"/")
+            if (
+                raw_stage != b"0"
+                or raw_mode not in {b"100644", b"100755"}
+                or not parts
+                or any(part in {b"", b".", b".."} for part in parts)
+            ):
+                raise ManifestError("tracked repository index is malformed")
+            directory_fd = os.dup(root_fd)
+            try:
+                for component in parts[:-1]:
+                    next_fd = os.open(
+                        component,
+                        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+                        dir_fd=directory_fd,
+                    )
+                    os.close(directory_fd)
+                    directory_fd = next_fd
+                file_fd = os.open(
+                    parts[-1],
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+            except OSError as error:
+                raise ManifestError(
+                    "tracked repository file cannot be snapshotted"
+                ) from error
+            finally:
+                os.close(directory_fd)
+            try:
+                metadata_before = os.fstat(file_fd)
+                if not stat.S_ISREG(metadata_before.st_mode):
+                    raise ManifestError("tracked repository file is not regular")
+                digest = hashlib.sha256()
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    digest.update(chunk)
+                metadata_after = os.fstat(file_fd)
+            finally:
+                os.close(file_fd)
+            stable = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+            if any(
+                getattr(metadata_before, field) != getattr(metadata_after, field)
+                for field in stable
+            ):
+                raise ManifestError("tracked repository file changed while reading")
+            files.append(
+                (
+                    raw_path,
+                    stat.S_IMODE(metadata_before.st_mode),
+                    metadata_before.st_size,
+                    digest.hexdigest(),
+                )
+            )
+    finally:
+        os.close(root_fd)
+    return tuple(files)
+
+
+def _capture_repository_snapshot() -> _RepositorySnapshot:
+    index = _source_git("ls-files", "--stage", "-z")
+    untracked = _source_git("ls-files", "--others", "--exclude-standard", "-z")
+    if untracked:
+        raise ManifestError(
+            "nonignored untracked files are forbidden during validation"
+        )
+    symbolic_head = _source_git("symbolic-ref", "-q", "HEAD").removesuffix(b"\n")
+    if not symbolic_head or b"\n" in symbolic_head:
+        raise ManifestError("validation requires a symbolic branch HEAD")
+    refs = (
+        b"symbolic-head "
+        + symbolic_head
+        + b"\n"
+        + _source_git("show-ref", "--head", "--dereference")
+    )
+    head = _source_git("rev-parse", "--verify", "HEAD^{commit}").strip().decode("ascii")
+    tree = _source_git("write-tree").strip().decode("ascii")
+    return _RepositorySnapshot(
+        index=index,
+        files=_tracked_file_snapshot(index),
+        refs=refs,
+        head=head,
+        tree=tree,
+        refs_sha256=hashlib.sha256(refs).hexdigest(),
+    )
+
+
+def _verify_repository_snapshot(expected: _RepositorySnapshot) -> None:
+    if _capture_repository_snapshot() != expected:
+        raise ManifestError("repository source changed during deterministic validation")
+
+
+def _verify_publication_receipt(
+    stdout: str, stderr: str, snapshot: _RepositorySnapshot
+) -> None:
+    expected = (
+        "publication precommit receipt: v1 "
+        f"head={snapshot.head} tree={snapshot.tree} "
+        f"refs-sha256={snapshot.refs_sha256} release=false\n"
+        "publication precommit candidate only; this is not release evidence\n"
+    )
+    if stdout != expected or stderr:
+        raise ManifestError("publication gate did not emit the exact candidate receipt")
+
+
+def _validation_environment(
+    source: dict[str, str] | None = None,
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    process_env = dict(os.environ if source is None else source)
+    inherited_names = (
+        INHERITED_VALIDATION_ENVIRONMENT | PRESERVED_VALIDATION_ENVIRONMENT
+    )
+    environment = {
+        name: value for name, value in process_env.items() if name in inherited_names
+    }
+    environment.update(FIXED_VALIDATION_ENVIRONMENT)
+    if overrides:
+        for name in overrides:
+            if name not in (
+                PRESERVED_VALIDATION_ENVIRONMENT | DECLARED_VALIDATION_ENVIRONMENT
+            ):
+                raise ManifestError(
+                    "execution plan contains an undeclared environment variable"
+                )
+        environment.update(overrides)
+    return environment
+
+
+def _run_capture(
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    env: dict[str, str] | None = None,
+    require_empty_stderr: bool = False,
+) -> str:
+    try:
+        relative_cwd = cwd.resolve().relative_to(ROOT.resolve()).as_posix()
+    except ValueError as error:
+        raise ManifestError(
+            "collector working directory is outside the repository"
+        ) from error
+    command = {
+        "argv": argv,
+        "cwd": relative_cwd,
+        "timeout_seconds": timeout,
+    }
+    try:
+        result = _run_gate_process(
+            command,
+            _validation_environment(overrides=env),
+            capture_output=True,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except FileNotFoundError as error:
+        raise ManifestError(f"required collector is unavailable: {argv[0]}") from error
+    except subprocess.TimeoutExpired as error:
+        raise ManifestError(
+            f"collector timed out after {timeout}s: {argv[0]}"
+        ) from error
+    except UnicodeDecodeError as error:
+        raise ManifestError("collector emitted invalid UTF-8") from error
+    if result.returncode != 0:
+        raise ManifestError(
+            f"collector failed without a manifest: {argv[0]} (exit {result.returncode})"
+        )
+    if require_empty_stderr and result.stderr:
+        raise ManifestError("collector emitted unexpected stderr")
+    return result.stdout
+
+
+def _repo_path(path: str | Path, *, base: Path = ROOT) -> str:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        return candidate.resolve().relative_to(ROOT).as_posix()
+    except ValueError as error:
+        raise ManifestError(
+            "collector returned a path outside the repository"
+        ) from error
+
+
+def _collection(
+    rows: list[dict[str, str]], *, known_files: list[str] | None = None
+) -> dict[str, Any]:
+    if not rows:
+        raise ManifestError("collector returned an empty test collection")
+    rows.sort(key=lambda row: row["id"])
+    identifiers = [row["id"] for row in rows]
+    if len(identifiers) != len(set(identifiers)):
+        raise ManifestError("collector returned a duplicate test ID")
+    files = sorted(set(known_files or ()) | {row["file"] for row in rows})
+    return {
+        "file_count": len(files),
+        "node_count": len(rows),
+        "external_skip_count": sum(row["status"] == "external_skip" for row in rows),
+        "files": files,
+        "nodes": rows,
+    }
+
+
+def _parse_libtest_list(output: str) -> list[str]:
+    nodes: list[str] = []
+    for line in output.splitlines():
+        name, separator, kind = line.rpartition(": ")
+        if separator and kind in {"test", "benchmark"}:
+            nodes.append(name)
+    return nodes
+
+
+def _verify_rust_doctest_listing(output: str) -> None:
+    if output.strip():
+        raise ManifestError(
+            "Rust doctests are forbidden until the manifest inventories their exact IDs"
+        )
+
+
+def _verify_no_rust_doctests() -> None:
+    output = _run_capture(
+        [
+            "cargo",
+            "test",
+            "--locked",
+            "--workspace",
+            "--doc",
+            "--",
+            "--list",
+            "--format=terse",
+        ],
+        cwd=ROOT,
+        timeout=900,
+        env={"RUST_TEST_THREADS": "1"},
+    )
+    _verify_rust_doctest_listing(output)
+
+
+def _collect_rust() -> dict[str, Any]:
+    metadata = json.loads(
+        _run_capture(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"],
+            cwd=ROOT,
+            timeout=120,
+        )
+    )
+    workspace_members = set(metadata["workspace_members"])
+    package_names = {
+        package["id"]: package["name"]
+        for package in metadata["packages"]
+        if package["id"] in workspace_members
+    }
+    cargo_output = _run_capture(
+        [
+            "cargo",
+            "test",
+            "--locked",
+            "--workspace",
+            "--all-targets",
+            "--no-run",
+            "--message-format=json",
+        ],
+        cwd=ROOT,
+        timeout=900,
+        env={"RUST_TEST_THREADS": "1"},
+    )
+
+    executables: dict[tuple[str, str, str], tuple[Path, str]] = {}
+    for line in cargo_output.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get("reason") != "compiler-artifact":
+            continue
+        package_id = message.get("package_id")
+        executable = message.get("executable")
+        profile = message.get("profile", {})
+        if package_id not in package_names or not executable or not profile.get("test"):
+            continue
+        target = message["target"]
+        kind = "+".join(sorted(target["kind"]))
+        key = (package_names[package_id], kind, target["name"])
+        value = (Path(executable), _repo_path(target["src_path"]))
+        previous = executables.setdefault(key, value)
+        if previous != value:
+            raise ManifestError("Cargo returned duplicate test targets")
+
+    rows: list[dict[str, str]] = []
+    for (package, kind, target), (executable, source) in sorted(executables.items()):
+        listed = _parse_libtest_list(
+            _run_capture(
+                [str(executable), "--list", "--format=terse"],
+                cwd=ROOT,
+                timeout=120,
+            )
+        )
+        ignored = set(
+            _parse_libtest_list(
+                _run_capture(
+                    [str(executable), "--list", "--ignored", "--format=terse"],
+                    cwd=ROOT,
+                    timeout=120,
+                )
+            )
+        )
+        for name in listed:
+            rows.append(
+                {
+                    "id": f"{package}::{kind}::{target}::{name}",
+                    "file": source,
+                    "status": "external_skip" if name in ignored else "deterministic",
+                }
+            )
+    return _collection(rows, known_files=[source for _, source in executables.values()])
+
+
+def _marker_is_active(marker: Any) -> bool:
+    if marker is None:
+        return False
+    if marker.args:
+        conditions = marker.args
+    elif "condition" in marker.kwargs:
+        conditions = (marker.kwargs["condition"],)
+    else:
+        return True
+    if all(type(condition) is bool for condition in conditions):
+        return any(conditions)
+    raise ManifestError("pytest conditional markers require resolved booleans")
+
+
+def _first_active_marker(markers: Any) -> Any:
+    ordered = tuple(markers)
+    activity = tuple(_marker_is_active(marker) for marker in ordered)
+    return next(
+        (
+            marker
+            for marker, is_active in zip(ordered, activity, strict=True)
+            if is_active
+        ),
+        None,
+    )
+
+
+def _normalize_pytest_node_id(node_id: str, *, base: Path) -> str:
+    raw_parts = node_id.replace("\\", "/").split("::")
+    if not raw_parts[0]:
+        raise ManifestError("pytest returned an empty test path")
+    file_path = _repo_path(raw_parts[0], base=base)
+    return "::".join([file_path, *raw_parts[1:]])
+
+
+def _pytest_item_node_id(item: Any) -> str:
+    raw_parts = item.nodeid.replace("\\", "/").split("::")
+    file_path = _repo_path(item.path)
+    return "::".join([file_path, *raw_parts[1:]])
+
+
+def _verify_no_pytest_control_plugins() -> None:
+    candidates = [ROOT / "sidecar" / "conftest.py"]
+    tests_root = ROOT / "sidecar" / "tests"
+    if tests_root.is_dir():
+        candidates.extend(tests_root.rglob("conftest.py"))
+    if any(path.exists() or path.is_symlink() for path in candidates):
+        raise ManifestError("repository pytest control plugins are unsupported")
+
+
+def _pytest_test_directory() -> Path:
+    return ROOT / "sidecar" / "tests"
+
+
+def _controlled_pytest_arguments() -> list[str]:
+    test_directory = _pytest_test_directory()
+    if not test_directory.is_dir():
+        raise ManifestError("sidecar pytest test directory is missing")
+    return [
+        "-c",
+        os.devnull,
+        "--rootdir",
+        str(ROOT / "sidecar"),
+        str(test_directory),
+    ]
+
+
+def _pytest_source_files() -> list[str]:
+    return sorted(
+        path.resolve().relative_to(ROOT).as_posix()
+        for path in _pytest_test_directory().rglob("*.py")
+        if path.name.startswith("test_") or path.name.endswith("_test.py")
+    )
+
+
+def _validated_pytest_callable(item: Any, pytest_module: Any) -> Callable[..., Any]:
+    from _pytest.python import _get_first_non_fixture_func
+
+    if type(item) is not pytest_module.Function:
+        raise ManifestError(
+            "sidecar pytest supports only native pytest function items; "
+            "unittest TestCase items belong in the root unittest suite"
+        )
+    callback = item.obj
+    if not callable(callback):
+        raise ManifestError("pytest item has no callable body")
+    xunit_callbacks = (
+        (
+            item.module,
+            (
+                ("setUpModule", "setup_module"),
+                ("tearDownModule", "teardown_module"),
+                ("setup_function",),
+                ("teardown_function",),
+            ),
+        ),
+        (
+            item.cls,
+            (
+                ("setup_class",),
+                ("teardown_class",),
+                ("setup_method",),
+                ("teardown_method",),
+            ),
+        ),
+    )
+    for owner, name_groups in xunit_callbacks:
+        if owner is None:
+            continue
+        for names in name_groups:
+            if _get_first_non_fixture_func(owner, names) is not None:
+                raise ManifestError(
+                    "sidecar pytest xunit-style setup and teardown are unsupported"
+                )
+    if (
+        inspect.isgeneratorfunction(callback)
+        or inspect.isasyncgenfunction(callback)
+        or inspect.iscoroutinefunction(callback)
+    ):
+        raise ManifestError("pytest test body uses an unsupported callable mode")
+    return callback
+
+
+def _pytest_collector_rows() -> tuple[list[dict[str, str]], list[str]]:
+    import pytest
+
+    _verify_no_pytest_control_plugins()
+    rows: list[dict[str, str]] = []
+
+    class Collector:
+        def __init__(self) -> None:
+            self.files: set[str] = set()
+            self.warnings: list[str] = []
+
+        def pytest_configure(self, config: Any) -> None:
+            if config.getini("filterwarnings"):
+                self.warnings.append("pytest warning filters configured")
+
+        def pytest_collection_finish(self, session: Any) -> None:
+            for item in session.items:
+                try:
+                    _validated_pytest_callable(item, pytest)
+                except ManifestError as error:
+                    self.warnings.append(str(error))
+                if next(item.iter_markers(name="filterwarnings"), None) is not None:
+                    self.warnings.append("pytest warning filter marker")
+                node_id = _pytest_item_node_id(item)
+                file_path = _repo_path(item.path)
+                self.files.add(file_path)
+                xfail = _first_active_marker(item.iter_markers(name="xfail"))
+                skip = next(item.iter_markers(name="skip"), None)
+                skipif = _first_active_marker(item.iter_markers(name="skipif"))
+                if xfail is not None:
+                    status = "xfail"
+                    reason = str(xfail.kwargs.get("reason", ""))
+                elif skip is not None or _marker_is_active(skipif):
+                    status = "external_skip"
+                    marker = skipif if skipif is not None else skip
+                    reason = str(marker.kwargs.get("reason", ""))
+                    if not reason and marker.name == "skip" and marker.args:
+                        reason = (
+                            marker.args[0] if isinstance(marker.args[0], str) else ""
+                        )
+                else:
+                    status = "deterministic"
+                    reason = ""
+                rows.append(
+                    {
+                        "id": node_id,
+                        "file": file_path,
+                        "status": status,
+                        "reason": reason,
+                    }
+                )
+
+        def pytest_warning_recorded(
+            self,
+            warning_message: Any,
+            when: str,
+            nodeid: str,
+            location: tuple[str, int, str] | None,
+        ) -> None:
+            del when, nodeid, location
+            category = warning_message.category
+            if isinstance(category, type) and issubclass(
+                category, pytest.PytestWarning
+            ):
+                self.warnings.append("pytest collection warning")
+
+    collector = Collector()
+    unraisable_guard = _UnraisableIssueGuard()
+    with (
+        unraisable_guard,
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(io.StringIO()),
+    ):
+        result = pytest.main(
+            [
+                *_controlled_pytest_arguments(),
+                "--collect-only",
+                "-W",
+                "error::ResourceWarning",
+                "-W",
+                "error::RuntimeWarning",
+                "-W",
+                "error::pytest.PytestWarning",
+            ],
+            plugins=[collector],
+        )
+    if int(result) != 0 or collector.warnings or unraisable_guard.issues:
+        raise ManifestError("pytest collection failed")
+    source_files = _pytest_source_files()
+    if collector.files != set(source_files):
+        raise ManifestError("pytest did not collect every controlled test module")
+    return rows, source_files
+
+
+def _pytest_skip_reason(report: Any) -> str:
+    longrepr = report.longrepr
+    reason = (
+        longrepr[2] if isinstance(longrepr, tuple) and len(longrepr) >= 3 else longrepr
+    )
+    return str(reason).removeprefix("Skipped: ")
+
+
+class _UnraisableIssueGuard:
+    def __init__(self) -> None:
+        self.issues: list[str] = []
+        self._previous_hook: Any = None
+        self._hook = self._record
+        self._previous_thread_hook: Any = None
+        self._thread_hook = self._record_thread
+        self._initial_threads: frozenset[threading.Thread] = frozenset()
+        self._warning_context: Any = None
+        self._expected_warning_filters: tuple[Any, ...] = ()
+
+    def _record(self, _unraisable: Any) -> None:
+        self.issues.append("unraisable exception")
+
+    def _record_thread(self, _args: threading.ExceptHookArgs) -> None:
+        self.issues.append("unhandled thread exception")
+
+    def __enter__(self) -> Self:
+        self._warning_context = warnings.catch_warnings()
+        self._warning_context.__enter__()
+        warnings.simplefilter("error", ResourceWarning)
+        warnings.simplefilter("error", RuntimeWarning)
+        self._expected_warning_filters = tuple(warnings.filters)
+        self._previous_hook = sys.unraisablehook
+        self._previous_thread_hook = threading.excepthook
+        self._initial_threads = frozenset(threading.enumerate())
+        sys.unraisablehook = self._hook
+        threading.excepthook = self._thread_hook
+        return self
+
+    def __exit__(self, *exception: object) -> bool:
+        try:
+            if sys.unraisablehook is not self._hook:
+                self.issues.append("unraisable hook changed")
+                sys.unraisablehook = self._hook
+            if threading.excepthook is not self._thread_hook:
+                self.issues.append("thread exception hook changed")
+                threading.excepthook = self._thread_hook
+            if tuple(warnings.filters) != self._expected_warning_filters:
+                self.issues.append("warning filters changed")
+            warnings.simplefilter("error", ResourceWarning)
+            warnings.simplefilter("error", RuntimeWarning)
+            gc.collect()
+            if any(
+                thread not in self._initial_threads and thread.is_alive()
+                for thread in threading.enumerate()
+            ):
+                self.issues.append("live thread after test suite")
+        finally:
+            sys.unraisablehook = self._previous_hook
+            threading.excepthook = self._previous_thread_hook
+            self._warning_context.__exit__(*exception)
+        return False
+
+
+def _blocked_pytest_warning_types(pytest_module: Any) -> tuple[type[Warning], ...]:
+    return (
+        ResourceWarning,
+        RuntimeWarning,
+        pytest_module.PytestWarning,
+    )
+
+
+class _PytestOutcomeRecorder:
+    def __init__(
+        self,
+        *,
+        base: Path,
+        blocked_warning_types: tuple[type[Warning], ...] = (
+            ResourceWarning,
+            RuntimeWarning,
+        ),
+    ) -> None:
+        self.base = base
+        self.blocked_warning_types = blocked_warning_types
+        self.collected: set[str] = set()
+        self.deselected: set[str] = set()
+        self.collection_issues: list[str] = []
+        self.runtime_issues: list[str] = []
+        self.phase_reports: dict[str, dict[str, dict[str, str]]] = {}
+        self.phase_order: dict[str, list[str]] = {}
+        self.duplicate_phases: set[tuple[str, str]] = set()
+        self.item_ids: dict[str, str] = {}
+        self.item_callables: dict[str, Callable[..., Any]] = {}
+        self.item_runtest_protocol: dict[str, Any] = {}
+        self.body_started: set[str] = set()
+        self.body_completed: set[str] = set()
+        self.body_duplicates: set[str] = set()
+
+    def _node_id(self, raw_node_id: str) -> str:
+        return _normalize_pytest_node_id(raw_node_id, base=self.base)
+
+    def pytest_configure(self, config: Any) -> None:
+        if config.getini("filterwarnings"):
+            self.collection_issues.append("pytest warning filters configured")
+
+    def pytest_collection_finish(self, session: Any) -> None:
+        node_ids = []
+        for item in session.items:
+            if next(item.iter_markers(name="filterwarnings"), None) is not None:
+                self.collection_issues.append("pytest warning filter marker")
+            node_id = _pytest_item_node_id(item)
+            self.item_ids[item.nodeid] = node_id
+            node_ids.append(node_id)
+            self._register_item(item)
+        if len(node_ids) != len(set(node_ids)):
+            self.collection_issues.append("duplicate collected test ID")
+        self.collected.update(node_ids)
+
+    def _register_item(self, item: Any) -> None:
+        try:
+            callback = _validated_pytest_callable(item, sys.modules["pytest"])
+            runtest = inspect.getattr_static(item, "runtest")
+        except (AttributeError, ManifestError) as error:
+            self.collection_issues.append(str(error))
+            return
+        self.item_callables[item.nodeid] = callback
+        self.item_runtest_protocol[item.nodeid] = runtest
+
+    def verify_item_protocol(self, item: Any) -> None:
+        expected_callback = self.item_callables.get(item.nodeid)
+        expected_runtest = self.item_runtest_protocol.get(item.nodeid)
+        if (
+            expected_callback is None
+            or item.obj is not expected_callback
+            or expected_runtest is None
+            or inspect.getattr_static(item, "runtest") is not expected_runtest
+        ):
+            self.runtime_issues.append("pytest test execution protocol changed")
+            raise ManifestError("pytest test execution protocol changed")
+
+    def mark_body_started(self, item: Any) -> None:
+        node_id = self.item_ids[item.nodeid]
+        if node_id in self.body_started:
+            self.body_duplicates.add("duplicate pytest body start")
+        self.body_started.add(node_id)
+
+    def mark_body_completed(self, item: Any) -> None:
+        node_id = self.item_ids[item.nodeid]
+        if node_id in self.body_completed:
+            self.body_duplicates.add("duplicate pytest body completion")
+        self.body_completed.add(node_id)
+
+    def pytest_deselected(self, items: list[Any]) -> None:
+        for item in items:
+            node_id = _pytest_item_node_id(item)
+            self.item_ids[item.nodeid] = node_id
+            self.deselected.add(node_id)
+
+    def pytest_collectreport(self, report: Any) -> None:
+        if report.failed:
+            self.collection_issues.append("collection failure")
+        elif report.skipped:
+            self.collection_issues.append("collection skip")
+
+    def pytest_warning_recorded(
+        self,
+        warning_message: Any,
+        when: str,
+        nodeid: str,
+        location: tuple[str, int, str] | None,
+    ) -> None:
+        del when, nodeid, location
+        category = warning_message.category
+        if isinstance(category, type) and any(
+            issubclass(category, blocked) for blocked in self.blocked_warning_types
+        ):
+            self.runtime_issues.append("blocked runtime warning")
+
+    def pytest_runtest_logreport(self, report: Any) -> None:
+        node_id = self.item_ids.get(report.nodeid)
+        if node_id is None:
+            node_id = self._node_id(report.nodeid)
+        phase = str(report.when)
+        reports = self.phase_reports.setdefault(node_id, {})
+        if phase in reports:
+            self.duplicate_phases.add((node_id, phase))
+        self.phase_order.setdefault(node_id, []).append(phase)
+
+        was_xfail = bool(getattr(report, "wasxfail", False))
+        if was_xfail:
+            status = "xfailed" if report.skipped else "xpassed"
+            reason = ""
+        elif report.failed:
+            status = "failed" if phase == "call" else "error"
+            reason = ""
+        elif report.skipped:
+            status = "skipped"
+            reason = _pytest_skip_reason(report)
+        elif report.passed:
+            status = "passed"
+            reason = ""
+        else:
+            status = "unknown"
+            reason = ""
+        reports[phase] = {"status": status, "reason": reason}
+
+    def outcomes(self) -> dict[str, dict[str, str]]:
+        outcomes: dict[str, dict[str, str]] = {}
+        for node_id in self.collected | set(self.phase_reports):
+            phases = self.phase_reports.get(node_id, {})
+            phase_order = self.phase_order.get(node_id, [])
+            records = list(phases.values())
+            statuses = {record["status"] for record in records}
+            if "error" in statuses:
+                outcome = {"status": "error", "reason": ""}
+            elif "failed" in statuses:
+                outcome = {"status": "failed", "reason": ""}
+            elif statuses & {"xfailed", "xpassed"}:
+                status = "xpassed" if "xpassed" in statuses else "xfailed"
+                outcome = {"status": status, "reason": ""}
+            elif (
+                phase_order == ["setup", "teardown"]
+                and set(phases) == {"setup", "teardown"}
+                and phases["setup"]["status"] == "skipped"
+                and phases["teardown"]["status"] == "passed"
+            ):
+                outcome = {
+                    "status": "skipped",
+                    "reason": phases["setup"]["reason"],
+                }
+            elif phase_order == ["setup", "call", "teardown"] and statuses == {
+                "passed"
+            }:
+                outcome = {"status": "passed", "reason": ""}
+            elif records:
+                outcome = {"status": "invalid_phase", "reason": ""}
+            else:
+                outcome = {"status": "not_run", "reason": ""}
+            outcomes[node_id] = outcome
+        return outcomes
+
+
+def _flatten_unittest_suite(suite: Any) -> Any:
+    if type(suite) is not _UNITTEST_SUITE_TYPE:
+        raise ManifestError("unittest collection contains a custom TestSuite")
+    for child in suite:
+        if isinstance(child, unittest.TestSuite):
+            yield from _flatten_unittest_suite(child)
+        else:
+            yield child
+
+
+def _unittest_test_id(test: Any) -> str:
+    parent = getattr(test, "test_case", None)
+    return str((parent or test).id())
+
+
+def _validate_unittest_leaf(test: Any) -> None:
+    if not isinstance(test, unittest.TestCase):
+        raise ManifestError("unittest collection contains an unsupported leaf")
+    expected_protocol = (
+        _UNITTEST_ASYNC_PROTOCOL
+        if isinstance(test, unittest.IsolatedAsyncioTestCase)
+        else _UNITTEST_SYNC_PROTOCOL
+    )
+    for name, expected_descriptor in expected_protocol:
+        try:
+            actual_descriptor = inspect.getattr_static(test, name)
+        except AttributeError as error:
+            raise ManifestError(
+                "unittest leaf overrides the execution protocol"
+            ) from error
+        if actual_descriptor is not expected_descriptor:
+            raise ManifestError("unittest leaf overrides the execution protocol")
+
+    method_name = test._testMethodName
+    if not isinstance(method_name, str) or not method_name:
+        raise ManifestError("unittest leaf has an invalid test method name")
+    try:
+        method_descriptor = inspect.getattr_static(type(test), method_name)
+        instance_descriptor = inspect.getattr_static(test, method_name)
+    except AttributeError as error:
+        raise ManifestError("unittest leaf has no callable test method") from error
+    if instance_descriptor is not method_descriptor:
+        raise ManifestError("unittest leaf has no callable test method")
+    if isinstance(method_descriptor, (staticmethod, classmethod)):
+        method = method_descriptor.__func__
+    else:
+        method = method_descriptor
+    if not inspect.isfunction(method):
+        raise ManifestError("unittest leaf has no callable test method")
+    if inspect.isgeneratorfunction(method) or inspect.isasyncgenfunction(method):
+        raise ManifestError("unittest generator test methods are unsupported")
+    if inspect.iscoroutinefunction(method) and not isinstance(
+        test, unittest.IsolatedAsyncioTestCase
+    ):
+        raise ManifestError(
+            "unittest coroutine methods require IsolatedAsyncioTestCase"
+        )
+
+
+@dataclass
+class _UnittestExecutionEvidence:
+    run_started: set[str]
+    run_completed: set[str]
+    body_started: set[str]
+    body_completed: set[str]
+    duplicate_events: set[str]
+
+
+def _mark_unittest_execution_event(
+    events: set[str], duplicates: set[str], node_id: str, label: str
+) -> None:
+    if node_id in events:
+        duplicates.add(label)
+    events.add(node_id)
+
+
+def _require_unittest_none_result(value: Any, *, label: str) -> None:
+    if value is not None:
+        raise ManifestError(f"unittest {label} must return None")
+
+
+def _reject_unittest_lazy_result(value: Any, *, label: str) -> None:
+    if (
+        inspect.isgenerator(value)
+        or inspect.isasyncgen(value)
+        or inspect.isawaitable(value)
+        or isinstance(
+            value,
+            (
+                Iterator,
+                AsyncIterator,
+                contextlib.AbstractContextManager,
+                contextlib.AbstractAsyncContextManager,
+            ),
+        )
+    ):
+        raise ManifestError(f"unittest {label} returned an unexecuted lazy result")
+
+
+def _instrument_unittest_leaf(
+    test: unittest.TestCase,
+    evidence: _UnittestExecutionEvidence,
+    *,
+    suite_protocol_verifier: Callable[[], None] | None = None,
+) -> None:
+    _validate_unittest_leaf(test)
+    node_id = _unittest_test_id(test)
+    method_name = test._testMethodName
+    method = getattr(test, method_name)
+    protocol = (
+        _UNITTEST_ASYNC_PROTOCOL
+        if isinstance(test, unittest.IsolatedAsyncioTestCase)
+        else _UNITTEST_SYNC_PROTOCOL
+    )
+    trusted = dict(protocol)
+    trusted_run = trusted["run"]
+    trusted_call_set_up = trusted["_callSetUp"]
+    trusted_call_tear_down = trusted["_callTearDown"]
+    trusted_do_cleanups = trusted["doCleanups"]
+    trusted_add_cleanup = trusted["addCleanup"]
+    set_up = test.setUp
+    tear_down = test.tearDown
+    class_descriptor_snapshot = {
+        name: inspect.getattr_static(type(test), name)
+        for name in dict.fromkeys(
+            (
+                *(name for name, _descriptor in protocol),
+                method_name,
+                "setUp",
+                "tearDown",
+                *(
+                    ("asyncSetUp", "asyncTearDown")
+                    if isinstance(test, unittest.IsolatedAsyncioTestCase)
+                    else ()
+                ),
+            )
+        )
+    }
+    lifecycle_counts: dict[str, int] = {}
+    registered_cleanups: list[Callable[..., Any]] = []
+    active_cleanups: list[Callable[..., Any]] = []
+    completed_cleanups: list[Callable[..., Any]] = []
+    guarded_cleanup_registry: _UnittestCleanupRegistry | None = None
+    declared_skip = bool(
+        getattr(type(test), "__unittest_skip__", False)
+        or getattr(method, "__unittest_skip__", False)
+    )
+
+    def mark_lifecycle(label: str) -> None:
+        count = lifecycle_counts.get(label, 0) + 1
+        lifecycle_counts[label] = count
+        if count > 1:
+            evidence.duplicate_events.add(f"duplicate unittest {label}")
+
+    def verify_class_descriptors() -> None:
+        if any(
+            inspect.getattr_static(type(test), name, _MISSING_ATTRIBUTE) is not expected
+            for name, expected in class_descriptor_snapshot.items()
+        ):
+            raise ManifestError("unittest class execution descriptor was modified")
+
+    def verify_cleanup_registry() -> None:
+        entries = test._cleanups
+        if (
+            not isinstance(entries, list)
+            or guarded_cleanup_registry is None
+            or entries is not guarded_cleanup_registry
+        ):
+            raise ManifestError("unittest cleanup registry has an invalid shape")
+        callbacks: list[Callable[..., Any]] = []
+        for entry in entries:
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 3
+                or not callable(entry[0])
+                or not isinstance(entry[1], tuple)
+                or not isinstance(entry[2], dict)
+            ):
+                raise ManifestError("unittest cleanup registry has an invalid entry")
+            callbacks.append(entry[0])
+        pending = [
+            callback
+            for callback in registered_cleanups
+            if not any(callback is completed for completed in completed_cleanups)
+            and not any(callback is active for active in active_cleanups)
+        ]
+        if len(callbacks) != len(pending) or any(
+            actual is not expected
+            for actual, expected in zip(callbacks, pending, strict=True)
+        ):
+            raise ManifestError("unittest cleanup registry was modified")
+
+    def cleanups_complete() -> bool:
+        return (
+            not active_cleanups
+            and len(registered_cleanups) == len(completed_cleanups)
+            and all(
+                any(callback is completed for completed in completed_cleanups)
+                for callback in registered_cleanups
+            )
+        )
+
+    def cleanups_accounted_for() -> bool:
+        return all(
+            any(callback is completed for completed in completed_cleanups)
+            or any(callback is active for active in active_cleanups)
+            for callback in registered_cleanups
+        )
+
+    def prepare_cleanup(
+        function: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Callable[[], Any]:
+        if not callable(function):
+            raise ManifestError("unittest cleanup callback is not callable")
+
+        if inspect.iscoroutinefunction(function):
+
+            async def checked_cleanup() -> None:
+                if any(
+                    checked_cleanup is completed for completed in completed_cleanups
+                ) or any(checked_cleanup is active for active in active_cleanups):
+                    raise ManifestError("unittest cleanup callback ran more than once")
+                active_cleanups.append(checked_cleanup)
+                try:
+                    value = await function(*args, **kwargs)
+                    _reject_unittest_lazy_result(value, label="cleanup callback")
+                    completed_cleanups.append(checked_cleanup)
+                    verify_cleanup_registry()
+                finally:
+                    active_cleanups.remove(checked_cleanup)
+
+        else:
+
+            def checked_cleanup() -> None:
+                if any(
+                    checked_cleanup is completed for completed in completed_cleanups
+                ) or any(checked_cleanup is active for active in active_cleanups):
+                    raise ManifestError("unittest cleanup callback ran more than once")
+                active_cleanups.append(checked_cleanup)
+                try:
+                    value = function(*args, **kwargs)
+                    _reject_unittest_lazy_result(value, label="cleanup callback")
+                    completed_cleanups.append(checked_cleanup)
+                    verify_cleanup_registry()
+                finally:
+                    active_cleanups.remove(checked_cleanup)
+
+        registered_cleanups.append(checked_cleanup)
+        return checked_cleanup
+
+    def guard_cleanup_entry(
+        entry: Any,
+    ) -> tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]:
+        if (
+            not isinstance(entry, tuple)
+            or len(entry) != 3
+            or not callable(entry[0])
+            or not isinstance(entry[1], tuple)
+            or not isinstance(entry[2], dict)
+        ):
+            raise ManifestError("unittest cleanup registry has an invalid entry")
+        function, args, kwargs = entry
+        return prepare_cleanup(function, args, kwargs), (), {}
+
+    def instrumented_add_cleanup(
+        function: Callable[..., Any], /, *args: Any, **kwargs: Any
+    ) -> None:
+        trusted_add_cleanup(test, function, *args, **kwargs)
+        verify_cleanup_registry()
+
+    @contextlib.contextmanager
+    def guard_inherited_fixture_methods(name: str, label: str) -> Any:
+        providers = [owner for owner in type(test).__mro__ if name in vars(owner)]
+        installed: list[tuple[type[Any], Any, Any]] = []
+        try:
+            for owner in providers[1:]:
+                descriptor = vars(owner)[name]
+                callback = (
+                    descriptor.__func__
+                    if isinstance(descriptor, (staticmethod, classmethod))
+                    else descriptor
+                )
+                if not callable(callback) and not hasattr(descriptor, "__get__"):
+                    continue
+
+                if isinstance(descriptor, staticmethod):
+                    if inspect.iscoroutinefunction(callback):
+
+                        async def checked_static(
+                            *args: Any,
+                            _callback: Callable[..., Any] = callback,
+                            **kwargs: Any,
+                        ) -> Any:
+                            value = await _callback(*args, **kwargs)
+                            _reject_unittest_lazy_result(value, label=label)
+                            return value
+
+                    else:
+
+                        def checked_static(
+                            *args: Any,
+                            _callback: Callable[..., Any] = callback,
+                            **kwargs: Any,
+                        ) -> Any:
+                            value = _callback(*args, **kwargs)
+                            _reject_unittest_lazy_result(value, label=label)
+                            return value
+
+                    value: Any = staticmethod(checked_static)
+                elif isinstance(descriptor, classmethod):
+                    if inspect.iscoroutinefunction(callback):
+
+                        async def checked_class(
+                            active_class: type[Any],
+                            *args: Any,
+                            _descriptor: Any = descriptor,
+                            **kwargs: Any,
+                        ) -> Any:
+                            value = await _descriptor.__get__(None, active_class)(
+                                *args, **kwargs
+                            )
+                            _reject_unittest_lazy_result(value, label=label)
+                            return value
+
+                    else:
+
+                        def checked_class(
+                            active_class: type[Any],
+                            *args: Any,
+                            _descriptor: Any = descriptor,
+                            **kwargs: Any,
+                        ) -> Any:
+                            value = _descriptor.__get__(None, active_class)(
+                                *args, **kwargs
+                            )
+                            _reject_unittest_lazy_result(value, label=label)
+                            return value
+
+                    value = classmethod(checked_class)
+                else:
+
+                    def checked_instance(
+                        active_test: unittest.TestCase,
+                        *args: Any,
+                        _descriptor: Any = descriptor,
+                        **kwargs: Any,
+                    ) -> Any:
+                        bound = (
+                            _descriptor.__get__(active_test, type(active_test))
+                            if hasattr(_descriptor, "__get__")
+                            else _descriptor
+                        )
+                        if not callable(bound):
+                            raise ManifestError(
+                                "unittest inherited fixture is not callable"
+                            )
+                        value = bound(*args, **kwargs)
+                        if inspect.isawaitable(value):
+
+                            async def checked_awaitable() -> Any:
+                                resolved = await value
+                                _reject_unittest_lazy_result(resolved, label=label)
+                                return resolved
+
+                            return checked_awaitable()
+                        _reject_unittest_lazy_result(value, label=label)
+                        return value
+
+                    value = checked_instance
+                setattr(owner, name, value)
+                installed.append((owner, descriptor, value))
+            yield
+        finally:
+            changed = False
+            for owner, descriptor, value in reversed(installed):
+                if vars(owner).get(name, _MISSING_ATTRIBUTE) is not value:
+                    changed = True
+                setattr(owner, name, descriptor)
+            if changed:
+                raise ManifestError("unittest inherited fixture protocol was modified")
+
+    def instrumented_set_up() -> None:
+        verify_class_descriptors()
+        mark_lifecycle("setUp start")
+        with guard_inherited_fixture_methods("setUp", "setUp"):
+            value = set_up()
+        _reject_unittest_lazy_result(value, label="setUp")
+        mark_lifecycle("setUp completion")
+
+    def instrumented_tear_down() -> None:
+        verify_class_descriptors()
+        mark_lifecycle("tearDown start")
+        with guard_inherited_fixture_methods("tearDown", "tearDown"):
+            value = tear_down()
+        _reject_unittest_lazy_result(value, label="tearDown")
+        mark_lifecycle("tearDown completion")
+
+    def instrumented_call_set_up() -> None:
+        mark_lifecycle("_callSetUp start")
+        trusted_call_set_up(test)
+        mark_lifecycle("_callSetUp completion")
+
+    def instrumented_call_tear_down() -> None:
+        mark_lifecycle("_callTearDown start")
+        trusted_call_tear_down(test)
+        mark_lifecycle("_callTearDown completion")
+
+    if isinstance(test, unittest.IsolatedAsyncioTestCase):
+        async_set_up = test.asyncSetUp
+        async_tear_down = test.asyncTearDown
+        if not inspect.iscoroutinefunction(
+            async_set_up
+        ) or not inspect.iscoroutinefunction(async_tear_down):
+            raise ManifestError("unittest async fixtures must be coroutine functions")
+
+        async def instrumented_async_set_up() -> None:
+            verify_class_descriptors()
+            mark_lifecycle("asyncSetUp start")
+            with guard_inherited_fixture_methods("asyncSetUp", "asyncSetUp"):
+                value = await async_set_up()
+            _reject_unittest_lazy_result(value, label="asyncSetUp")
+            mark_lifecycle("asyncSetUp completion")
+
+        async def instrumented_async_tear_down() -> None:
+            verify_class_descriptors()
+            mark_lifecycle("asyncTearDown start")
+            with guard_inherited_fixture_methods("asyncTearDown", "asyncTearDown"):
+                value = await async_tear_down()
+            _reject_unittest_lazy_result(value, label="asyncTearDown")
+            mark_lifecycle("asyncTearDown completion")
+
+        trusted_call_maybe_async = trusted["_callMaybeAsync"]
+
+        def instrumented_cleanup(function: Any, /, *args: Any, **kwargs: Any) -> None:
+            value = trusted_call_maybe_async(test, function, *args, **kwargs)
+            _require_unittest_none_result(value, label="cleanup callback")
+
+        def instrumented_add_async_cleanup(
+            function: Callable[..., Any], /, *args: Any, **kwargs: Any
+        ) -> None:
+            instrumented_add_cleanup(function, *args, **kwargs)
+
+    else:
+
+        def instrumented_cleanup(function: Any, /, *args: Any, **kwargs: Any) -> None:
+            value = function(*args, **kwargs)
+            _require_unittest_none_result(value, label="cleanup callback")
+
+    def instrumented_do_cleanups() -> bool:
+        lifecycle_counts["doCleanups start"] = (
+            lifecycle_counts.get("doCleanups start", 0) + 1
+        )
+        verify_cleanup_registry()
+        value = trusted_do_cleanups(test)
+        if not cleanups_accounted_for() or test._cleanups:
+            raise ManifestError("unittest cleanup callbacks did not all complete")
+        lifecycle_counts["doCleanups completion"] = (
+            lifecycle_counts.get("doCleanups completion", 0) + 1
+        )
+        return bool(value)
+
+    if inspect.iscoroutinefunction(method):
+
+        @functools.wraps(method)
+        async def instrumented_method() -> Any:
+            _mark_unittest_execution_event(
+                evidence.body_started,
+                evidence.duplicate_events,
+                node_id,
+                "duplicate unittest body start",
+            )
+            value = await method()
+            _require_unittest_none_result(value, label="test method")
+            _mark_unittest_execution_event(
+                evidence.body_completed,
+                evidence.duplicate_events,
+                node_id,
+                "duplicate unittest body completion",
+            )
+            return value
+
+    else:
+
+        @functools.wraps(method)
+        def instrumented_method() -> Any:
+            _mark_unittest_execution_event(
+                evidence.body_started,
+                evidence.duplicate_events,
+                node_id,
+                "duplicate unittest body start",
+            )
+            value = method()
+            _require_unittest_none_result(value, label="test method")
+            _mark_unittest_execution_event(
+                evidence.body_completed,
+                evidence.duplicate_events,
+                node_id,
+                "duplicate unittest body completion",
+            )
+            return value
+
+    @functools.wraps(trusted_run)
+    def instrumented_run(result: unittest.TestResult | None = None) -> Any:
+        verify_instrumentation()
+        _mark_unittest_execution_event(
+            evidence.run_started,
+            evidence.duplicate_events,
+            node_id,
+            "duplicate trusted unittest run start",
+        )
+        value = trusted_run(test, result)
+        verify_instrumentation()
+        expected_count = 0 if declared_skip else 1
+        required_lifecycle = {
+            "setUp start",
+            "setUp completion",
+            "tearDown start",
+            "tearDown completion",
+            "_callSetUp start",
+            "_callSetUp completion",
+            "_callTearDown start",
+            "_callTearDown completion",
+        }
+        if isinstance(test, unittest.IsolatedAsyncioTestCase):
+            required_lifecycle.update(
+                {
+                    "asyncSetUp start",
+                    "asyncSetUp completion",
+                    "asyncTearDown start",
+                    "asyncTearDown completion",
+                }
+            )
+        if any(
+            lifecycle_counts.get(label, 0) != expected_count
+            for label in required_lifecycle
+        ):
+            raise ManifestError(
+                "unittest fixture lifecycle did not complete exactly once"
+            )
+        cleanup_starts = lifecycle_counts.get("doCleanups start", 0)
+        cleanup_completions = lifecycle_counts.get("doCleanups completion", 0)
+        if cleanup_starts != cleanup_completions or (
+            not declared_skip and cleanup_starts < 1
+        ):
+            raise ManifestError("unittest cleanup lifecycle did not complete")
+        if not declared_skip and (not cleanups_complete() or test._cleanups):
+            raise ManifestError("unittest cleanup callbacks did not all complete")
+        if declared_skip and test._cleanups != initial_cleanups:
+            raise ManifestError("skipped unittest cleanup registry was modified")
+        _mark_unittest_execution_event(
+            evidence.run_completed,
+            evidence.duplicate_events,
+            node_id,
+            "duplicate trusted unittest run completion",
+        )
+        return value
+
+    installed = {
+        method_name: instrumented_method,
+        "run": instrumented_run,
+        "setUp": instrumented_set_up,
+        "tearDown": instrumented_tear_down,
+        "_callSetUp": instrumented_call_set_up,
+        "_callTearDown": instrumented_call_tear_down,
+        "_callCleanup": instrumented_cleanup,
+        "doCleanups": instrumented_do_cleanups,
+        "addCleanup": instrumented_add_cleanup,
+    }
+    if isinstance(test, unittest.IsolatedAsyncioTestCase):
+        installed.update(
+            {
+                "asyncSetUp": instrumented_async_set_up,
+                "asyncTearDown": instrumented_async_tear_down,
+                "addAsyncCleanup": instrumented_add_async_cleanup,
+            }
+        )
+    untouched_protocol = {
+        name: expected
+        for name, expected in protocol
+        if name not in installed and name != "doClassCleanups"
+    }
+
+    def verify_instrumentation() -> None:
+        verify_class_descriptors()
+        if suite_protocol_verifier is not None:
+            suite_protocol_verifier()
+        expected_attributes = {**installed, **untouched_protocol}
+        if any(
+            inspect.getattr_static(test, name) is not expected
+            for name, expected in expected_attributes.items()
+        ):
+            raise ManifestError("unittest fixture instrumentation was modified")
+
+    for name, value in installed.items():
+        setattr(test, name, value)
+
+    if not isinstance(test._cleanups, list):
+        raise ManifestError("unittest cleanup registry has an invalid shape")
+    initial_cleanups = list(test._cleanups)
+    if not declared_skip:
+        guarded_cleanup_registry = _UnittestCleanupRegistry([], guard_cleanup_entry)
+        test._cleanups = guarded_cleanup_registry
+        for entry in initial_cleanups:
+            guarded_cleanup_registry.append(entry)
+        verify_cleanup_registry()
+
+
+_MISSING_ATTRIBUTE = object()
+
+
+class _UnittestCleanupRegistry(list[Any]):
+    def __init__(
+        self,
+        entries: list[Any],
+        guard_entry: Callable[[Any], Any],
+    ) -> None:
+        super().__init__(entries)
+        self._guard_entry = guard_entry
+
+    def append(self, entry: Any) -> None:
+        super().append(self._guard_entry(entry))
+
+
+class _UnittestSharedFixtureGuard:
+    def __init__(
+        self, suite: unittest.TestSuite, leaves: list[unittest.TestCase]
+    ) -> None:
+        self.issues: list[str] = []
+        self._suite = suite
+        self._classes = tuple(dict.fromkeys(type(test) for test in leaves))
+        self._fixture_classes = tuple(
+            dict.fromkeys(
+                candidate
+                for test_class in self._classes
+                for candidate in reversed(test_class.__mro__[:-1])
+                if isinstance(candidate, type)
+                and candidate is not unittest.TestCase
+                and (
+                    candidate in self._classes
+                    or any(
+                        name in vars(candidate)
+                        for name in ("setUpClass", "tearDownClass")
+                    )
+                )
+            )
+        )
+        self._modules = tuple(
+            dict.fromkeys(sys.modules[test.__class__.__module__] for test in leaves)
+        )
+        self._fixture_originals: dict[tuple[Any, str], Any] = {
+            (owner, name): inspect.getattr_static(owner, name, _MISSING_ATTRIBUTE)
+            for owner in (*self._fixture_classes, *self._modules)
+            for name in (
+                ("setUpClass", "tearDownClass")
+                if isinstance(owner, type)
+                else ("setUpModule", "tearDownModule")
+            )
+        }
+        self._class_fixture_callbacks: dict[tuple[type[Any], str], Any] = {}
+        for test_class in self._fixture_classes:
+            for name in ("setUpClass", "tearDownClass"):
+                try:
+                    descriptor = inspect.getattr_static(test_class, name)
+                except AttributeError:
+                    continue
+                self._class_fixture_callbacks[(test_class, name)] = descriptor
+        self._class_segment_counts: dict[type[unittest.TestCase], int] = {}
+        self._module_segment_counts: dict[Any, int] = {}
+        previous_class: type[unittest.TestCase] | None = None
+        previous_module: Any = None
+        for test in leaves:
+            test_class = type(test)
+            module = sys.modules[test_class.__module__]
+            if test_class is not previous_class:
+                self._class_segment_counts[test_class] = (
+                    self._class_segment_counts.get(test_class, 0) + 1
+                )
+            if module is not previous_module:
+                self._module_segment_counts[module] = (
+                    self._module_segment_counts.get(module, 0) + 1
+                )
+            previous_class = test_class
+            previous_module = module
+        self._installed: list[tuple[Any, str, bool, Any, Any]] = []
+        self._checked_cleanup_callbacks: list[Callable[..., None]] = []
+        self._expected_callbacks: list[Callable[..., None]] = []
+        self._started_callbacks: list[Callable[..., None]] = []
+        self._completed_callbacks: list[Callable[..., None]] = []
+        self._callback_wrappers: dict[tuple[Any, str], Callable[..., Any]] = {}
+        self._fixture_values: dict[tuple[Any, str], Any] = {}
+        self._cleanup_original_callbacks: list[
+            tuple[Callable[..., Any], Callable[..., Any]]
+        ] = []
+        self._guarded_registries: list[tuple[list[Any], _UnittestCleanupRegistry]] = []
+        self._active_callback_sets: list[frozenset[Callable[..., Any]]] = []
+        self._active_fixture_patches: list[tuple[Any, str, Any]] = []
+        self._suite_overrides: dict[str, Callable[..., Any]] = {}
+
+    def _verify_fixture_originals(self) -> None:
+        for (owner, name), original in self._fixture_originals.items():
+            expected = next(
+                (
+                    value
+                    for active_owner, active_name, value in reversed(
+                        self._active_fixture_patches
+                    )
+                    if active_owner is owner and active_name == name
+                ),
+                original,
+            )
+            if inspect.getattr_static(owner, name, _MISSING_ATTRIBUTE) is not expected:
+                raise ManifestError("unittest shared fixture descriptor was modified")
+
+    def _install(self, owner: Any, name: str, value: Any) -> None:
+        namespace = vars(owner)
+        existed = name in namespace
+        previous = namespace.get(name, _MISSING_ATTRIBUTE)
+        setattr(owner, name, value)
+        self._installed.append((owner, name, existed, previous, value))
+
+    def _checked_callback(
+        self,
+        callback: Callable[..., Any],
+        *,
+        label: str,
+        refresh: Callable[[], None],
+        expected_count: int = 1,
+        allow_scalar_result: bool = True,
+        track_when_active: bool = False,
+    ) -> Callable[..., Any]:
+        def checked(*args: Any, **kwargs: Any) -> Any:
+            active_callbacks = (
+                self._active_callback_sets[-1]
+                if self._active_callback_sets
+                else frozenset()
+            )
+            tracked = checked in active_callbacks or track_when_active
+            if not tracked:
+                value = callback(*args, **kwargs)
+                refresh()
+                if allow_scalar_result:
+                    _reject_unittest_lazy_result(value, label=label)
+                else:
+                    _require_unittest_none_result(value, label=label)
+                return value
+            started_count = sum(
+                checked is started for started in self._started_callbacks
+            )
+            if started_count >= expected_count:
+                self.issues.append("unittest shared callback ran more than once")
+                raise ManifestError("unittest shared callback ran more than once")
+            self._started_callbacks.append(checked)
+            try:
+                value = callback(*args, **kwargs)
+            except BaseException:
+                self.issues.append(f"unittest {label} failed")
+                raise
+            finally:
+                refresh()
+            try:
+                if allow_scalar_result:
+                    _reject_unittest_lazy_result(value, label=label)
+                else:
+                    _require_unittest_none_result(value, label=label)
+            except ManifestError:
+                self.issues.append(f"unittest {label} returned an invalid result")
+                raise
+            self._completed_callbacks.append(checked)
+            return value
+
+        self._checked_cleanup_callbacks.append(checked)
+        self._expected_callbacks.extend([checked] * expected_count)
+        return checked
+
+    def _wrap_cleanup_entries(
+        self,
+        entries: Any,
+        *,
+        label: str,
+        refresh: Callable[[], None],
+    ) -> None:
+        if not isinstance(entries, list):
+            raise ManifestError("unittest cleanup registry has an invalid shape")
+        for index, entry in enumerate(entries):
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 3
+                or not callable(entry[0])
+                or not isinstance(entry[1], tuple)
+                or not isinstance(entry[2], dict)
+            ):
+                raise ManifestError("unittest cleanup registry has an invalid entry")
+            entries[index] = self._guard_cleanup_entry(
+                entry,
+                label=label,
+                refresh=refresh,
+            )
+
+    def _guard_cleanup_entry(
+        self,
+        entry: Any,
+        *,
+        label: str,
+        refresh: Callable[[], None],
+    ) -> tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]:
+        if (
+            not isinstance(entry, tuple)
+            or len(entry) != 3
+            or not callable(entry[0])
+            or not isinstance(entry[1], tuple)
+            or not isinstance(entry[2], dict)
+        ):
+            raise ManifestError("unittest cleanup registry has an invalid entry")
+        callback, args, kwargs = entry
+        if any(
+            callback is checked
+            for checked, _original in self._cleanup_original_callbacks
+        ):
+            return callback, args, kwargs
+        checked = self._checked_callback(
+            callback,
+            label=label,
+            refresh=refresh,
+            allow_scalar_result=True,
+            track_when_active=True,
+        )
+        self._cleanup_original_callbacks.append((checked, callback))
+        return checked, args, kwargs
+
+    def _install_cleanup_registry(
+        self,
+        owner: Any,
+        name: str,
+        *,
+        label: str,
+        refresh: Callable[[], None],
+    ) -> None:
+        original = getattr(owner, name)
+        if not isinstance(original, list):
+            raise ManifestError("unittest cleanup registry has an invalid shape")
+
+        def guard_entry(entry: Any) -> Any:
+            return self._guard_cleanup_entry(
+                entry,
+                label=label,
+                refresh=refresh,
+            )
+
+        guarded = _UnittestCleanupRegistry(original, guard_entry)
+        self._guarded_registries.append((original, guarded))
+        self._install(owner, name, guarded)
+        self._wrap_cleanup_entries(guarded, label=label, refresh=refresh)
+
+    def _wrap_class_cleanups(self, test_class: type[unittest.TestCase]) -> None:
+        if bool(getattr(test_class, "__unittest_skip__", False)):
+            return
+
+        def refresh() -> None:
+            self._wrap_class_cleanups(test_class)
+
+        self._wrap_cleanup_entries(
+            test_class._class_cleanups,
+            label="class cleanup callback",
+            refresh=refresh,
+        )
+
+    def _wrap_module_cleanups(self) -> None:
+        def refresh() -> None:
+            self._wrap_module_cleanups()
+
+        self._wrap_cleanup_entries(
+            unittest.case._module_cleanups,
+            label="module cleanup callback",
+            refresh=refresh,
+        )
+
+    def _checked_class_fixture(
+        self,
+        test_class: type[unittest.TestCase],
+        descriptor: Any,
+        *,
+        label: str,
+        expected_count: int,
+    ) -> classmethod:
+        def invoke(active_class: type[unittest.TestCase]) -> Any:
+            if descriptor is None:
+                return None
+            callback = (
+                descriptor.__get__(None, active_class)
+                if hasattr(descriptor, "__get__")
+                else descriptor
+            )
+            if not callable(callback):
+                raise ManifestError("unittest class fixture is not callable")
+            return callback()
+
+        tracked = self._checked_callback(
+            invoke,
+            label=label,
+            refresh=lambda: None,
+            expected_count=expected_count,
+        )
+        self._callback_wrappers[(test_class, label)] = tracked
+
+        def checked(_test_class: type[unittest.TestCase]) -> Any:
+            return tracked(_test_class)
+
+        return classmethod(checked)
+
+    def _call_suite_helper(
+        self,
+        callbacks: tuple[Callable[..., Any], ...],
+        patches: tuple[tuple[Any, str, Any], ...],
+        helper: Callable[..., Any],
+        *args: Any,
+    ) -> Any:
+        self._verify_fixture_originals()
+        expected = frozenset(callbacks)
+        self._active_callback_sets.append(expected)
+        installed: list[tuple[Any, str, bool, Any, Any]] = []
+        try:
+            for owner, name, value in patches:
+                namespace = vars(owner)
+                existed = name in namespace
+                previous = namespace.get(name, _MISSING_ATTRIBUTE)
+                setattr(owner, name, value)
+                installed.append((owner, name, existed, previous, value))
+                self._active_fixture_patches.append((owner, name, value))
+            return helper(self._suite, *args)
+        finally:
+            changed = False
+            for owner, name, existed, previous, value in reversed(installed):
+                if vars(owner).get(name, _MISSING_ATTRIBUTE) is not value:
+                    changed = True
+                if existed:
+                    setattr(owner, name, previous)
+                else:
+                    try:
+                        delattr(owner, name)
+                    except AttributeError:
+                        pass
+                active_patch = self._active_fixture_patches.pop()
+                if not (
+                    active_patch[0] is owner
+                    and active_patch[1] == name
+                    and active_patch[2] is value
+                ):
+                    changed = True
+            try:
+                self._verify_fixture_originals()
+            except ManifestError:
+                changed = True
+            active = self._active_callback_sets.pop()
+            if active != expected or changed:
+                raise ManifestError("unittest shared fixture context was modified")
+
+    def _class_fixture_patches(self, name: str) -> tuple[tuple[Any, str, Any], ...]:
+        return tuple(
+            (test_class, name, self._fixture_values[(test_class, name)])
+            for test_class in self._fixture_classes
+            if (test_class, name) in self._fixture_values
+        )
+
+    def _install_suite_helpers(self) -> None:
+        trusted = dict(_UNITTEST_SUITE_PROTOCOL)
+
+        def handle_class_setup(test: unittest.TestCase, result: Any) -> Any:
+            callback = self._callback_wrappers.get((type(test), "setUpClass"))
+            callbacks = (callback,) if callback is not None else ()
+            return self._call_suite_helper(
+                callbacks,
+                self._class_fixture_patches("setUpClass"),
+                trusted["_handleClassSetUp"],
+                test,
+                result,
+            )
+
+        def tear_down_previous_class(test: Any, result: Any) -> Any:
+            previous_class = getattr(result, "_previousTestClass", None)
+            callbacks: tuple[Callable[..., Any], ...] = ()
+            if previous_class in self._classes:
+                callback = self._callback_wrappers.get(
+                    (previous_class, "tearDownClass")
+                )
+                callbacks = (callback,) if callback is not None else ()
+            return self._call_suite_helper(
+                callbacks,
+                self._class_fixture_patches("tearDownClass"),
+                trusted["_tearDownPreviousClass"],
+                test,
+                result,
+            )
+
+        def handle_module_fixture(test: unittest.TestCase, result: Any) -> Any:
+            module = sys.modules[type(test).__module__]
+            callback = self._callback_wrappers.get((module, "setUpModule"))
+            callbacks = (callback,) if callback is not None else ()
+            patches = (
+                (
+                    (
+                        module,
+                        "setUpModule",
+                        self._fixture_values[(module, "setUpModule")],
+                    ),
+                )
+                if (module, "setUpModule") in self._fixture_values
+                else ()
+            )
+            return self._call_suite_helper(
+                callbacks,
+                patches,
+                trusted["_handleModuleFixture"],
+                test,
+                result,
+            )
+
+        def handle_module_teardown(result: Any) -> Any:
+            previous_name = trusted["_get_previous_module"](self._suite, result)
+            module = sys.modules.get(previous_name)
+            callbacks: tuple[Callable[..., Any], ...] = ()
+            patches: tuple[tuple[Any, str, Any], ...] = ()
+            if module in self._modules:
+                callback = self._callback_wrappers.get((module, "tearDownModule"))
+                callbacks = (callback,) if callback is not None else ()
+                if (module, "tearDownModule") in self._fixture_values:
+                    patches = (
+                        (
+                            module,
+                            "tearDownModule",
+                            self._fixture_values[(module, "tearDownModule")],
+                        ),
+                    )
+            return self._call_suite_helper(
+                callbacks, patches, trusted["_handleModuleTearDown"], result
+            )
+
+        for name, helper in {
+            "_handleClassSetUp": handle_class_setup,
+            "_tearDownPreviousClass": tear_down_previous_class,
+            "_handleModuleFixture": handle_module_fixture,
+            "_handleModuleTearDown": handle_module_teardown,
+        }.items():
+            self._install(self._suite, name, helper)
+            self._suite_overrides[name] = helper
+
+    def expected_suite_descriptor(self, name: str, default: Any) -> Any:
+        return self._suite_overrides.get(name, default)
+
+    def __enter__(self) -> Self:
+        if (
+            unittest.case.doModuleCleanups is not _UNITTEST_MODULE_CLEANUP_PROTOCOL
+            or unittest.doModuleCleanups is not _UNITTEST_MODULE_CLEANUP_PROTOCOL
+        ):
+            raise ManifestError("stdlib unittest module cleanup protocol was modified")
+        try:
+            self._verify_fixture_originals()
+            self._install_cleanup_registry(
+                unittest.case,
+                "_module_cleanups",
+                label="module cleanup callback",
+                refresh=self._wrap_module_cleanups,
+            )
+            for test_class in self._classes:
+                if not bool(getattr(test_class, "__unittest_skip__", False)):
+                    self._install_cleanup_registry(
+                        test_class,
+                        "_class_cleanups",
+                        label="class cleanup callback",
+                        refresh=lambda test_class=test_class: self._wrap_class_cleanups(
+                            test_class
+                        ),
+                    )
+
+            for module in self._modules:
+                for name in ("setUpModule", "tearDownModule"):
+                    callback = getattr(module, name, None)
+                    if callback is not None and not callable(callback):
+                        raise ManifestError("unittest module fixture is not callable")
+                    if callback is None:
+                        continue
+                    checked = self._checked_callback(
+                        callback,
+                        label=name,
+                        refresh=self._wrap_module_cleanups,
+                        expected_count=self._module_segment_counts[module],
+                    )
+                    self._callback_wrappers[(module, name)] = checked
+                    self._fixture_values[(module, name)] = checked
+
+            for (test_class, name), descriptor in self._class_fixture_callbacks.items():
+                class_is_skipped = bool(getattr(test_class, "__unittest_skip__", False))
+                expected_count = (
+                    0
+                    if class_is_skipped
+                    else self._class_segment_counts.get(test_class, 0)
+                )
+                if descriptor is None:
+                    continue
+                value = self._checked_class_fixture(
+                    test_class,
+                    descriptor,
+                    label=name,
+                    expected_count=expected_count,
+                )
+                self._fixture_values[(test_class, name)] = value
+            self._install_suite_helpers()
+        except BaseException:
+            self._restore()
+            raise
+        return self
+
+    def _restore(self) -> None:
+        try:
+            self._verify_fixture_originals()
+        except ManifestError:
+            self.issues.append("unittest shared fixture descriptor changed")
+        for test_class in self._classes:
+            self._wrap_class_cleanups(test_class)
+        self._wrap_module_cleanups()
+        if not self._callback_multisets_match(
+            self._started_callbacks, self._expected_callbacks
+        ):
+            self.issues.append("unittest shared callback start mismatch")
+        if not self._callback_multisets_match(
+            self._completed_callbacks, self._expected_callbacks
+        ):
+            self.issues.append("unittest shared callback completion mismatch")
+        for original, guarded in self._guarded_registries:
+            restored_entries = []
+            for callback, args, kwargs in guarded:
+                original_callback = next(
+                    (
+                        original
+                        for checked, original in self._cleanup_original_callbacks
+                        if callback is checked
+                    ),
+                    callback,
+                )
+                restored_entries.append(
+                    (
+                        original_callback,
+                        args,
+                        kwargs,
+                    )
+                )
+            original[:] = restored_entries
+        for owner, name, existed, previous, installed in reversed(self._installed):
+            if vars(owner).get(name, _MISSING_ATTRIBUTE) is not installed:
+                self.issues.append("unittest shared fixture protocol changed")
+            if existed:
+                setattr(owner, name, previous)
+            else:
+                try:
+                    delattr(owner, name)
+                except AttributeError:
+                    pass
+        self._installed.clear()
+        self._suite_overrides.clear()
+        self._guarded_registries.clear()
+
+    def _callback_multisets_match(
+        self,
+        actual: list[Callable[..., None]],
+        expected: list[Callable[..., None]],
+    ) -> bool:
+        return len(actual) == len(expected) and all(
+            sum(callback is candidate for candidate in actual)
+            == sum(callback is candidate for candidate in expected)
+            for callback in self._checked_cleanup_callbacks
+        )
+
+    def __exit__(self, *_exception: object) -> bool:
+        self._restore()
+        return False
+
+
+class _UnittestOutcomeResult(unittest.TextTestResult):
+    _PROTECTED_PROTOCOL = frozenset(
+        {
+            "_journal",
+            "startTest",
+            "stopTest",
+            "addSuccess",
+            "addSkip",
+            "addFailure",
+            "addError",
+            "addExpectedFailure",
+            "addUnexpectedSuccess",
+            "addSubTest",
+        }
+    )
+
+    def __init__(
+        self,
+        *args: Any,
+        journal: Callable[[tuple[str, str, str, str]], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._protocol_sealed = False
+        super().__init__(*args, **kwargs)
+        self.started: set[str] = set()
+        self.stopped: set[str] = set()
+        self.active: set[str] = set()
+        self.duplicate_starts: set[str] = set()
+        self.duplicate_stops: set[str] = set()
+        self.lifecycle_violations: set[str] = set()
+        self.events: dict[str, list[dict[str, str]]] = {}
+        self._journal = journal
+        self._protocol_sealed = True
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if (
+            self.__dict__.get("_protocol_sealed", False)
+            and name in self._PROTECTED_PROTOCOL
+        ):
+            raise ManifestError("unittest result protocol is sealed")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if (
+            self.__dict__.get("_protocol_sealed", False)
+            and name in self._PROTECTED_PROTOCOL
+        ):
+            raise ManifestError("unittest result protocol is sealed")
+        super().__delattr__(name)
+
+    def _write_journal(
+        self, action: str, node_id: str, status: str = "", reason: str = ""
+    ) -> None:
+        if self._journal is not None:
+            self._journal((action, node_id, status, reason))
+
+    def _record(self, test: Any, status: str, reason: str = "") -> None:
+        node_id = _unittest_test_id(test)
+        self._write_journal("outcome", node_id, status, reason)
+        if node_id not in self.active:
+            self.lifecycle_violations.add("outcome outside active test")
+        self.events.setdefault(node_id, []).append({"status": status, "reason": reason})
+
+    def startTest(self, test: Any) -> None:
+        node_id = _unittest_test_id(test)
+        self._write_journal("start", node_id)
+        if node_id in self.started:
+            self.duplicate_starts.add(node_id)
+        self.started.add(node_id)
+        if node_id in self.active or node_id in self.stopped:
+            self.lifecycle_violations.add("invalid start order")
+        self.active.add(node_id)
+        super().startTest(test)
+
+    def stopTest(self, test: Any) -> None:
+        node_id = _unittest_test_id(test)
+        self._write_journal("stop", node_id)
+        if node_id in self.stopped:
+            self.duplicate_stops.add(node_id)
+        if node_id not in self.active:
+            self.lifecycle_violations.add("stop without active test")
+        else:
+            self.active.remove(node_id)
+        self.stopped.add(node_id)
+        super().stopTest(test)
+
+    def addSuccess(self, test: Any) -> None:
+        self._record(test, "passed")
+        super().addSuccess(test)
+
+    def addSkip(self, test: Any, reason: str) -> None:
+        self._record(test, "skipped", str(reason))
+        super().addSkip(test, reason)
+
+    def addFailure(self, test: Any, err: Any) -> None:
+        self._record(test, "failed")
+        super().addFailure(test, err)
+
+    def addError(self, test: Any, err: Any) -> None:
+        self._record(test, "error")
+        super().addError(test, err)
+
+    def addExpectedFailure(self, test: Any, err: Any) -> None:
+        self._record(test, "xfailed")
+        super().addExpectedFailure(test, err)
+
+    def addUnexpectedSuccess(self, test: Any) -> None:
+        self._record(test, "xpassed")
+        super().addUnexpectedSuccess(test)
+
+    def addSubTest(self, test: Any, subtest: Any, err: Any) -> None:
+        if err is not None:
+            self._record(test, "failed")
+        super().addSubTest(test, subtest, err)
+
+    def outcomes(self) -> dict[str, dict[str, str]]:
+        outcomes: dict[str, dict[str, str]] = {}
+        for node_id in self.started | set(self.events):
+            records = self.events.get(node_id, [])
+            statuses = {record["status"] for record in records}
+            if statuses == {"passed"} and len(records) == 1:
+                outcome = {"status": "passed", "reason": ""}
+            elif statuses == {"skipped"} and len(records) == 1:
+                reasons = {record["reason"] for record in records}
+                outcome = {
+                    "status": "skipped" if len(reasons) == 1 else "conflict",
+                    "reason": next(iter(reasons)) if len(reasons) == 1 else "",
+                }
+            elif "error" in statuses:
+                outcome = {"status": "error", "reason": ""}
+            elif "failed" in statuses:
+                outcome = {"status": "failed", "reason": ""}
+            elif "xpassed" in statuses:
+                outcome = {"status": "xpassed", "reason": ""}
+            elif "xfailed" in statuses:
+                outcome = {"status": "xfailed", "reason": ""}
+            elif not records:
+                outcome = {"status": "not_run", "reason": ""}
+            else:
+                outcome = {"status": "conflict", "reason": ""}
+            outcomes[node_id] = outcome
+        return outcomes
+
+
+def _unittest_journal_projection(
+    journal: list[tuple[str, str, str, str]], collected_ids: set[str]
+) -> tuple[dict[str, dict[str, str]], list[str]]:
+    started: set[str] = set()
+    stopped: set[str] = set()
+    active: set[str] = set()
+    events: dict[str, list[dict[str, str]]] = {}
+    issues: list[str] = []
+    for action, node_id, status, reason in journal:
+        if action == "start":
+            if node_id in started or node_id in active or node_id in stopped:
+                issues.append("journal duplicate or invalid start")
+            started.add(node_id)
+            active.add(node_id)
+        elif action == "stop":
+            if node_id in stopped or node_id not in active:
+                issues.append("journal duplicate or invalid stop")
+            active.discard(node_id)
+            stopped.add(node_id)
+        elif action == "outcome":
+            if node_id not in active:
+                issues.append("journal outcome outside active test")
+            events.setdefault(node_id, []).append({"status": status, "reason": reason})
+        else:
+            issues.append("journal contains an unknown event")
+    if started != collected_ids:
+        issues.append("journal unittest start mismatch")
+    if stopped != collected_ids or active:
+        issues.append("journal unittest stop mismatch")
+    if set(events) != collected_ids:
+        issues.append("journal unittest terminal mismatch")
+
+    outcomes: dict[str, dict[str, str]] = {}
+    for node_id in started | set(events):
+        records = events.get(node_id, [])
+        statuses = {record["status"] for record in records}
+        if statuses == {"passed"} and len(records) == 1:
+            outcome = {"status": "passed", "reason": ""}
+        elif statuses == {"skipped"} and len(records) == 1:
+            reasons = {record["reason"] for record in records}
+            outcome = {
+                "status": "skipped" if len(reasons) == 1 else "conflict",
+                "reason": next(iter(reasons)) if len(reasons) == 1 else "",
+            }
+        elif "error" in statuses:
+            outcome = {"status": "error", "reason": ""}
+        elif "failed" in statuses:
+            outcome = {"status": "failed", "reason": ""}
+        elif "xpassed" in statuses:
+            outcome = {"status": "xpassed", "reason": ""}
+        elif "xfailed" in statuses:
+            outcome = {"status": "xfailed", "reason": ""}
+        elif not records:
+            outcome = {"status": "not_run", "reason": ""}
+        else:
+            outcome = {"status": "conflict", "reason": ""}
+        outcomes[node_id] = outcome
+    return outcomes, issues
+
+
+def _unittest_execution_issues(
+    result: _UnittestOutcomeResult, collected_ids: set[str]
+) -> list[str]:
+    issues: list[str] = []
+    if result.duplicate_starts:
+        issues.append("duplicate starts")
+    if result.duplicate_stops:
+        issues.append("duplicate stops")
+    if result.lifecycle_violations:
+        issues.append("unittest lifecycle order violation")
+    if result.started != collected_ids:
+        issues.append("unittest start lifecycle mismatch")
+    if result.stopped != collected_ids or result.active:
+        issues.append("unittest stop lifecycle mismatch")
+    if set(result.events) != collected_ids:
+        issues.append("unittest terminal lifecycle mismatch")
+    return issues
+
+
+def _unittest_source_files(directory: Path, pattern: str = "test*.py") -> list[str]:
+    files: list[str] = []
+    for path in sorted(directory.iterdir()):
+        if path.is_file() and fnmatch.fnmatchcase(path.name, pattern):
+            files.append(path.resolve().relative_to(ROOT).as_posix())
+        elif path.is_dir() and (path / "__init__.py").is_file():
+            files.extend(_unittest_source_files(path, pattern))
+    return files
+
+
+def _discover_unittest_suite() -> unittest.TestSuite:
+    sidecar_path = str(ROOT / "sidecar")
+    if sidecar_path not in sys.path:
+        sys.path.insert(0, sidecar_path)
+    loader = unittest.TestLoader()
+    with contextlib.chdir(ROOT):
+        suite = loader.discover("tests")
+    if loader.errors:
+        raise ManifestError("unittest collection failed")
+    return suite
+
+
+def _verify_no_unittest_load_tests(source_files: list[str]) -> None:
+    expected_files = set(source_files)
+    for module in tuple(sys.modules.values()):
+        module_file = getattr(module, "__file__", None)
+        if module_file is None:
+            continue
+        try:
+            file_path = Path(module_file).resolve().relative_to(ROOT).as_posix()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if file_path not in expected_files:
+            continue
+        if inspect.getattr_static(module, "load_tests", _MISSING_ATTRIBUTE) is not (
+            _MISSING_ATTRIBUTE
+        ):
+            raise ManifestError(
+                "module-level unittest load_tests hooks are unsupported"
+            )
+
+
+def _unittest_collector_rows() -> tuple[list[dict[str, str]], list[str]]:
+    rows: list[dict[str, str]] = []
+    unraisable_guard = _UnraisableIssueGuard()
+    with unraisable_guard:
+        suite = _discover_unittest_suite()
+        known_files = _unittest_source_files(ROOT / "tests")
+        _verify_no_unittest_load_tests(known_files)
+        for test in _flatten_unittest_suite(suite):
+            _validate_unittest_leaf(test)
+            method = getattr(type(test), test._testMethodName, None)
+            expected_failure = bool(
+                getattr(type(test), "__unittest_expecting_failure__", False)
+                or getattr(method, "__unittest_expecting_failure__", False)
+            )
+            skipped = bool(
+                getattr(type(test), "__unittest_skip__", False)
+                or getattr(method, "__unittest_skip__", False)
+            )
+            reason = getattr(type(test), "__unittest_skip_why__", "") or getattr(
+                method, "__unittest_skip_why__", ""
+            )
+            module = sys.modules[type(test).__module__]
+            file_path = Path(module.__file__).resolve().relative_to(ROOT).as_posix()
+            rows.append(
+                {
+                    "id": test.id(),
+                    "file": file_path,
+                    "status": (
+                        "xfail"
+                        if expected_failure
+                        else "external_skip"
+                        if skipped
+                        else "deterministic"
+                    ),
+                    "reason": str(reason),
+                }
+            )
+    if unraisable_guard.issues:
+        raise ManifestError("unittest collection reported a runtime resource issue")
+    return rows, known_files
+
+
+def _collector_receipt(document: dict[str, Any]) -> str:
+    return (
+        COLLECTOR_RECEIPT_PREFIX
+        + json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    )
+
+
+def _json_collector(
+    action: str, *, cwd: Path, timeout: int
+) -> tuple[list[dict[str, str]], list[str]]:
+    if not SIDECAR_PYTHON.is_file():
+        raise ManifestError(
+            "sidecar environment is missing; run uv sync --locked --all-groups"
+        )
+    output = _run_capture(
+        [
+            str(SIDECAR_PYTHON),
+            "-I",
+            "-W",
+            "error::ResourceWarning",
+            "-W",
+            "error::RuntimeWarning",
+            str(Path(__file__).resolve()),
+            action,
+        ],
+        cwd=cwd,
+        timeout=timeout,
+        require_empty_stderr=True,
+    )
+    if not output.startswith(COLLECTOR_RECEIPT_PREFIX) or not output.endswith("\n"):
+        raise ManifestError("Python collector returned no exact structured result")
+    payload = output[len(COLLECTOR_RECEIPT_PREFIX) : -1]
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ManifestError("Python collector returned an invalid result") from error
+    if not isinstance(document, dict) or set(document) != {"rows", "known_files"}:
+        raise ManifestError("Python collector returned an invalid result")
+    if output != _collector_receipt(document):
+        raise ManifestError("Python collector returned a noncanonical result")
+    rows = document["rows"]
+    known_files = document["known_files"]
+    if (
+        not isinstance(rows, list)
+        or not isinstance(known_files, list)
+        or not all(isinstance(path, str) and path for path in known_files)
+        or any(
+            not isinstance(row, dict)
+            or set(row) != {"id", "file", "status", "reason"}
+            or not all(isinstance(row[field], str) for field in row)
+            or not row["id"]
+            or not row["file"]
+            or row["status"] not in {"deterministic", "external_skip", "xfail"}
+            for row in rows
+        )
+    ):
+        raise ManifestError("Python collector returned an invalid result")
+    return rows, known_files
+
+
+def _collect_pytest() -> dict[str, Any]:
+    rows, known_files = _json_collector(
+        "_collect-pytest", cwd=ROOT / "sidecar", timeout=300
+    )
+    if any(row["status"] == "xfail" for row in rows):
+        raise ManifestError(
+            "pytest xfail markers are not allowed in deterministic collection"
+        )
+    for row in rows:
+        row.setdefault("reason", "")
+    return _collection(rows, known_files=known_files)
+
+
+def _collect_unittest() -> dict[str, Any]:
+    rows, known_files = _json_collector("_collect-unittest", cwd=ROOT, timeout=120)
+    if any(row["status"] == "xfail" for row in rows):
+        raise ManifestError(
+            "unittest expectedFailure markers are not allowed in deterministic collection"
+        )
+    return _collection(rows, known_files=known_files)
+
+
+def _stored_framework_nodes(
+    framework: str, stored: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
+    if stored is None:
+        stored = _load_stored_manifest()
+    collections = stored.get("collections")
+    if not isinstance(collections, dict):
+        raise ManifestError("tracked test manifest has invalid collections")
+    collection = collections.get(framework)
+    if not isinstance(collection, dict):
+        raise ManifestError("tracked test manifest is missing a framework")
+    raw_nodes = collection.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ManifestError("tracked test manifest has invalid framework nodes")
+
+    nodes: list[dict[str, str]] = []
+    for raw_node in raw_nodes:
+        if not isinstance(raw_node, dict):
+            raise ManifestError("tracked test manifest has an invalid node")
+        node_id = raw_node.get("id")
+        status = raw_node.get("status")
+        reason = raw_node.get("reason", "")
+        if (
+            not isinstance(node_id, str)
+            or not node_id
+            or status not in {"deterministic", "external_skip"}
+            or not isinstance(reason, str)
+        ):
+            raise ManifestError("tracked test manifest has an invalid node")
+        nodes.append({"id": node_id, "status": status, "reason": reason})
+    if len(nodes) != len({node["id"] for node in nodes}):
+        raise ManifestError("tracked test manifest has duplicate framework nodes")
+    return nodes
+
+
+def _declared_outcome_rows(
+    expected_nodes: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for node in sorted(expected_nodes, key=lambda item: item["id"]):
+        row = {"id": node["id"], "outcome": node["status"]}
+        if node["status"] == "external_skip":
+            row["code"] = node["reason"]
+        rows.append(row)
+    return rows
+
+
+def _verify_execution_outcomes(
+    framework: str,
+    expected_nodes: list[dict[str, str]],
+    collected: set[str],
+    observed: dict[str, dict[str, str]],
+    *,
+    issues: list[str] | None = None,
+) -> list[dict[str, str]]:
+    expected = {node["id"]: node for node in expected_nodes}
+    expected_ids = set(expected)
+    if issues:
+        raise ManifestError(
+            f"{framework} execution reported {len(issues)} collection/outcome issues"
+        )
+    if collected != expected_ids:
+        raise ManifestError(
+            f"{framework} executed collection drift: "
+            f"missing={len(expected_ids - collected)}, "
+            f"unexpected={len(collected - expected_ids)}"
+        )
+    observed_ids = set(observed)
+    if observed_ids != expected_ids:
+        raise ManifestError(
+            f"{framework} executed outcome drift: "
+            f"missing={len(expected_ids - observed_ids)}, "
+            f"unexpected={len(observed_ids - expected_ids)}"
+        )
+
+    verified_rows: list[dict[str, str]] = []
+    mismatches = 0
+    for node_id in sorted(expected):
+        expected_node = expected[node_id]
+        outcome = observed[node_id]
+        expected_status = (
+            "skipped" if expected_node["status"] == "external_skip" else "passed"
+        )
+        if outcome.get("status") != expected_status:
+            mismatches += 1
+            continue
+        row = {"id": node_id, "outcome": expected_node["status"]}
+        if expected_status == "skipped":
+            expected_reason = expected_node["reason"]
+            if outcome.get("reason") != expected_reason:
+                mismatches += 1
+                continue
+            row["code"] = expected_reason
+        elif outcome.get("reason"):
+            mismatches += 1
+            continue
+        verified_rows.append(row)
+    if mismatches:
+        raise ManifestError(
+            f"{framework} executed outcomes violate the manifest: mismatches={mismatches}"
+        )
+    return verified_rows
+
+
+def _outcome_receipt(
+    framework: str,
+    verified_rows: list[dict[str, str]],
+    *,
+    manifest_sha256: str,
+) -> dict[str, Any]:
+    serialized_rows = json.dumps(
+        verified_rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    passed = sum(row["outcome"] == "deterministic" for row in verified_rows)
+    external_skips = len(verified_rows) - passed
+    return {
+        "schema_version": 1,
+        "framework": framework,
+        "contract_valid": True,
+        "manifest_sha256": manifest_sha256,
+        "outcome_sha256": hashlib.sha256(serialized_rows).hexdigest(),
+        "summary": {
+            "node_count": len(verified_rows),
+            "passed": passed,
+            "external_skip": external_skips,
+        },
+    }
+
+
+def _print_outcome_receipt(receipt: dict[str, Any]) -> None:
+    print(
+        "TRANSLATOR_TEST_OUTCOME_JSON="
+        + json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+
+
+def _bound_manifest_snapshot() -> tuple[dict[str, Any], bytes, str, bytes]:
+    stored, payload, digest = _load_stored_manifest_snapshot()
+    allowlist, allowlist_payload = _load_allowlist_snapshot()
+    parent_digest = os.environ.get(INTERNAL_MANIFEST_SHA_ENV)
+    if parent_digest is not None and parent_digest != digest:
+        raise ManifestError("parent and child test manifest identities differ")
+    _verify_plan_binding(stored, allowlist)
+    return stored, payload, digest, allowlist_payload
+
+
+def _run_pytest_outcomes() -> None:
+    import pytest
+
+    _verify_no_pytest_control_plugins()
+    stored, manifest_payload, manifest_digest, allowlist_payload = (
+        _bound_manifest_snapshot()
+    )
+    expected_nodes = _stored_framework_nodes("pytest", stored)
+    recorder = _PytestOutcomeRecorder(
+        base=ROOT / "sidecar",
+        blocked_warning_types=_blocked_pytest_warning_types(pytest),
+    )
+
+    class BodyProtocolGuard:
+        @pytest.hookimpl(wrapper=True, trylast=True)
+        def pytest_runtest_call(self, item: Any) -> Any:
+            recorder.verify_item_protocol(item)
+            recorder.mark_body_started(item)
+            try:
+                value = yield
+            finally:
+                recorder.verify_item_protocol(item)
+            recorder.mark_body_completed(item)
+            return value
+
+    unraisable_guard = _UnraisableIssueGuard()
+    with (
+        unraisable_guard,
+        contextlib.chdir(ROOT / "sidecar"),
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(io.StringIO()),
+    ):
+        exit_code = pytest.main(
+            [
+                *_controlled_pytest_arguments(),
+                "-ra",
+                "-W",
+                "error::ResourceWarning",
+                "-W",
+                "error::RuntimeWarning",
+                "-W",
+                "error::pytest.PytestWarning",
+            ],
+            plugins=[recorder, BodyProtocolGuard()],
+        )
+    required_body_ids = {
+        node["id"] for node in expected_nodes if node["status"] != "external_skip"
+    }
+    issues = [
+        *recorder.collection_issues,
+        *recorder.runtime_issues,
+        *unraisable_guard.issues,
+    ]
+    if recorder.body_started != required_body_ids:
+        issues.append("pytest body start mismatch")
+    if recorder.body_completed != required_body_ids:
+        issues.append("pytest body completion mismatch")
+    issues.extend(sorted(recorder.body_duplicates))
+    if recorder.deselected:
+        issues.append("deselected tests")
+    if recorder.duplicate_phases:
+        issues.append("duplicate phase reports")
+    verified_rows = _verify_execution_outcomes(
+        "pytest",
+        expected_nodes,
+        recorder.collected,
+        recorder.outcomes(),
+        issues=issues,
+    )
+    if int(exit_code) != 0:
+        raise ManifestError(f"pytest execution failed (exit {int(exit_code)})")
+    _verify_manifest_snapshot_unchanged(manifest_payload)
+    _verify_allowlist_snapshot_unchanged(allowlist_payload)
+    receipt = _outcome_receipt("pytest", verified_rows, manifest_sha256=manifest_digest)
+    receipt["exit_code"] = 0
+    _print_outcome_receipt(receipt)
+
+
+def _run_unittest_outcomes() -> None:
+    stored, manifest_payload, manifest_digest, allowlist_payload = (
+        _bound_manifest_snapshot()
+    )
+    expected_nodes = _stored_framework_nodes("unittest", stored)
+    unraisable_guard = _UnraisableIssueGuard()
+    with unraisable_guard:
+        suite = _discover_unittest_suite()
+        _verify_no_unittest_load_tests(_unittest_source_files(ROOT / "tests"))
+        leaves = list(_flatten_unittest_suite(suite))
+        collected_ids = [_unittest_test_id(test) for test in leaves]
+        if len(collected_ids) != len(set(collected_ids)):
+            raise ManifestError("unittest execution collected a duplicate test ID")
+        suite = _UNITTEST_SUITE_TYPE(leaves)
+        fixture_guard = _UnittestSharedFixtureGuard(suite, leaves)
+
+        def verify_suite_protocol() -> None:
+            if type(suite) is not _UNITTEST_SUITE_TYPE or any(
+                inspect.getattr_static(suite, name)
+                is not fixture_guard.expected_suite_descriptor(
+                    name, expected_descriptor
+                )
+                for name, expected_descriptor in _UNITTEST_SUITE_PROTOCOL
+            ):
+                raise ManifestError("stdlib unittest suite protocol was modified")
+            if any(
+                inspect.getattr_static(_UNITTEST_SUITE_TYPE, name)
+                is not expected_descriptor
+                for name, expected_descriptor in _UNITTEST_SUITE_PROTOCOL
+            ):
+                raise ManifestError("stdlib unittest suite protocol was modified")
+            if any(
+                inspect.getattr_static(unittest.suite, name) is not expected_descriptor
+                for name, expected_descriptor in _UNITTEST_SUITE_GLOBAL_PROTOCOL
+            ):
+                raise ManifestError("stdlib unittest suite dependency was modified")
+
+        verify_suite_protocol()
+        evidence = _UnittestExecutionEvidence(set(), set(), set(), set(), set())
+        for test in leaves:
+            _instrument_unittest_leaf(
+                test,
+                evidence,
+                suite_protocol_verifier=verify_suite_protocol,
+            )
+        result_journal: list[tuple[str, str, str, str]] = []
+
+        def record_result_event(event: tuple[str, str, str, str]) -> None:
+            result_journal.append(event)
+
+        runner = _UNITTEST_RUNNER_TYPE(
+            stream=io.StringIO(),
+            verbosity=2,
+            buffer=True,
+            resultclass=functools.partial(
+                _UnittestOutcomeResult, journal=record_result_event
+            ),
+        )
+        if inspect.getattr_static(runner, "run") is not _UNITTEST_RUNNER_PROTOCOL:
+            raise ManifestError("stdlib unittest runner protocol was modified")
+        with (
+            fixture_guard,
+            contextlib.chdir(ROOT),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            result = runner.run(suite)
+            verify_suite_protocol()
+    if not isinstance(result, _UnittestOutcomeResult):
+        raise ManifestError("unittest execution returned an invalid result")
+    collected_id_set = set(collected_ids)
+    required_body_ids = {
+        node["id"] for node in expected_nodes if node["status"] != "external_skip"
+    }
+    evidence_issues = sorted(evidence.duplicate_events)
+    if evidence.run_started != collected_id_set:
+        evidence_issues.append("trusted unittest run start mismatch")
+    if evidence.run_completed != collected_id_set:
+        evidence_issues.append("trusted unittest run completion mismatch")
+    if evidence.body_started != required_body_ids:
+        evidence_issues.append("unittest body start mismatch")
+    if evidence.body_completed != required_body_ids:
+        evidence_issues.append("unittest body completion mismatch")
+    journal_outcomes, journal_issues = _unittest_journal_projection(
+        result_journal, collected_id_set
+    )
+    if result.outcomes() != journal_outcomes:
+        journal_issues.append("unittest mutable result diverged from journal")
+    verified_rows = _verify_execution_outcomes(
+        "unittest",
+        expected_nodes,
+        collected_id_set,
+        journal_outcomes,
+        issues=[
+            *_unittest_execution_issues(result, collected_id_set),
+            *evidence_issues,
+            *journal_issues,
+            *fixture_guard.issues,
+            *unraisable_guard.issues,
+        ],
+    )
+    if not result.wasSuccessful():
+        raise ManifestError("unittest execution failed")
+    _verify_manifest_snapshot_unchanged(manifest_payload)
+    _verify_allowlist_snapshot_unchanged(allowlist_payload)
+    receipt = _outcome_receipt(
+        "unittest", verified_rows, manifest_sha256=manifest_digest
+    )
+    receipt["exit_code"] = 0
+    _print_outcome_receipt(receipt)
+
+
+def _is_bun_test_source(path: Path) -> bool:
+    test_extensions = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
+    if path.suffix not in test_extensions:
+        return False
+    stem = path.name[: -len(path.suffix)]
+    return stem.endswith((".test", "_test", ".spec", "_spec"))
+
+
+def _collect_bun() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="translator-bun-junit-") as temp_dir:
+        report = Path(temp_dir) / "bun-junit.xml"
+        _run_capture(
+            [
+                "bun",
+                "test",
+                "--reporter=junit",
+                f"--reporter-outfile={report}",
+                "src",
+            ],
+            cwd=UI_ROOT,
+            timeout=180,
+        )
+        try:
+            root = ET.parse(report).getroot()
+        except (ET.ParseError, OSError) as error:
+            raise ManifestError("Bun returned an invalid JUnit report") from error
+
+    rows: list[dict[str, str]] = []
+    for case in root.iter("testcase"):
+        file_name = case.get("file")
+        name = case.get("name")
+        class_name = case.get("classname")
+        if not file_name or not name or not class_name:
+            raise ManifestError("Bun JUnit testcase lacks a stable ID field")
+        file_path = _repo_path(file_name, base=UI_ROOT)
+        rows.append(
+            {
+                "id": f"{file_path}::{class_name}::{name}",
+                "file": file_path,
+                "status": (
+                    "external_skip"
+                    if case.find("skipped") is not None
+                    else "deterministic"
+                ),
+                "reason": "",
+            }
+        )
+    known_files = [
+        _repo_path(path)
+        for path in sorted((UI_ROOT / "src").rglob("*"))
+        if path.is_file() and _is_bun_test_source(path)
+    ]
+    return _collection(rows, known_files=known_files)
+
+
+def _validate_allowlist_document(document: Any) -> dict[tuple[str, str], str]:
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema_version", "skip"}
+        or type(document["schema_version"]) is not int
+        or document["schema_version"] != 1
+    ):
+        raise ManifestError("external prerequisite allowlist has an unsupported schema")
+    entries = document["skip"]
+    if not isinstance(entries, list):
+        raise ManifestError("external prerequisite allowlist entries must be a list")
+
+    result: dict[tuple[str, str], str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"framework", "id", "code"}:
+            raise ManifestError(
+                "external prerequisite allowlist entry has invalid fields"
+            )
+        framework = entry["framework"]
+        node_id = entry["id"]
+        code = entry["code"]
+        if framework not in ALLOWED_FRAMEWORKS:
+            raise ManifestError(
+                "external prerequisite allowlist has an unknown framework"
+            )
+        if (
+            not isinstance(node_id, str)
+            or not node_id
+            or re.search(r"[*?\[\]{}]", node_id)
+        ):
+            raise ManifestError(
+                "external prerequisite allowlist requires exact test IDs"
+            )
+        if not isinstance(code, str) or not code.startswith(
+            "missing_external_prerequisite:"
+        ):
+            raise ManifestError("external prerequisite allowlist has an invalid code")
+        prerequisite = code.removeprefix("missing_external_prerequisite:")
+        if prerequisite not in ALLOWED_PREREQUISITES:
+            raise ManifestError("external prerequisite allowlist has an unknown code")
+        key = (framework, node_id)
+        if key in result:
+            raise ManifestError(
+                "external prerequisite allowlist has a duplicate test ID"
+            )
+        result[key] = code
+    return result
+
+
+def _load_allowlist_snapshot() -> tuple[dict[tuple[str, str], str], bytes]:
+    try:
+        payload = ALLOWLIST_PATH.read_bytes()
+        document = tomllib.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ManifestError(
+            "external prerequisite allowlist is missing or invalid"
+        ) from error
+    return _validate_allowlist_document(document), payload
+
+
+def _load_allowlist() -> dict[tuple[str, str], str]:
+    allowlist, _ = _load_allowlist_snapshot()
+    return allowlist
+
+
+def _external_prerequisite_rows(
+    allowlist: dict[tuple[str, str], str],
+) -> list[dict[str, str]]:
+    return [
+        {"framework": framework, "id": node_id, "code": code}
+        for (framework, node_id), code in sorted(allowlist.items())
+    ]
+
+
+def _verify_skips(
+    collections: dict[str, dict[str, Any]], allowlist: dict[tuple[str, str], str]
+) -> None:
+    observed: dict[tuple[str, str], str] = {}
+    for framework, collection in collections.items():
+        for node in collection["nodes"]:
+            if node["status"] != "external_skip":
+                continue
+            key = (framework, node["id"])
+            observed[key] = node.get("reason", "")
+
+    if set(observed) != set(allowlist):
+        missing = len(set(observed) - set(allowlist))
+        stale = len(set(allowlist) - set(observed))
+        raise ManifestError(
+            f"external prerequisite drift: unallowlisted={missing}, stale={stale}"
+        )
+    for key, reason in observed.items():
+        if reason and reason != allowlist[key]:
+            raise ManifestError(
+                "external prerequisite code differs from the test declaration"
+            )
+
+
+def _source_digest(path: str) -> str:
+    return hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+
+
+def _assert_portable(value: Any) -> None:
+    if isinstance(value, dict):
+        for item in value.values():
+            _assert_portable(item)
+    elif isinstance(value, list):
+        for item in value:
+            _assert_portable(item)
+    elif isinstance(value, str):
+        if (
+            value.startswith("/") and value not in PORTABLE_HOST_EXECUTABLES
+        ) or re.match(r"^[A-Za-z]:[/\\]", value):
+            raise ManifestError("manifest contains an absolute path")
+        if any(
+            prefix in value
+            for prefix in (
+                str(ROOT),
+                f"{os.sep}home{os.sep}",
+                f"{os.sep}tmp{os.sep}",
+                f"{os.sep}Users{os.sep}",
+                "\\Users\\",
+            )
+        ):
+            raise ManifestError("manifest contains a machine-local path")
+        if re.search(r"(?:^|[/\\])target[/\\](?:debug|release)(?:[/\\]|$)", value):
+            raise ManifestError("manifest contains a build path")
+
+
+def _build_manifest() -> dict[str, Any]:
+    _verify_no_rust_doctests()
+    collections = {
+        "rust": _collect_rust(),
+        "pytest": _collect_pytest(),
+        "unittest": _collect_unittest(),
+        "bun": _collect_bun(),
+    }
+    allowlist = _load_allowlist()
+    _verify_skips(collections, allowlist)
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "validator": {
+            "path": "scripts/translator-validate",
+            "sha256": _source_digest("scripts/translator-validate"),
+        },
+        "runner": {
+            "path": "scripts/translator-test-manifest",
+            "sha256": _source_digest("scripts/translator-test-manifest"),
+        },
+        "deterministic_commands": EXPECTED_COMMANDS,
+        "environment_contract": SANITIZED_ENVIRONMENT,
+        "collection_policy": COLLECTION_POLICY,
+        "external_prerequisites": _external_prerequisite_rows(allowlist),
+        "collections": collections,
+    }
+    _assert_portable(manifest)
+    return manifest
+
+
+def _serialized(manifest: dict[str, Any]) -> str:
+    return json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+
+
+def _write_atomic(manifest: dict[str, Any]) -> None:
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=MANIFEST_PATH.parent,
+            prefix=".test-manifest.",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(_serialized(manifest))
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o644)
+        os.replace(temporary, MANIFEST_PATH)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _load_stored_manifest_snapshot() -> tuple[dict[str, Any], bytes, str]:
+    try:
+        payload = MANIFEST_PATH.read_bytes()
+        stored = json.loads(payload)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManifestError("tracked test manifest is missing or invalid") from error
+    if not isinstance(stored, dict):
+        raise ManifestError("tracked test manifest has an unsupported schema")
+    if payload != _serialized(stored).encode("ascii"):
+        raise ManifestError("tracked test manifest is not canonical JSON")
+    return stored, payload, hashlib.sha256(payload).hexdigest()
+
+
+def _load_stored_manifest() -> dict[str, Any]:
+    stored, _, _ = _load_stored_manifest_snapshot()
+    return stored
+
+
+def _verify_snapshot_bytes(expected: bytes, observed: bytes, *, label: str) -> None:
+    if observed != expected:
+        raise ManifestError(f"tracked {label} changed during execution")
+
+
+def _verify_manifest_snapshot_unchanged(expected: bytes) -> None:
+    try:
+        observed = MANIFEST_PATH.read_bytes()
+    except OSError as error:
+        raise ManifestError("tracked test manifest changed during execution") from error
+    _verify_snapshot_bytes(expected, observed, label="test manifest")
+
+
+def _verify_allowlist_snapshot_unchanged(expected: bytes) -> None:
+    try:
+        observed = ALLOWLIST_PATH.read_bytes()
+    except OSError as error:
+        raise ManifestError(
+            "tracked external prerequisite allowlist changed during execution"
+        ) from error
+    _verify_snapshot_bytes(expected, observed, label="external prerequisite allowlist")
+
+
+def _drift_summary(expected: dict[str, Any], observed: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if expected.get("deterministic_commands") != observed.get("deterministic_commands"):
+        parts.append("commands")
+    if expected.get("validator") != observed.get("validator"):
+        parts.append("validator")
+    if expected.get("runner") != observed.get("runner"):
+        parts.append("runner")
+    if expected.get("environment_contract") != observed.get("environment_contract"):
+        parts.append("environment")
+    if expected.get("collection_policy") != observed.get("collection_policy"):
+        parts.append("collection-policy")
+    if expected.get("external_prerequisites") != observed.get("external_prerequisites"):
+        parts.append("external-prerequisites")
+    expected_collections = expected.get("collections", {})
+    observed_collections = observed.get("collections", {})
+    if not isinstance(expected_collections, dict) or not isinstance(
+        observed_collections, dict
+    ):
+        return ", ".join([*parts, "schema"])
+    for framework in sorted(set(expected_collections) | set(observed_collections)):
+        before = expected_collections.get(framework, {})
+        after = observed_collections.get(framework, {})
+        if before != after:
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                parts.append(f"{framework}(schema)")
+                continue
+            parts.append(
+                f"{framework}(files {before.get('file_count', 0)}->{after.get('file_count', 0)}, "
+                f"nodes {before.get('node_count', 0)}->{after.get('node_count', 0)}, "
+                f"skips {before.get('external_skip_count', 0)}->"
+                f"{after.get('external_skip_count', 0)})"
+            )
+    return ", ".join(parts) or "schema"
+
+
+def _check(manifest: dict[str, Any]) -> None:
+    stored, payload, _ = _load_stored_manifest_snapshot()
+    if payload != _serialized(manifest).encode("ascii"):
+        raise ManifestError(
+            f"tracked test manifest drift: {_drift_summary(stored, manifest)}"
+        )
+
+
+def _validate_execution_plan() -> None:
+    command_ids: set[str] = set()
+    for command in EXPECTED_COMMANDS:
+        if not isinstance(command, dict) or set(command) != {
+            "id",
+            "cwd",
+            "env",
+            "argv",
+            "timeout_seconds",
+        }:
+            raise ManifestError("execution plan command has invalid fields")
+        command_id = command["id"]
+        cwd = command["cwd"]
+        env = command["env"]
+        argv = command["argv"]
+        timeout_seconds = command["timeout_seconds"]
+        if not isinstance(command_id, str) or not command_id:
+            raise ManifestError("execution plan command requires a stable ID")
+        if command_id in command_ids:
+            raise ManifestError("execution plan contains a duplicate command ID")
+        command_ids.add(command_id)
+        if (
+            not isinstance(cwd, str)
+            or not cwd
+            or Path(cwd).is_absolute()
+            or ".." in Path(cwd).parts
+        ):
+            raise ManifestError(
+                "execution plan command has an invalid working directory"
+            )
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or not all(isinstance(argument, str) and argument for argument in argv)
+        ):
+            raise ManifestError("execution plan command has invalid argv")
+        if not isinstance(env, dict) or not all(
+            isinstance(name, str) and name and isinstance(value, str)
+            for name, value in env.items()
+        ):
+            raise ManifestError("execution plan command has invalid environment")
+        if (
+            type(timeout_seconds) is not int
+            or timeout_seconds <= 0
+            or timeout_seconds > MAX_GATE_TIMEOUT_SECONDS
+        ):
+            raise ManifestError("execution plan command has an invalid timeout")
+        _validation_environment(source={}, overrides=env)
+    if not EXPECTED_COMMANDS or EXPECTED_COMMANDS[-1]["id"] != "manifest-check":
+        raise ManifestError("manifest check must be the final execution-plan command")
+    _assert_portable(EXPECTED_COMMANDS)
+
+
+def _verify_plan_binding(
+    stored: dict[str, Any] | None = None,
+    allowlist: dict[tuple[str, str], str] | None = None,
+) -> None:
+    if stored is None:
+        stored = _load_stored_manifest()
+    if stored.get("schema_version") != SCHEMA_VERSION:
+        raise ManifestError("tracked test manifest has an unsupported schema")
+    if stored.get("deterministic_commands") != EXPECTED_COMMANDS:
+        raise ManifestError("tracked execution plan drift; run manifest write")
+    if stored.get("environment_contract") != SANITIZED_ENVIRONMENT:
+        raise ManifestError("tracked environment contract drift; run manifest write")
+    if stored.get("collection_policy") != COLLECTION_POLICY:
+        raise ManifestError("tracked collection policy drift; run manifest write")
+    if allowlist is None:
+        allowlist = _load_allowlist()
+    if stored.get("external_prerequisites") != _external_prerequisite_rows(allowlist):
+        raise ManifestError("tracked external prerequisite drift; run manifest write")
+    collections = stored.get("collections")
+    if not isinstance(collections, dict) or set(collections) != ALLOWED_FRAMEWORKS:
+        raise ManifestError("tracked test manifest has invalid collections")
+    try:
+        _verify_skips(collections, allowlist)
+    except (KeyError, TypeError) as error:
+        raise ManifestError("tracked test manifest has invalid collections") from error
+    for framework in ("pytest", "unittest"):
+        for node in _stored_framework_nodes(framework, stored):
+            key = (framework, node["id"])
+            if node["status"] == "external_skip" and node["reason"] != allowlist.get(
+                key
+            ):
+                raise ManifestError(
+                    "tracked external prerequisite code differs from the test node"
+                )
+            if node["status"] == "deterministic" and node["reason"]:
+                raise ManifestError("tracked deterministic test has a skip reason")
+    expected_validator = {
+        "path": "scripts/translator-validate",
+        "sha256": _source_digest("scripts/translator-validate"),
+    }
+    if stored.get("validator") != expected_validator:
+        raise ManifestError("tracked validator drift; run manifest write")
+    expected_runner = {
+        "path": "scripts/translator-test-manifest",
+        "sha256": _source_digest("scripts/translator-test-manifest"),
+    }
+    if stored.get("runner") != expected_runner:
+        raise ManifestError("tracked runner drift; run manifest write")
+
+
+def _expected_outcome_receipt(
+    framework: str, stored: dict[str, Any], manifest_digest: str
+) -> dict[str, Any]:
+    rows = _declared_outcome_rows(_stored_framework_nodes(framework, stored))
+    receipt = _outcome_receipt(framework, rows, manifest_sha256=manifest_digest)
+    receipt["exit_code"] = 0
+    return receipt
+
+
+def _verify_outcome_receipt_payloads(
+    framework: str,
+    payloads: list[str],
+    stored: dict[str, Any],
+    manifest_digest: str,
+) -> None:
+    if len(payloads) != 1:
+        raise ManifestError(
+            f"{framework} child must emit exactly one executed-outcome receipt"
+        )
+    expected = _expected_outcome_receipt(framework, stored, manifest_digest)
+    expected_payload = json.dumps(
+        expected, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    if payloads[0] != expected_payload:
+        raise ManifestError(
+            f"{framework} child receipt is not the exact canonical outcome contract"
+        )
+
+
+def _gate_process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _enable_child_subreaper() -> None:
+    if sys.platform != "linux" or not Path("/proc/self/task").is_dir():
+        raise ManifestError("validation process ownership requires Linux procfs")
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        prctl = libc.prctl
+    except AttributeError as error:
+        raise ManifestError("validation process ownership requires prctl") from error
+    prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    prctl.restype = ctypes.c_int
+    if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        error_number = ctypes.get_errno()
+        raise ManifestError(
+            "validation process ownership could not enable child subreaping: "
+            f"{os.strerror(error_number)}"
+        )
+
+
+def _require_exclusive_process_ownership() -> None:
+    try:
+        task_ids = {
+            int(task.name)
+            for task in (Path("/proc") / str(os.getpid()) / "task").iterdir()
+            if task.name.isascii() and task.name.isdigit()
+        }
+    except OSError as error:
+        raise ManifestError(
+            "validation gate requires exclusive process ownership"
+        ) from error
+    if task_ids != {os.getpid()}:
+        raise ManifestError(
+            "validation gate requires exclusive process ownership: "
+            "multiple process tasks"
+        )
+    if _direct_child_pids(os.getpid()):
+        raise ManifestError(
+            "validation gate requires exclusive process ownership: "
+            "pre-existing child process"
+        )
+    if signal.getsignal(signal.SIGCHLD) is not signal.SIG_DFL:
+        raise ManifestError(
+            "validation gate requires exclusive process ownership: "
+            "non-default SIGCHLD disposition"
+        )
+
+
+def _direct_child_pids(process_id: int) -> set[int]:
+    task_root = Path("/proc") / str(process_id) / "task"
+    try:
+        task_directories = tuple(task_root.iterdir())
+    except FileNotFoundError:
+        return set()
+    except OSError as error:
+        raise ManifestError("validation process tree could not be inspected") from error
+
+    children: set[int] = set()
+    for task_directory in task_directories:
+        try:
+            payload = (task_directory / "children").read_text(encoding="ascii")
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ManifestError(
+                "validation process tree could not be inspected"
+            ) from error
+        for value in payload.split():
+            if not value.isascii() or not value.isdigit() or int(value) <= 0:
+                raise ManifestError("validation process tree reported an invalid PID")
+            children.add(int(value))
+    return children
+
+
+def _owned_gate_process_ids() -> set[int]:
+    owned = _direct_child_pids(os.getpid())
+    pending = list(owned)
+    while pending:
+        process_id = pending.pop()
+        for child_id in _direct_child_pids(process_id):
+            if child_id not in owned:
+                owned.add(child_id)
+                pending.append(child_id)
+    return owned
+
+
+def _signal_owned_gate_processes(signal_number: signal.Signals) -> None:
+    for process_id in _owned_gate_process_ids():
+        try:
+            os.kill(process_id, signal_number)
+        except ProcessLookupError:
+            pass
+
+
+def _reap_adopted_gate_children(*, exclude: set[int]) -> None:
+    for process_id in _direct_child_pids(os.getpid()) - exclude:
+        try:
+            os.waitpid(process_id, os.WNOHANG)
+        except ChildProcessError:
+            pass
+
+
+def _communicate_while_reaping_adopted_children(
+    process: subprocess.Popen[Any],
+    timeout_seconds: int,
+) -> tuple[Any, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+        try:
+            output = process.communicate(
+                timeout=min(GATE_ADOPTED_REAP_POLL_SECONDS, remaining)
+            )
+        except subprocess.TimeoutExpired:
+            _reap_adopted_gate_children(
+                exclude={process.pid},
+            )
+            continue
+        _reap_adopted_gate_children(
+            exclude={process.pid},
+        )
+        return output
+
+
+def _terminate_gate_process_group(process: subprocess.Popen[Any]) -> None:
+    ignored_signals: list[tuple[signal.Signals, Any]] = []
+    if threading.current_thread() is threading.main_thread():
+        guarded_signals = {signal.SIGINT, signal.SIGTERM}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
+        try:
+            for signal_number in guarded_signals:
+                ignored_signals.append(
+                    (signal_number, signal.signal(signal_number, signal.SIG_IGN))
+                )
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    try:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        _signal_owned_gate_processes(signal.SIGTERM)
+        deadline = time.monotonic() + GATE_TERMINATION_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            process.poll()
+            _reap_adopted_gate_children(exclude={process.pid})
+            if (
+                not _gate_process_group_exists(process.pid)
+                and not _owned_gate_process_ids()
+            ):
+                break
+            time.sleep(0.01)
+        if _gate_process_group_exists(process.pid) or _owned_gate_process_ids():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _signal_owned_gate_processes(signal.SIGKILL)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            _reap_adopted_gate_children(exclude=set())
+            if not _owned_gate_process_ids():
+                break
+            _signal_owned_gate_processes(signal.SIGKILL)
+            time.sleep(0.01)
+        if _owned_gate_process_ids():
+            raise ManifestError("validation gate process tree could not be reaped")
+    finally:
+        if ignored_signals:
+            guarded_signals = {signal.SIGINT, signal.SIGTERM}
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
+            try:
+                for signal_number, previous_handler in reversed(ignored_signals):
+                    signal.signal(signal_number, previous_handler)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _raise_gate_termination(_signum: int, _frame: Any) -> None:
+    raise _GateTerminationRequested
+
+
+def _run_gate_process_locked(
+    command: dict[str, Any],
+    environment: dict[str, str],
+    *,
+    capture_output: bool,
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    previous_sigterm: Any = None
+    previous_sigint: Any = None
+    deferred_signals: list[int] = []
+    process_group_cleaned = False
+    owns_sigterm = threading.current_thread() is threading.main_thread()
+
+    def defer_termination(signum: int, _frame: Any) -> None:
+        deferred_signals.append(signum)
+
+    if owns_sigterm:
+        previous_sigint = signal.signal(signal.SIGINT, defer_termination)
+        previous_sigterm = signal.signal(signal.SIGTERM, defer_termination)
+    process: subprocess.Popen[Any] | None = None
+    try:
+        try:
+            process = subprocess.Popen(
+                command["argv"],
+                cwd=ROOT / command["cwd"],
+                env=environment,
+                stdout=subprocess.PIPE if capture_output else None,
+                stderr=subprocess.PIPE if capture_output else None,
+                text=encoding is not None,
+                encoding=encoding,
+                errors=errors,
+                start_new_session=True,
+            )
+        finally:
+            if owns_sigterm:
+                guarded_signals = {signal.SIGINT, signal.SIGTERM}
+                previous_mask = signal.pthread_sigmask(
+                    signal.SIG_BLOCK, guarded_signals
+                )
+                try:
+                    signal.signal(signal.SIGINT, previous_sigint)
+                    signal.signal(signal.SIGTERM, _raise_gate_termination)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        if deferred_signals:
+            if deferred_signals[0] == signal.SIGINT:
+                raise KeyboardInterrupt
+            raise _GateTerminationRequested
+        stdout, stderr = _communicate_while_reaping_adopted_children(
+            process,
+            command["timeout_seconds"],
+        )
+        if _gate_process_group_exists(process.pid) or _owned_gate_process_ids():
+            _terminate_gate_process_group(process)
+            process_group_cleaned = True
+            raise ManifestError("validation gate left background processes running")
+        return subprocess.CompletedProcess(
+            command["argv"], process.returncode, stdout, stderr
+        )
+    except subprocess.TimeoutExpired:
+        if process is not None and not process_group_cleaned:
+            _terminate_gate_process_group(process)
+            process_group_cleaned = True
+        raise subprocess.TimeoutExpired(
+            command["argv"], command["timeout_seconds"]
+        ) from None
+    except _GateTerminationRequested:
+        if process is not None and not process_group_cleaned:
+            _terminate_gate_process_group(process)
+            process_group_cleaned = True
+        raise ManifestError("validation gate was interrupted") from None
+    except BaseException:
+        if process is not None and not process_group_cleaned:
+            _terminate_gate_process_group(process)
+            process_group_cleaned = True
+        raise
+    finally:
+        if owns_sigterm:
+            guarded_signals = {signal.SIGINT, signal.SIGTERM}
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
+            try:
+                signal.signal(signal.SIGINT, previous_sigint)
+                signal.signal(signal.SIGTERM, previous_sigterm)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _run_gate_process(
+    command: dict[str, Any],
+    environment: dict[str, str],
+    *,
+    capture_output: bool,
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    with _GATE_PROCESS_LOCK:
+        _require_exclusive_process_ownership()
+        _enable_child_subreaper()
+        return _run_gate_process_locked(
+            command,
+            environment,
+            capture_output=capture_output,
+            encoding=encoding,
+            errors=errors,
+        )
+
+
+def _run_receipted_gate(
+    command: dict[str, Any], environment: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    try:
+        completed = _run_gate_process(
+            command,
+            environment,
+            capture_output=True,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except subprocess.TimeoutExpired:
+        raise ManifestError("receipt-bearing validation gate timed out") from None
+    except UnicodeDecodeError as error:
+        raise ManifestError(
+            "receipt-bearing validation gate emitted invalid UTF-8"
+        ) from error
+    _verify_child_runtime_diagnostics(completed.stdout, completed.stderr)
+    if completed.stderr or any(
+        not line.startswith(OUTCOME_RECEIPT_PREFIX)
+        for line in completed.stdout.splitlines(keepends=True)
+    ):
+        raise ManifestError("receipt-bearing validation gate emitted unexpected output")
+    payloads = [
+        line.removeprefix(OUTCOME_RECEIPT_PREFIX).removesuffix("\n")
+        for line in completed.stdout.splitlines(keepends=True)
+        if line.startswith(OUTCOME_RECEIPT_PREFIX)
+    ]
+    return completed, payloads
+
+
+def _verify_child_runtime_diagnostics(stdout: str, stderr: str) -> None:
+    diagnostics = stdout + "\n" + stderr
+    forbidden = (
+        "Exception ignored in:",
+        "Exception ignored in atexit callback:",
+        "Exception in thread ",
+        "PytestUnhandledThreadExceptionWarning",
+        "PytestUnraisableExceptionWarning",
+        "ResourceWarning",
+        "RuntimeWarning:",
+        "Task was destroyed but it is pending!",
+        "Task exception was never retrieved",
+        "Future exception was never retrieved",
+        "Unclosed client session",
+        "Unclosed connector",
+    )
+    if any(marker in diagnostics for marker in forbidden) or re.search(
+        r"\bPytest[A-Za-z0-9_]*Warning:", diagnostics
+    ):
+        raise ManifestError(
+            "receipt-bearing validation gate reported a runtime resource issue"
+        )
+
+
+def _execute_plan() -> None:
+    _validate_execution_plan()
+    stored, manifest_payload, manifest_digest = _load_stored_manifest_snapshot()
+    allowlist, allowlist_payload = _load_allowlist_snapshot()
+    _verify_plan_binding(stored, allowlist)
+    repository_snapshot = _capture_repository_snapshot()
+    for command in EXPECTED_COMMANDS:
+        print(f"validation gate: {command['id']}", flush=True)
+        environment = _validation_environment(overrides=command["env"])
+        framework = OUTCOME_RECEIPT_COMMANDS.get(command["id"])
+        publication_output: tuple[str, str] | None = None
+        try:
+            if command["id"] == "publication-check":
+                completed = _run_gate_process(
+                    command,
+                    environment,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                returncode = completed.returncode
+                publication_output = (completed.stdout, completed.stderr)
+                receipt_payloads = []
+            elif framework is None:
+                returncode = _run_gate_process(
+                    command, environment, capture_output=False
+                ).returncode
+                receipt_payloads: list[str] = []
+            else:
+                environment[INTERNAL_MANIFEST_SHA_ENV] = manifest_digest
+                completed, receipt_payloads = _run_receipted_gate(command, environment)
+                returncode = completed.returncode
+        except FileNotFoundError as error:
+            raise ManifestError(
+                f"required validation command is unavailable: {command['id']}"
+            ) from error
+        except subprocess.TimeoutExpired:
+            raise ManifestError(f"validation gate timed out: {command['id']}") from None
+        _verify_repository_snapshot(repository_snapshot)
+        _verify_manifest_snapshot_unchanged(manifest_payload)
+        _verify_allowlist_snapshot_unchanged(allowlist_payload)
+        if returncode != 0:
+            raise ManifestError(
+                f"validation gate failed: {command['id']} (exit {returncode})"
+            )
+        if framework is not None:
+            _verify_outcome_receipt_payloads(
+                framework,
+                receipt_payloads,
+                stored,
+                manifest_digest,
+            )
+            print(OUTCOME_RECEIPT_PREFIX + receipt_payloads[0], flush=True)
+        if publication_output is not None:
+            _verify_publication_receipt(*publication_output, repository_snapshot)
+            sys.stdout.write(publication_output[0])
+            sys.stdout.flush()
+
+
+def _expect_contract_rejection(callback: Any, label: str) -> None:
+    try:
+        callback()
+    except ManifestError:
+        return
+    raise ManifestError(f"contract self-test did not reject {label}")
+
+
+def _self_test_contracts() -> None:
+    valid_entry = {
+        "framework": "pytest",
+        "id": "sidecar/tests/test_contract.py::test_external",
+        "code": "missing_external_prerequisite:gpu_model_cache",
+    }
+    valid_document = {"schema_version": 1, "skip": [valid_entry]}
+    expected_allowlist = {
+        (valid_entry["framework"], valid_entry["id"]): valid_entry["code"]
+    }
+    if _validate_allowlist_document(valid_document) != expected_allowlist:
+        raise ManifestError("allowlist contract self-test returned the wrong entry")
+
+    wildcard_entry = {**valid_entry, "id": "sidecar/tests/*"}
+    _expect_contract_rejection(
+        lambda: _validate_allowlist_document(
+            {"schema_version": 1, "skip": [wildcard_entry]}
+        ),
+        "a wildcard allowlist entry",
+    )
+    _expect_contract_rejection(
+        lambda: _validate_allowlist_document(
+            {"schema_version": 1, "skip": [valid_entry, valid_entry]}
+        ),
+        "a duplicate allowlist entry",
+    )
+    _expect_contract_rejection(
+        lambda: _verify_skips({"pytest": {"nodes": []}}, expected_allowlist),
+        "a stale allowlist entry",
+    )
+    duplicate_nodes = [
+        {
+            "id": "duplicate",
+            "file": "tests/test_contract.py",
+            "status": "deterministic",
+        },
+        {
+            "id": "duplicate",
+            "file": "tests/test_contract.py",
+            "status": "deterministic",
+        },
+    ]
+    _expect_contract_rejection(
+        lambda: _collection(duplicate_nodes), "a duplicate collected test ID"
+    )
+
+    source_environment = {
+        "HOME": "/tmp/translator-validator-home",
+        "PATH": "/usr/bin",
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "synthetic-secret",
+        "OPENAI_API_KEY": "synthetic-secret",
+        "PYTEST_ADDOPTS": "--ignore=tests",
+        "TRANSLATOR_MODEL_CACHE_ROOT": "/machine/cache",
+        "TRANSLATOR_OSV_SCANNER": "/validated/tool",
+    }
+    sanitized = _validation_environment(source=source_environment)
+    expected_environment = {
+        "HOME": "/tmp/translator-validator-home",
+        "PATH": "/usr/bin",
+        "TRANSLATOR_OSV_SCANNER": "/validated/tool",
+        **FIXED_VALIDATION_ENVIRONMENT,
+    }
+    if sanitized != expected_environment:
+        raise ManifestError("environment sanitization contract self-test failed")
+    _expect_contract_rejection(
+        lambda: _validation_environment(
+            source={}, overrides={"OPENAI_API_KEY": "synthetic-secret"}
+        ),
+        "a credential-restoring command environment",
+    )
+    deterministic_node = {
+        "id": "tests/test_contract.py::test_deterministic",
+        "status": "deterministic",
+        "reason": "",
+    }
+    external_node = {
+        "id": "tests/test_contract.py::test_external",
+        "status": "external_skip",
+        "reason": "missing_external_prerequisite:gpu_model_cache",
+    }
+    expected_nodes = [deterministic_node, external_node]
+    expected_ids = {node["id"] for node in expected_nodes}
+    valid_outcomes = {
+        deterministic_node["id"]: {"status": "passed", "reason": ""},
+        external_node["id"]: {
+            "status": "skipped",
+            "reason": external_node["reason"],
+        },
+    }
+    verified_rows = _verify_execution_outcomes(
+        "pytest", expected_nodes, expected_ids, valid_outcomes
+    )
+    if verified_rows != [
+        {
+            "id": deterministic_node["id"],
+            "outcome": "deterministic",
+        },
+        {
+            "id": external_node["id"],
+            "outcome": "external_skip",
+            "code": external_node["reason"],
+        },
+    ]:
+        raise ManifestError("executed outcome receipt self-test failed")
+    synthetic_manifest = {"collections": {"pytest": {"nodes": expected_nodes}}}
+    synthetic_digest = "a" * 64
+    valid_receipt = _outcome_receipt(
+        "pytest", verified_rows, manifest_sha256=synthetic_digest
+    )
+    valid_receipt["exit_code"] = 0
+    valid_receipt_payload = json.dumps(
+        valid_receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    _verify_outcome_receipt_payloads(
+        "pytest",
+        [valid_receipt_payload],
+        synthetic_manifest,
+        synthetic_digest,
+    )
+    _expect_contract_rejection(
+        lambda: _verify_outcome_receipt_payloads(
+            "pytest", [], synthetic_manifest, synthetic_digest
+        ),
+        "a successful child with no outcome receipt",
+    )
+    forged_receipt = {**valid_receipt, "outcome_sha256": "b" * 64}
+    _expect_contract_rejection(
+        lambda: _verify_outcome_receipt_payloads(
+            "pytest",
+            [json.dumps(forged_receipt)],
+            synthetic_manifest,
+            synthetic_digest,
+        ),
+        "a forged child outcome receipt",
+    )
+    _expect_contract_rejection(
+        lambda: _verify_outcome_receipt_payloads(
+            "pytest",
+            [valid_receipt_payload, valid_receipt_payload],
+            synthetic_manifest,
+            synthetic_digest,
+        ),
+        "duplicate child outcome receipts",
+    )
+    _expect_contract_rejection(
+        lambda: _verify_snapshot_bytes(b"before", b"after", label="test manifest"),
+        "a manifest mutation during execution",
+    )
+    _verify_rust_doctest_listing("\n")
+    _expect_contract_rejection(
+        lambda: _verify_rust_doctest_listing(
+            "crates/example/src/lib.rs - example (line 1): test\n"
+        ),
+        "an unmanifested Rust doctest",
+    )
+
+    indirect_skip = {
+        **valid_outcomes,
+        deterministic_node["id"]: {
+            "status": "skipped",
+            "reason": "runtime alias",
+        },
+    }
+    _expect_contract_rejection(
+        lambda: _verify_execution_outcomes(
+            "pytest", expected_nodes, expected_ids, indirect_skip
+        ),
+        "an indirect pytest runtime skip",
+    )
+    _expect_contract_rejection(
+        lambda: _verify_execution_outcomes(
+            "unittest", expected_nodes, expected_ids, indirect_skip
+        ),
+        "an imported unittest runtime skip helper",
+    )
+    wrong_external_code = {
+        **valid_outcomes,
+        external_node["id"]: {
+            "status": "skipped",
+            "reason": "missing_external_prerequisite:openai_credentials",
+        },
+    }
+    _expect_contract_rejection(
+        lambda: _verify_execution_outcomes(
+            "pytest", expected_nodes, expected_ids, wrong_external_code
+        ),
+        "an external skip with the wrong code",
+    )
+    _expect_contract_rejection(
+        lambda: _verify_execution_outcomes(
+            "pytest", expected_nodes, {deterministic_node["id"]}, valid_outcomes
+        ),
+        "a missing executed test ID",
+    )
+    _expect_contract_rejection(
+        lambda: _verify_execution_outcomes(
+            "pytest", expected_nodes, expected_ids, valid_outcomes, issues=["xfail"]
+        ),
+        "an execution outcome issue",
+    )
+    inactive_marker = SimpleNamespace(args=(False,))
+    active_marker = SimpleNamespace(args=(True,))
+    if _first_active_marker([inactive_marker, active_marker]) is not active_marker:
+        raise ManifestError("multiple pytest marker contract self-test failed")
+    bun_positive_sources = (
+        "suite.test.ts",
+        "suite_test.tsx",
+        "suite.spec.js",
+        "suite_spec.mts",
+    )
+    bun_negative_sources = (
+        "suite-test.ts",
+        "suite_test_helper.ts",
+        "suite.specify.ts",
+        "suite.test.txt",
+    )
+    if not all(_is_bun_test_source(Path(path)) for path in bun_positive_sources):
+        raise ManifestError("Bun test-source inventory positive self-test failed")
+    if any(_is_bun_test_source(Path(path)) for path in bun_negative_sources):
+        raise ManifestError("Bun test-source inventory negative self-test failed")
+    _validate_execution_plan()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Run, write, or verify the deterministic repository test manifest."
+    )
+    parser.add_argument(
+        "action",
+        choices=(
+            "run",
+            "write",
+            "check",
+            "self-test",
+            "_collect-pytest",
+            "_collect-unittest",
+            "_run-pytest",
+            "_run-unittest",
+        ),
+    )
+    arguments = parser.parse_args()
+    try:
+        _self_test_contracts()
+        if arguments.action == "_collect-pytest":
+            rows, known_files = _pytest_collector_rows()
+            sys.stdout.write(
+                _collector_receipt({"rows": rows, "known_files": known_files})
+            )
+        elif arguments.action == "_collect-unittest":
+            rows, known_files = _unittest_collector_rows()
+            sys.stdout.write(
+                _collector_receipt({"rows": rows, "known_files": known_files})
+            )
+        elif arguments.action == "_run-pytest":
+            _run_pytest_outcomes()
+        elif arguments.action == "_run-unittest":
+            _run_unittest_outcomes()
+        elif arguments.action == "self-test":
+            print("test manifest self-tests passed")
+        elif arguments.action == "run":
+            _execute_plan()
+        else:
+            manifest = _build_manifest()
+            if arguments.action == "write":
+                _write_atomic(manifest)
+                print("test manifest written")
+            else:
+                _check(manifest)
+                print("test manifest verified")
+    except (
+        ManifestError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        print(f"test manifest error: {error}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("test manifest error: filesystem operation failed", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

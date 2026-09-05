@@ -3,24 +3,26 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict, deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import signal
 import subprocess
 import threading
 import time
+from collections import defaultdict, deque
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import psutil
 
+from translator_sidecar.benchmark.task6 import load_quality_corpus
 from translator_sidecar.benchmark.task7 import (
     BenchmarkClassification,
     BenchmarkConfig,
@@ -33,7 +35,6 @@ from translator_sidecar.benchmark.task7 import (
     RunContext,
     run_task7_benchmark,
 )
-from translator_sidecar.benchmark.task6 import load_quality_corpus
 from translator_sidecar.local.model_manifest import load_manifest
 from translator_sidecar.local.tts import PiperTts, PiperVoiceRegistry
 from translator_sidecar.provider_contract import (
@@ -43,7 +44,6 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
-
 
 _BRIDGE_SCHEMA = "translator.task7-bridge.v1"
 _REPORT_SCHEMA = "translator.task7-e2e.v1"
@@ -1276,7 +1276,7 @@ def resource_payload(
         raise Task7E2EError("continuous resource evidence is empty")
     if any(
         current.monotonic_ns < previous.monotonic_ns
-        for previous, current in zip(samples, samples[1:], strict=False)
+        for previous, current in pairwise(samples)
     ):
         raise Task7E2EError("resource clock moved backwards")
     duration_seconds = (

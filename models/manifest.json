@@ -6,7 +6,7 @@
     "usage_mode": "personal_noncommercial",
     "redistribution": false,
     "certified_or_safety_critical": false,
-    "staging_path": "/home/anton/Source/translator/models/cache/.staging",
+    "staging_path": ".staging",
     "redirect_hosts": [
       "cdn-lfs.huggingface.co",
       "cdn-lfs-us-1.hf.co",
@@ -25,7 +25,7 @@
         "license": "MIT"
       },
       "languages": ["ru", "en"],
-      "cache_path": "/home/anton/.cache/huggingface/hub/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120",
+      "cache_path": "huggingface/hub/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120",
       "acquisition": "reuse",
       "files": [
         {
@@ -59,7 +59,7 @@
         "license": "MIT"
       },
       "languages": ["ru", "en"],
-      "cache_path": "/home/anton/Source/uncle-freud-bot/.data/faster-whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478",
+      "cache_path": "huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478",
       "acquisition": "reuse",
       "files": [
         {
@@ -99,7 +99,7 @@
         "dataset_license": "CC0"
       },
       "languages": ["ru"],
-      "cache_path": "/home/anton/Source/uncle-freud-bot/.data/piper-voices",
+      "cache_path": "piper-voices",
       "acquisition": "reuse",
       "files": [
         {
@@ -124,7 +124,7 @@
         "dataset_license": "CC-BY-NC-SA-4.0"
       },
       "languages": ["en"],
-      "cache_path": "/home/anton/Source/uncle-freud-bot/.data/piper-voices",
+      "cache_path": "piper-voices",
       "acquisition": "reuse",
       "files": [
         {
@@ -148,7 +148,7 @@
         "license": "CC-BY-NC-4.0"
       },
       "languages": ["ru", "en"],
-      "cache_path": "/home/anton/Source/translator/models/cache/nllb-200-distilled-600M-ct2-int8",
+      "cache_path": "nllb-200-distilled-600M-ct2-int8",
       "acquisition": "download",
       "files": [
         {
@@ -192,7 +192,7 @@
         "license_waiver": "PIPER_RU_IRINA_PERSONAL_LOCAL_V1"
       },
       "languages": ["ru"],
-      "cache_path": "/home/anton/Source/translator/models/cache/piper",
+      "cache_path": "piper",
       "acquisition": "download",
       "files": [
         {
@@ -221,7 +221,7 @@
         "dataset_license": "CC-BY-NC-SA-4.0"
       },
       "languages": ["en"],
-      "cache_path": "/home/anton/Source/translator/models/cache/piper",
+      "cache_path": "piper",
       "acquisition": "download",
       "files": [
         {

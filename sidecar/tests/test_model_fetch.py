@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
-import traceback
 
 import pytest
 
@@ -128,9 +128,7 @@ class RecordingDownloader(ModelDownloader):
         super().__init__(manifest)  # type: ignore[arg-type]
         self.chunk_sizes: list[int] = []
 
-    def install_bytes(
-        self, model_id: str, file_path: str, chunks: object
-    ) -> Path:
+    def install_bytes(self, model_id: str, file_path: str, chunks: object) -> Path:
         def recording_chunks() -> object:
             for chunk in chunks:  # type: ignore[union-attr]
                 self.chunk_sizes.append(len(chunk))
@@ -153,8 +151,7 @@ def _add_config_file(manifest_path: Path, payload: bytes = b"{}") -> None:
             "size_bytes": len(payload),
             "sha256": _sha256(payload),
             "source_url": (
-                "https://huggingface.co/owner/model/resolve/"
-                f"{revision}/config.json"
+                f"https://huggingface.co/owner/model/resolve/{revision}/config.json"
             ),
             "source_path": "config.json",
         }
@@ -253,8 +250,7 @@ def test_fetch_validates_redirect_before_requesting_and_streams_bounded_chunks(
 ) -> None:
     payload = b"payload"
     redirect = (
-        "https://cdn-lfs.huggingface.co/repos/owner/model/"
-        "signed-model.bin?token=opaque"
+        "https://cdn-lfs.huggingface.co/repos/owner/model/signed-model.bin?token=opaque"
     )
     first = FakeResponse(status=302, headers={"Location": redirect})
     final = FakeResponse(
@@ -272,15 +268,11 @@ def test_fetch_validates_redirect_before_requesting_and_streams_bounded_chunks(
 
     assert installed.read_bytes() == payload
     assert [request[0] for request in transport.requests] == [
-        (
-            "https://huggingface.co/owner/model/resolve/"
-            f"{'a' * 40}/model.bin"
-        ),
+        (f"https://huggingface.co/owner/model/resolve/{'a' * 40}/model.bin"),
         redirect,
     ]
     assert all(
-        request[1]["Accept-Encoding"] == "identity"
-        for request in transport.requests
+        request[1]["Accept-Encoding"] == "identity" for request in transport.requests
     )
     assert all(request[2] == 17 for request in transport.requests)
     assert downloader.chunk_sizes == [3, 3, 1]
@@ -299,12 +291,9 @@ def test_fetch_accepts_exact_pinned_huggingface_relative_cache_route(
 ) -> None:
     revision = "a" * 40
     cache_route = (
-        f"/api/resolve-cache/models/owner/model/{revision}/model.bin"
-        "?etag=private-token"
+        f"/api/resolve-cache/models/owner/model/{revision}/model.bin?etag=private-token"
     )
-    cdn_route = (
-        "https://cdn-lfs.huggingface.co/model.bin?token=private-cdn-token"
-    )
+    cdn_route = "https://cdn-lfs.huggingface.co/model.bin?token=private-cdn-token"
     first = FakeResponse(status=307, headers={"Location": cache_route})
     second = FakeResponse(status=302, headers={"Location": cdn_route})
     final = FakeResponse(
@@ -319,10 +308,7 @@ def test_fetch_accepts_exact_pinned_huggingface_relative_cache_route(
 
     assert installed.read_bytes() == b"payload"
     assert [request[0] for request in transport.requests] == [
-        (
-            "https://huggingface.co/owner/model/resolve/"
-            f"{revision}/model.bin"
-        ),
+        (f"https://huggingface.co/owner/model/resolve/{revision}/model.bin"),
         (
             "https://huggingface.co/api/resolve-cache/models/"
             f"owner/model/{revision}/model.bin?etag=private-token"
@@ -334,10 +320,7 @@ def test_fetch_accepts_exact_pinned_huggingface_relative_cache_route(
 def test_fetch_accepts_observed_us_aws_huggingface_cdn_host(
     tmp_path: Path,
 ) -> None:
-    cdn_route = (
-        "https://us.aws.cdn.hf.co/repos/owner/model.bin"
-        "?token=private-token"
-    )
+    cdn_route = "https://us.aws.cdn.hf.co/repos/owner/model.bin?token=private-token"
     first = FakeResponse(status=302, headers={"Location": cdn_route})
     final = FakeResponse(
         status=200,
@@ -349,10 +332,7 @@ def test_fetch_accepts_observed_us_aws_huggingface_cdn_host(
 
     assert fetcher.fetch("selected-mt", "model.bin").read_bytes() == b"payload"
     assert [request[0] for request in transport.requests] == [
-        (
-            "https://huggingface.co/owner/model/resolve/"
-            f"{'a' * 40}/model.bin"
-        ),
+        (f"https://huggingface.co/owner/model/resolve/{'a' * 40}/model.bin"),
         cdn_route,
     ]
 
@@ -366,8 +346,7 @@ def test_huggingface_cache_route_uses_nested_source_path_not_local_path(
     model_file = document["models"][0]["files"][0]
     model_file["source_path"] = "nested/source/model.bin"
     model_file["source_url"] = (
-        "https://huggingface.co/owner/model/resolve/"
-        f"{revision}/nested/source/model.bin"
+        f"https://huggingface.co/owner/model/resolve/{revision}/nested/source/model.bin"
     )
     path.write_text(json.dumps(document), encoding="utf-8")
     manifest = load_manifest(path)
@@ -403,8 +382,7 @@ def test_huggingface_cache_route_rejects_nested_source_path_mutation(
     model_file = document["models"][0]["files"][0]
     model_file["source_path"] = "nested/source/model.bin"
     model_file["source_url"] = (
-        "https://huggingface.co/owner/model/resolve/"
-        f"{revision}/nested/source/model.bin"
+        f"https://huggingface.co/owner/model/resolve/{revision}/nested/source/model.bin"
     )
     path.write_text(json.dumps(document), encoding="utf-8")
     manifest = load_manifest(path)
@@ -439,8 +417,7 @@ def test_huggingface_cache_route_rejects_unencoded_nested_source_path(
     model_file = document["models"][0]["files"][0]
     model_file["source_path"] = "nested/source/model.bin"
     model_file["source_url"] = (
-        "https://huggingface.co/owner/model/resolve/"
-        f"{revision}/nested/source/model.bin"
+        f"https://huggingface.co/owner/model/resolve/{revision}/nested/source/model.bin"
     )
     path.write_text(json.dumps(document), encoding="utf-8")
     manifest = load_manifest(path)
@@ -469,18 +446,9 @@ def test_huggingface_cache_route_rejects_unencoded_nested_source_path(
 @pytest.mark.parametrize(
     "cache_route",
     [
-        (
-            "/api/resolve-cache/models/attacker/model/"
-            f"{'a' * 40}/model.bin"
-        ),
-        (
-            "/api/resolve-cache/models/owner/model/"
-            f"{'b' * 40}/model.bin"
-        ),
-        (
-            "/api/resolve-cache/models/owner/model/"
-            f"{'a' * 40}/other.bin"
-        ),
+        (f"/api/resolve-cache/models/attacker/model/{'a' * 40}/model.bin"),
+        (f"/api/resolve-cache/models/owner/model/{'b' * 40}/model.bin"),
+        (f"/api/resolve-cache/models/owner/model/{'a' * 40}/other.bin"),
         "/api/resolve-cache/models/owner/model",
     ],
 )
@@ -528,8 +496,7 @@ def test_fetch_accepts_standard_redirect_statuses_after_url_validation(
     tmp_path: Path, status: int
 ) -> None:
     redirect = (
-        "https://cdn-lfs.huggingface.co/model.bin?"
-        f"status={status}&token=private-token"
+        f"https://cdn-lfs.huggingface.co/model.bin?status={status}&token=private-token"
     )
     first = FakeResponse(status=status, headers={"Location": redirect})
     final = FakeResponse(
@@ -542,10 +509,7 @@ def test_fetch_accepts_standard_redirect_statuses_after_url_validation(
 
     assert fetcher.fetch("selected-mt", "model.bin").read_bytes() == b"payload"
     assert [request[0] for request in transport.requests] == [
-        (
-            "https://huggingface.co/owner/model/resolve/"
-            f"{'a' * 40}/model.bin"
-        ),
+        (f"https://huggingface.co/owner/model/resolve/{'a' * 40}/model.bin"),
         redirect,
     ]
     for _, headers, _ in transport.requests:
@@ -620,7 +584,7 @@ def test_fetch_bounds_redirect_count_and_closes_every_response(
                 )
             },
         )
-        for index, (status, secret) in enumerate(zip(statuses, secrets))
+        for index, (status, secret) in enumerate(zip(statuses, secrets, strict=True))
     ]
     transport = FakeTransport(responses.copy())
     manifest = load_manifest(_manifest(tmp_path))
@@ -850,7 +814,7 @@ def test_fetch_rejects_unknown_allowlist_identity_before_network(
     transport = FakeTransport([])
     fetcher, _ = _fetcher(tmp_path, transport)
 
-    with pytest.raises(ManifestError, match="unknown|allowlist"):
+    with pytest.raises(ManifestError, match=r"unknown|allowlist"):
         fetcher.fetch(model_id, file_path)
 
     assert transport.requests == []

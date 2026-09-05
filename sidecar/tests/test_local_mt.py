@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import builtins
 import os
-from pathlib import Path
 import traceback
+from pathlib import Path
 
 import pytest
 
@@ -43,7 +43,8 @@ class LongSentencePiece(FakeSentencePiece):
 
 
 class FakeResult:
-    hypotheses = [["eng_Latn", "translated", "output"]]
+    def __init__(self) -> None:
+        self.hypotheses = [["eng_Latn", "translated", "output"]]
 
 
 class FakeCTranslate2:

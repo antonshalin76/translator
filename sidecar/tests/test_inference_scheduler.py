@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from threading import Event as ThreadEvent
 from threading import Lock
-import traceback
 from uuid import uuid4
 
 import pytest
@@ -32,9 +32,7 @@ def test_scheduler_allows_one_active_and_two_queued_per_direction() -> None:
         release = asyncio.Event()
         order: list[int] = []
 
-        async def work(
-            _context: SchedulerContext, value: int
-        ) -> int:
+        async def work(_context: SchedulerContext, value: int) -> int:
             order.append(value)
             if value == 0:
                 started.set()
@@ -43,23 +41,14 @@ def test_scheduler_allows_one_active_and_two_queued_per_direction() -> None:
 
         try:
             identities = [
-                scheduler.open_utterance(session_id, uuid4())
-                for _ in range(4)
+                scheduler.open_utterance(session_id, uuid4()) for _ in range(4)
             ]
-            first = scheduler.submit(
-                identities[0], lambda context: work(context, 0)
-            )
+            first = scheduler.submit(identities[0], lambda context: work(context, 0))
             await asyncio.wait_for(started.wait(), timeout=1)
-            second = scheduler.submit(
-                identities[1], lambda context: work(context, 1)
-            )
-            third = scheduler.submit(
-                identities[2], lambda context: work(context, 2)
-            )
+            second = scheduler.submit(identities[1], lambda context: work(context, 1))
+            third = scheduler.submit(identities[2], lambda context: work(context, 2))
             with pytest.raises(SchedulerOverflow, match="queue"):
-                scheduler.submit(
-                    identities[3], lambda context: work(context, 3)
-                )
+                scheduler.submit(identities[3], lambda context: work(context, 3))
             release.set()
             assert await asyncio.gather(first, second, third) == [0, 1, 2]
             assert order == [0, 1, 2]
@@ -77,9 +66,7 @@ def test_scheduler_capacity_is_independent_per_direction() -> None:
             AudioDirection.MICROPHONE: asyncio.Event(),
             AudioDirection.SPEAKER: asyncio.Event(),
         }
-        sessions = {
-            direction: uuid4() for direction in AudioDirection
-        }
+        sessions = {direction: uuid4() for direction in AudioDirection}
         for direction, session_id in sessions.items():
             scheduler.open_session(session_id, direction)
 
@@ -90,16 +77,12 @@ def test_scheduler_capacity_is_independent_per_direction() -> None:
 
         try:
             futures = []
-            for direction, session_id in sessions.items():
+            for _direction, session_id in sessions.items():
                 for _ in range(3):
-                    identity = scheduler.open_utterance(
-                        session_id, uuid4()
-                    )
+                    identity = scheduler.open_utterance(session_id, uuid4())
                     futures.append(scheduler.submit(identity, work))
             await asyncio.wait_for(
-                asyncio.gather(
-                    *(event.wait() for event in started.values())
-                ),
+                asyncio.gather(*(event.wait() for event in started.values())),
                 timeout=1,
             )
             release.set()
@@ -115,9 +98,7 @@ def test_scheduler_capacity_is_independent_per_direction() -> None:
 def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
     async def scenario() -> None:
         scheduler = InferenceScheduler()
-        sessions = {
-            direction: uuid4() for direction in AudioDirection
-        }
+        sessions = {direction: uuid4() for direction in AudioDirection}
         for direction, session_id in sessions.items():
             scheduler.open_session(session_id, direction)
         active = 0
@@ -150,9 +131,7 @@ def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
         async def work(context: SchedulerContext) -> str:
             if context.identity.direction is AudioDirection.SPEAKER:
                 speaker_gpu_attempt.set()
-            return await context.run_gpu(
-                lambda: native(context.identity.direction)
-            )
+            return await context.run_gpu(lambda: native(context.identity.direction))
 
         try:
             microphone = [
@@ -166,9 +145,7 @@ def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
             ]
             assert await asyncio.to_thread(first_entered.wait, 1)
             speaker = scheduler.submit(
-                scheduler.open_utterance(
-                    sessions[AudioDirection.SPEAKER], uuid4()
-                ),
+                scheduler.open_utterance(sessions[AudioDirection.SPEAKER], uuid4()),
                 work,
             )
             await asyncio.wait_for(speaker_gpu_attempt.wait(), timeout=1)
@@ -199,9 +176,7 @@ def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
 def test_tts_workers_are_limited_to_two() -> None:
     async def scenario() -> None:
         scheduler = InferenceScheduler()
-        sessions = {
-            direction: uuid4() for direction in AudioDirection
-        }
+        sessions = {direction: uuid4() for direction in AudioDirection}
         for direction, session_id in sessions.items():
             scheduler.open_session(session_id, direction)
         active = 0
@@ -258,16 +233,12 @@ def test_tts_workers_are_limited_to_two() -> None:
                     microphone_work,
                 ),
                 scheduler.submit(
-                    scheduler.open_utterance(
-                        sessions[AudioDirection.SPEAKER], uuid4()
-                    ),
+                    scheduler.open_utterance(sessions[AudioDirection.SPEAKER], uuid4()),
                     speaker_work,
                 ),
             ]
             await asyncio.wait_for(all_attempted.wait(), timeout=1)
-            assert await asyncio.to_thread(
-                both_entered.wait, 1
-            )
+            assert await asyncio.to_thread(both_entered.wait, 1)
             assert active == 2
             release.set()
             assert await asyncio.gather(*futures) == [2, 1]
@@ -304,9 +275,7 @@ def test_tts_bridge_applies_1200ms_backpressure() -> None:
         async def work(context: SchedulerContext) -> int:
             nonlocal observed_high_water
             consumed = 0
-            stream = context.stream_tts(
-                frames, frame_duration_ms=100
-            )
+            stream = context.stream_tts(frames, frame_duration_ms=100)
             try:
                 async for _frame in stream:
                     consumed += 1
@@ -380,9 +349,7 @@ def test_generation_change_purges_tts_bridge_and_stops_producer(
                 producer_finalized.set()
 
         async def work(context: SchedulerContext) -> None:
-            stream = context.stream_tts(
-                frames, frame_duration_ms=100
-            )
+            stream = context.stream_tts(frames, frame_duration_ms=100)
             try:
                 delivered.append(await anext(stream))
                 first_delivered.set()
@@ -429,12 +396,8 @@ def test_close_session_does_not_invalidate_survivor_session() -> None:
         scheduler = InferenceScheduler()
         target_session = uuid4()
         survivor_session = uuid4()
-        scheduler.open_session(
-            target_session, AudioDirection.MICROPHONE
-        )
-        scheduler.open_session(
-            survivor_session, AudioDirection.SPEAKER
-        )
+        scheduler.open_session(target_session, AudioDirection.MICROPHONE)
+        scheduler.open_session(survivor_session, AudioDirection.SPEAKER)
         target_entered = ThreadEvent()
         release_target = ThreadEvent()
         survivor_attempt = asyncio.Event()
@@ -574,9 +537,7 @@ def test_cancel_purges_queued_job_without_running_it() -> None:
             )
             await asyncio.wait_for(first_started.wait(), timeout=1)
             queued_id = uuid4()
-            queued_identity = scheduler.open_utterance(
-                session_id, queued_id
-            )
+            queued_identity = scheduler.open_utterance(session_id, queued_id)
             queued = scheduler.submit(
                 queued_identity,
                 queued_work,
@@ -624,17 +585,13 @@ def test_scheduler_sanitizes_tts_producer_failure_and_logs(
             yield b""  # pragma: no cover
 
         async def work(context: SchedulerContext) -> None:
-            async for _frame in context.stream_tts(
-                frames, frame_duration_ms=20
-            ):
+            async for _frame in context.stream_tts(frames, frame_duration_ms=20):
                 pass
 
         try:
             identity = scheduler.open_utterance(session_id, uuid4())
             future = scheduler.submit(identity, work)
-            with pytest.raises(
-                SchedulerUnavailable, match="unavailable"
-            ) as raised:
+            with pytest.raises(SchedulerUnavailable, match="unavailable") as raised:
                 await future
             rendered = "".join(
                 traceback.format_exception(
@@ -673,9 +630,7 @@ def test_scheduler_sanitizes_native_failure_and_logs(
         try:
             identity = scheduler.open_utterance(session_id, uuid4())
             future = scheduler.submit(identity, work)
-            with pytest.raises(
-                SchedulerUnavailable, match="unavailable"
-            ) as raised:
+            with pytest.raises(SchedulerUnavailable, match="unavailable") as raised:
                 await future
             rendered = "".join(
                 traceback.format_exception(
@@ -780,9 +735,7 @@ def test_closed_sessions_use_global_generation_without_tombstones() -> None:
     async def scenario() -> None:
         scheduler = InferenceScheduler()
         reused_id = uuid4()
-        first_generation = scheduler.open_session(
-            reused_id, AudioDirection.MICROPHONE
-        )
+        first_generation = scheduler.open_session(reused_id, AudioDirection.MICROPHONE)
         scheduler.close_session(reused_id)
 
         for _ in range(100):
@@ -790,9 +743,7 @@ def test_closed_sessions_use_global_generation_without_tombstones() -> None:
             scheduler.open_session(session_id, AudioDirection.SPEAKER)
             scheduler.close_session(session_id)
 
-        second_generation = scheduler.open_session(
-            reused_id, AudioDirection.MICROPHONE
-        )
+        second_generation = scheduler.open_session(reused_id, AudioDirection.MICROPHONE)
         assert second_generation > first_generation
         assert scheduler.tracked_session_count == 1
         await scheduler.shutdown()
@@ -844,9 +795,7 @@ def test_concurrent_cancelled_shutdown_waits_for_shared_cleanup() -> None:
         finally:
             release_work.set()
             tasks = [
-                task
-                for task in (first, second)
-                if task is not None and not task.done()
+                task for task in (first, second) if task is not None and not task.done()
             ]
             if tasks:
                 await asyncio.wait_for(

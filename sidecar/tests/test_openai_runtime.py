@@ -8,8 +8,8 @@ from uuid import UUID, uuid4
 
 import numpy as np
 
-from translator_sidecar.openai_runtime import OpenAIRealtimeProvider
 from translator_sidecar.openai_provider import OpenAIRealtimeConfig
+from translator_sidecar.openai_runtime import OpenAIRealtimeProvider
 from translator_sidecar.provider_contract import (
     AudioDirection,
     CloseProviderSession,
@@ -17,10 +17,10 @@ from translator_sidecar.provider_contract import (
     Language,
     OpenProviderSession,
     PcmFormat,
+    PrivacySafeProviderError,
     ProviderAudioDelta,
     ProviderId,
     ProviderInputFrame,
-    PrivacySafeProviderError,
     ProviderSessionClosed,
     ProviderTranslationDelta,
     ProviderUtteranceFinal,
@@ -199,7 +199,9 @@ def test_openai_runtime_resamples_audio_and_suppresses_debug_text() -> None:
         assert audio.channels == 1
         assert audio.frame_duration_ms == 20
         assert len(audio.pcm) == 640
-        assert not any(isinstance(event, ProviderTranslationDelta) for event in published)
+        assert not any(
+            isinstance(event, ProviderTranslationDelta) for event in published
+        )
 
         await close_with_server_ack(provider, ws, request.session_id)
 
@@ -290,7 +292,9 @@ def test_openai_runtime_assigns_pending_audio_sequence_at_publication_time() -> 
         final = partial.model_copy(update={"sequence": 1, "end_of_utterance": True})
         await provider.submit_frame(final)
         audio = await wait_for_event(published, ProviderAudioDelta)
-        text = next(event for event in published if isinstance(event, ProviderTranslationDelta))
+        text = next(
+            event for event in published if isinstance(event, ProviderTranslationDelta)
+        )
 
         assert text.event_sequence < audio.event_sequence
         await close_with_server_ack(provider, ws, request.session_id)

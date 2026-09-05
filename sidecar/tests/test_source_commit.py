@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import logging
-from threading import Event, Lock
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from uuid import uuid4
 
 import pytest
@@ -261,6 +261,7 @@ def test_native_failure_is_sanitized_and_never_retried(
         raise RuntimeError(marker)
 
     if failure_at == "translation":
+
         def operation() -> str:
             return commit.finalize(
                 "private source",
@@ -316,10 +317,7 @@ def test_async_callbacks_are_owned_exactly_once_by_commit_boundary() -> None:
             end_of_utterance=True,
             translate=translate,
         )
-        frames = [
-            frame
-            async for frame in commit.stream_once(synthesize)
-        ]
+        frames = [frame async for frame in commit.stream_once(synthesize)]
 
         assert translated == "stable translation"
         assert frames == [b"frame-1", b"frame-2"]
@@ -382,10 +380,7 @@ def test_concurrent_async_callbacks_enter_once() -> None:
             yield b"frame"
 
         async def consume() -> list[bytes]:
-            return [
-                frame
-                async for frame in commit.stream_once(synthesize)
-            ]
+            return [frame async for frame in commit.stream_once(synthesize)]
 
         first_synthesis = asyncio.create_task(consume())
         await asyncio.wait_for(synthesis_entered.wait(), timeout=1)

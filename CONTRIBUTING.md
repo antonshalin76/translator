@@ -14,31 +14,32 @@ Keep changes inside the owner that already owns the behavior. Do not move provid
 ## Setup
 
 ```bash
-cargo test --workspace
-
-cd sidecar
-uv sync --locked --all-groups
-uv run pytest
-
-cd ../apps/translator-ui
-bun install --frozen-lockfile
-bun test src/*.test.ts
-bun run build
+./scripts/translator-validate deterministic
 ```
 
 ## Checks Before A Pull Request
 
-Run the smallest relevant checks for your change, then broaden if you touched shared contracts, routing, provider transport, or UI state.
+Run the smallest relevant check while developing. Before opening a pull
+request, run the complete repository contract:
 
 ```bash
-cargo fmt --all -- --check
-cargo test --workspace
-python3 -m unittest tests.test_task1_boundaries tests.test_task8_ui_controls tests.test_task9_desktop_run_mode
-(cd sidecar && uv run pytest)
-(cd apps/translator-ui && bun test src/*.test.ts && bun run build)
+./scripts/translator-validate deterministic
 ```
 
-Live Zoom/Meet/Telegram checks are manual acceptance tests. Do not make CI depend on a live desktop session, physical devices, or private model caches.
+The tracked manifest makes source-gate and collection drift fail explicitly.
+Live Zoom, Meet, and Telegram checks remain separate acceptance evidence; CI
+does not relabel a missing desktop session, physical device, credential, or
+private model cache as a pass.
+
+To verify an already provisioned model cache separately from the deterministic
+suite, opt in explicitly and point at its operator-owned root:
+
+```bash
+TRANSLATOR_RUN_GPU_MODEL_CACHE_TEST=1 \
+TRANSLATOR_MODEL_CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/translator/models" \
+  uv run --project sidecar pytest -q \
+  sidecar/tests/test_model_manifest.py::test_repository_reused_assets_resolve_through_pinned_integrity_policy
+```
 
 ## Security Rules
 

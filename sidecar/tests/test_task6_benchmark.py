@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from pathlib import Path
-import re
 import subprocess
-from threading import Barrier, Lock, current_thread
 import time
+from pathlib import Path
+from threading import Barrier, Lock, current_thread
 from uuid import UUID
 
-from jiwer import wer
 import pytest
+from jiwer import wer
 from sacrebleu.metrics import CHRF
 
+from translator_sidecar.benchmark import task6_live
 from translator_sidecar.benchmark.task6 import (
     AsrBenchmarkConfig,
     CorpusError,
@@ -24,16 +25,15 @@ from translator_sidecar.benchmark.task6 import (
     run_quality_benchmark,
     within_vram_budget,
 )
-from translator_sidecar.benchmark import task6_live
 from translator_sidecar.benchmark.task6_live import (
     _build_payload,
     _run_voice_smokes,
 )
+from translator_sidecar.benchmark.task7_e2e import load_task6_quality_evidence
 from translator_sidecar.provider_contract import (
     Language,
     TranslationMode,
 )
-
 
 CORPUS_PATH = Path(__file__).parent / "quality_corpus" / "task6-v4.json"
 
@@ -325,9 +325,7 @@ def test_critical_oracle_accepts_format_and_cross_script_equivalents() -> None:
             "There are twelve participants in the room."
         ),
         (Language.EN, "scheduled:13:15"): ("My meeting is scheduled for 1:15 p.m."),
-        (Language.RU, "do-not-mute:10:00"): (
-            "Не заглушай микрофон до 10:00."
-        ),
+        (Language.RU, "do-not-mute:10:00"): ("Не заглушай микрофон до 10:00."),
     }
     for (language, case_id), value in replacements.items():
         index = next(
@@ -794,10 +792,7 @@ def test_duplex_resource_sampler_observes_peak_during_active_pair() -> None:
     def resource_sample() -> tuple[float, int, float, int]:
         with lock:
             is_active = active > 0
-        if (
-            current_thread().name == "translator-resource-sampler"
-            and is_active
-        ):
+        if current_thread().name == "translator-resource-sampler" and is_active:
             return (200.0, 200_000_000, 90.0, 4_000)
         return (1.0, 100_000_000, 1.0, 1_000)
 
@@ -874,73 +869,45 @@ def test_live_report_persists_computed_acceptance_verdicts() -> None:
     assert serialized["quality"]["quality"]["passes_thresholds"] is False
     assert serialized["quality"]["ru_to_en"]["passes_drop_threshold"] is False
     assert serialized["quality"]["en_to_ru"]["passes_drop_threshold"] is True
-    assert serialized["duplex_candidates"][0]["model_id"] == (
-        "faster-whisper-small"
-    )
+    assert serialized["duplex_candidates"][0]["model_id"] == ("faster-whisper-small")
     assert serialized["duplex_candidates"][0]["vram_within_budget"] is True
-    assert serialized["duplex_candidates"][1]["model_id"] == (
-        "faster-whisper-large-v3"
-    )
+    assert serialized["duplex_candidates"][1]["model_id"] == ("faster-whisper-large-v3")
     assert serialized["duplex_candidates"][1]["vram_within_budget"] is False
 
 
-def test_committed_task6_evidence_is_complete_and_privacy_safe() -> None:
-    root = Path(__file__).parents[2]
-    corpus = load_quality_corpus(CORPUS_PATH)
-    results = json.loads(
-        (root / "docs/benchmarks/task6-results.json").read_text(encoding="utf-8")
-    )
-    review = json.loads(
-        (root / "docs/benchmarks/task6-critical-review.json").read_text(
-            encoding="utf-8"
-        )
-    )
+def test_task6_parser_publishes_only_hash_bound_synthetic_summary(
+    tmp_path: Path,
+) -> None:
+    private_marker = "synthetic-private-human-review-text"
+    payload = {
+        "schema_version": "translator.task6-benchmark.v2",
+        "quality": {
+            "quality": {
+                "corpus_id": "synthetic-task6-corpus",
+                "passes_thresholds": True,
+            },
+            "review_rows": [{"source_text": private_marker}],
+        },
+    }
+    path = tmp_path / "synthetic-task6-results.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert results["schema_version"] == "translator.task6-benchmark.v2"
-    assert review["schema_version"] == "translator.task6-critical-review.v2"
-    assert {
-        candidate["model_id"] for candidate in results["duplex_candidates"]
-    } == {"faster-whisper-small", "faster-whisper-large-v3"}
-    for candidate in results["duplex_candidates"]:
-        assert candidate["excluded_warmups"] == 10
-        assert candidate["measured_per_direction"] == 100
-        assert len(candidate["ru_to_en_latency_ms"]) == 100
-        assert len(candidate["en_to_ru_latency_ms"]) == 100
-    assert review["reviewed_rows"] == 200
-    assert review["corpus_id"] == results["quality"]["quality"]["corpus_id"]
-    assert review["meaning_changing_failures"] == 0
-    assert review["ambiguities"] == 0
-    assert review["reviewer"] == {
-        "agent_id": "019faa32-26ba-7a23-a482-d7aecd537733",
-        "kind": "independent_critic",
+    public_summary = load_task6_quality_evidence(path).to_report_dict()
+    expected_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    assert public_summary == {
+        "schema_version": "translator.task6-benchmark.v2",
+        "sha256": expected_sha256,
+        "corpus_id": "synthetic-task6-corpus",
+        "passes_thresholds": True,
     }
-    assert re.fullmatch(r"[0-9a-f]{64}", review["review_input_sha256"])
-    assert re.fullmatch(r"[0-9a-f]{64}", review["review_content_sha256"])
-    assert review["review_content_sha256"] == (
-        results["quality"]["critical_review_content_sha256"]
-    )
-    assert review["critical_judgments"] == sum(
-        len(row["critical"]) for row in review["rows"]
-    )
-    assert len(review["rows"]) == 200
-    assert {
-        (row["direction"], row["case_id"]) for row in review["rows"]
-    } == {
-        (direction, case.case_id)
-        for direction in ("ru_to_en", "en_to_ru")
-        for case in corpus.cases
+    assert set(public_summary) == {
+        "schema_version",
+        "sha256",
+        "corpus_id",
+        "passes_thresholds",
     }
-    expected_critical = {case.case_id: list(case.critical) for case in corpus.cases}
-    assert all(
-        row["critical"] == expected_critical[row["case_id"]]
-        and row["verdict"] == "pass"
-        for row in review["rows"]
-    )
-    assert review["verdict"] == "pass"
-    assert all(
-        {"case_id", "direction", "critical", "verdict"} == set(row)
-        for row in review["rows"]
-    )
+    assert private_marker not in json.dumps(public_summary)
 
 
 def test_live_releases_quality_asr_before_creating_normal_residency(

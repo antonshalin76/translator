@@ -7,10 +7,10 @@ import asyncio
 import dataclasses
 import gc
 import json
-from pathlib import Path
 import subprocess
-from threading import Lock, Thread
 import time
+from pathlib import Path
+from threading import Lock, Thread
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,8 +18,8 @@ import psutil
 
 from translator_sidecar.benchmark.task6 import (
     AsrBenchmarkConfig,
-    DuplexBenchmarkReport,
     DuplexBenchmarkConfig,
+    DuplexBenchmarkReport,
     QualityBenchmarkRun,
     benchmark_asr_candidate,
     benchmark_simultaneous_duplex,
@@ -50,7 +50,6 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
-
 
 _ROOT = Path(__file__).resolve().parents[3]
 _MANIFEST_PATH = _ROOT / "models" / "manifest.json"
@@ -195,11 +194,9 @@ def _build_payload(
     duplex_candidates: tuple[DuplexBenchmarkReport, ...],
     normal_runtime: dict[str, Any],
 ) -> dict[str, Any]:
-    if (
-        len(duplex_candidates) != 2
-        or {candidate.model_id for candidate in duplex_candidates}
-        != {_SMALL_ID, _LARGE_ID}
-    ):
+    if len(duplex_candidates) != 2 or {
+        candidate.model_id for candidate in duplex_candidates
+    } != {_SMALL_ID, _LARGE_ID}:
         raise RuntimeError("both ASR duplex candidates are required")
     quality_payload = dataclasses.asdict(quality_run)
     quality_payload["passes_thresholds"] = quality_run.passes_thresholds

@@ -16,12 +16,12 @@ import soxr
 
 from .openai_provider import (
     OPENAI_PROVIDER_NAME,
+    OpenAIRealtimeAdapter,
+    OpenAIRealtimeConfig,
     build_input_audio_append_event,
     build_session_close_event,
     build_session_update_event,
     openai_pcm_format,
-    OpenAIRealtimeAdapter,
-    OpenAIRealtimeConfig,
 )
 from .provider_contract import (
     CancelUtterance,
@@ -50,7 +50,6 @@ from .provider_contract import (
     UtteranceOutcome,
     make_provider_error,
 )
-
 
 PublishEvents = Callable[[tuple[object, ...], Callable[[], None]], Awaitable[None]]
 WebSocketFactory = Callable[[], Any]
@@ -269,7 +268,7 @@ class OpenAIRealtimeProvider:
                 pass
         try:
             await asyncio.wait_for(session.closed_event.wait(), timeout=2)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             async with session.lock:
                 if not session.closed_published:
                     session.closed = True
@@ -297,7 +296,7 @@ class OpenAIRealtimeProvider:
         ):
             try:
                 await asyncio.wait_for(session.receiver_task, timeout=1)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 session.receiver_task.cancel()
                 await asyncio.gather(
                     session.receiver_task,
@@ -338,8 +337,7 @@ class OpenAIRealtimeProvider:
                     session.closed = True
                     await self._publish_closed_locked(
                         session,
-                        session.requested_close_reason
-                        or SessionCloseReason.USER_STOP,
+                        session.requested_close_reason or SessionCloseReason.USER_STOP,
                     )
                     return
                 if event_type == "error":
@@ -577,7 +575,11 @@ class OpenAIRealtimeProvider:
             return
         async with session.lock:
             utterance = session.utterances.get(utterance_id)
-            if utterance is None or utterance.final_sent or not utterance.input_complete:
+            if (
+                utterance is None
+                or utterance.final_sent
+                or not utterance.input_complete
+            ):
                 return
             await self._publish_pending_audio_locked(session, utterance)
             await self._publish_final_locked(session, utterance, outcome)
@@ -610,9 +612,7 @@ class OpenAIRealtimeProvider:
     ):
         return event.model_copy(
             update={
-                "event_sequence": self._next_event_sequence(
-                    session.request.session_id
-                )
+                "event_sequence": self._next_event_sequence(session.request.session_id)
             }
         )
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import gc
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from translator_sidecar.local.asr import (
     AsrModelManager,
@@ -34,7 +35,6 @@ from translator_sidecar.provider_contract import (
     TranslationMode,
     VoiceGender,
 )
-
 
 _ASR_MODELS = {
     "faster-whisper-small": "small",

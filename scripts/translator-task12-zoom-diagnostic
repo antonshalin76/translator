@@ -5,10 +5,8 @@ import datetime as dt
 import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPORT = ROOT / "docs/benchmarks/task12-zoom-diagnostic-report.json"
@@ -17,7 +15,7 @@ VIRTUAL_MIC_DESCRIPTION = "Translator_Virtual_Mic"
 
 
 def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def read_json(path: str) -> dict[str, Any]:
@@ -55,7 +53,9 @@ def run_command(args: list[str], timeout: float = 10.0) -> dict[str, Any]:
     }
 
 
-def command_json(args: list[str], timeout: float = 10.0) -> tuple[list[dict[str, Any]], str | None]:
+def command_json(
+    args: list[str], timeout: float = 10.0
+) -> tuple[list[dict[str, Any]], str | None]:
     result = run_command(args, timeout=timeout)
     if not result["ok"]:
         return [], result["safe_error"] or "command_failed"
@@ -143,7 +143,9 @@ def binary_state() -> dict[str, Any]:
 
 
 def collect_audio_state() -> dict[str, Any]:
-    sink_inputs, sink_input_error = command_json(["pactl", "--format=json", "list", "sink-inputs"])
+    sink_inputs, sink_input_error = command_json(
+        ["pactl", "--format=json", "list", "sink-inputs"]
+    )
     sinks, sink_error = command_json(["pactl", "--format=json", "list", "sinks"])
     sources, source_error = command_json(["pactl", "--format=json", "list", "sources"])
     links = run_command(["pw-link", "-l"], timeout=10.0)
@@ -188,7 +190,9 @@ def collect_audio_state() -> dict[str, Any]:
             "sink_inputs": sink_input_error,
             "sinks": sink_error,
             "sources": source_error,
-            "pw_links": None if links["ok"] else links["safe_error"] or "command_failed",
+            "pw_links": None
+            if links["ok"]
+            else links["safe_error"] or "command_failed",
         },
         "zoom_route_candidates": candidates,
         "virtual_microphone": {

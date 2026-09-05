@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
+from translator_sidecar.generated.translator.provider.v1 import provider_pb2
 from translator_sidecar.provider_contract import (
     SAFE_ERROR_MESSAGES,
     AudioDirection,
@@ -18,17 +19,17 @@ from translator_sidecar.provider_contract import (
     ModelState,
     OpenProviderSession,
     PcmFormat,
-    ProviderCapabilities,
     ProviderAudioDelta,
+    ProviderCapabilities,
     ProviderHealth,
     ProviderId,
     ProviderInputFrame,
     ProviderLatency,
+    ProviderProbeRequest,
+    ProviderProbeResponse,
     ProviderQueues,
     ProviderSessionClosed,
     ProviderSessionOpened,
-    ProviderProbeRequest,
-    ProviderProbeResponse,
     ProviderState,
     SafeErrorCode,
     SampleFormat,
@@ -41,7 +42,6 @@ from translator_sidecar.provider_contract import (
     make_provider_error,
     provider_log_fields,
 )
-from translator_sidecar.generated.translator.provider.v1 import provider_pb2
 
 
 def pcm_format() -> PcmFormat:
@@ -304,7 +304,9 @@ def test_provider_error_forbids_unknown_and_content_derived_fields() -> None:
     with pytest.raises(ValidationError):
         from translator_sidecar.provider_contract import PrivacySafeProviderError
 
-        PrivacySafeProviderError.model_validate({**base, "transcript": "private-spoken-marker"})
+        PrivacySafeProviderError.model_validate(
+            {**base, "transcript": "private-spoken-marker"}
+        )
 
     with pytest.raises(ValidationError):
         PrivacySafeProviderError.model_validate(
@@ -333,10 +335,7 @@ def test_privacy_safe_logging_projects_only_operational_error_fields() -> None:
 
 def test_no_speech_has_stable_cross_language_contract() -> None:
     assert SafeErrorCode.NO_SPEECH.value == "no_speech"
-    assert (
-        SAFE_ERROR_MESSAGES[SafeErrorCode.NO_SPEECH]
-        == "No speech was detected"
-    )
+    assert SAFE_ERROR_MESSAGES[SafeErrorCode.NO_SPEECH] == "No speech was detected"
     assert provider_pb2.SAFE_ERROR_CODE_NO_SPEECH == 8
 
     error = make_provider_error(

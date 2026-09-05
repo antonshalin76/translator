@@ -44,26 +44,20 @@ The daemon owns audio routing and device selection. The Python sidecar owns prov
 ## Development Setup
 
 ```bash
-cd /home/anton/Source/translator
+cd translator
 
-cargo test --workspace
-
-cd sidecar
-uv sync --locked --all-groups
-uv run pytest
-
-cd ../apps/translator-ui
-bun install --frozen-lockfile
-bun test src/*.test.ts
-bun run build
+./scripts/translator-validate deterministic
 ```
+
+The deterministic entrypoint runs the complete Rust, Python, UI, schema,
+systemd, supply-chain, and publication gates used by CI. It also verifies the
+tracked test manifest and the exact external-prerequisite skip allowlist.
 
 ## Desktop Service
 
 Build release binaries when needed:
 
 ```bash
-cd /home/anton/Source/translator
 cargo build --release -p translator-daemon
 cd apps/translator-ui
 bun run tauri build --no-bundle
@@ -72,7 +66,6 @@ bun run tauri build --no-bundle
 Install and control the user service:
 
 ```bash
-cd /home/anton/Source/translator
 ./scripts/translator-desktop install
 translator up
 translator status
@@ -84,7 +77,42 @@ The `translator` command is installed into `~/.local/bin` and works from any dir
 
 ## Configuration
 
-Local provider mode does not require cloud credentials. For OpenAI provider testing, keep credentials outside git and expose `OPENAI_API_KEY` only to the local process or user-level service environment. See `.env.example` for non-secret variable names and optional local overrides.
+Local provider mode does not require cloud credentials. The desktop launcher
+resolves systemd's user configuration root and creates `%E/translator` with
+mode `0700` and an empty `environment` file with mode `0600`. On every
+`install`, `up`, `start`, and `restart`, it refuses to continue unless the
+directory belongs to the current user and the environment file is a regular,
+non-symlink, single-link file owned by that user with those exact modes. The
+resolved configuration root must also belong to the current user and must not
+be writable by group or others. The installed unit always enters the same
+wrapper before a daemon start, including automatic restarts. Systemd never
+loads the file itself.
+
+Configure the user service without putting values in the repository or shell
+command line:
+
+```bash
+./scripts/translator-desktop install
+service_environment="$(systemd-path user-configuration)/translator/environment"
+editor -- "$service_environment"
+chmod 600 -- "$service_environment"
+translator restart
+```
+
+Use one UTF-8 `KEY=value` entry per line. Values are literal: shell quoting,
+expansion, and `export` syntax are not evaluated. Duplicate, malformed, and
+unknown keys fail closed. The allowlist covers `OPENAI_API_KEY` and the
+daemon/sidecar override names documented in `.env.example`; UI-only and
+daemon-managed names are rejected. Do not print or `source` this file. If the
+launcher rejects an existing path, verify its owner, type, link count, and mode
+before repairing or replacing it; do not follow a symlink.
+
+The wrapper opens the file without following symlinks, validates the held file
+descriptor, reads it with a bounded parser, and passes accepted values to the
+daemon through `execve`. Those values still become process environment and can
+be inherited by child processes or exposed through process inspection. Prefer
+local provider mode where possible; credential-file support is required before
+claiming stronger protection for cloud credentials.
 
 Cloud provider use remains opt-in in the UI/API. Selecting a cloud provider marks that audio leaves the machine.
 
@@ -93,28 +121,43 @@ forced to an `end_of_utterance` boundary around 6000 ms, and pauses after the
 first 2500 ms can close the current chunk after about 120 ms of non-speech. For
 experiments, override `TRANSLATOR_VAD_MIN_UTTERANCE_MS`,
 `TRANSLATOR_VAD_MAX_UTTERANCE_MS`, and
-`TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS` in `.env`. The sidecar also uses
+`TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS` in the service environment file, or export
+them in the shell for a direct run. The sidecar also uses
 `TRANSLATOR_CONTINUATION_TAIL_RMS` to distinguish a forced voiced chunk boundary
 from a natural silent phrase ending before TTS renders punctuation.
 
 CTranslate2/faster-whisper GPU execution requires CUDA 12 cuBLAS and cuDNN 9
-runtime libraries. The service unit already prepends the local compatibility
-paths. Direct sidecar/debug script runs also bootstrap the same existing local
-paths, and `TRANSLATOR_CUDA_LIBRARY_PATH` can prepend another operator-owned
-directory. CUDA 13 alone is not sufficient for the current `ctranslate2==4.7.1`
-wheel because it does not provide `libcublas.so.12`.
+runtime libraries. The supervised service discards the caller's loader search
+path and admits only absolute CUDA directories owned by root or the service
+user, with no group/other-write or set-ID mode on ancestry, contents, and
+resolved symlink targets. Owner-write is allowed because root and the service
+UID are the trust boundary. The only broader writable traversal exception is a
+root-owned sticky ancestor such as `/tmp`; it never applies to the admitted
+directory or a library. An absent portable default is ignored, while an invalid
+explicit path or an unsafe existing default fails closed.
+`TRANSLATOR_CUDA_LIBRARY_PATH` supplies the ordered operator directories; it
+does not extend an ambient `LD_LIBRARY_PATH`.
+Direct sidecar/debug runs apply the same Python-side directory and held-file
+validation and serialize process-global configuration; failed preload restores
+the prior loader environment. Only the desktop launcher/service wrapper is a
+supported secure entrypoint because a directly invoked process has already
+consumed its caller's loader environment. The direct helper proves the current
+cuBLAS tree, not an arbitrary cuDNN 9 split-library layout; use the supervised
+pre-exec path for the complete GPU runtime. CUDA 13 alone is not sufficient for
+the current `ctranslate2==4.7.1` wheel because it does not provide
+`libcublas.so.12`.
 
 ## Validation
 
-Useful local checks:
+Run the same deterministic gate locally and in hosted CI:
 
 ```bash
-cargo fmt --all -- --check
-cargo test --workspace
-python3 -m unittest tests.test_task1_boundaries tests.test_task8_ui_controls tests.test_task9_desktop_run_mode
-(cd sidecar && uv run pytest)
-(cd apps/translator-ui && bun test src/*.test.ts && bun run build)
+./scripts/translator-validate deterministic
 ```
+
+Live provider, physical-audio, real-call, and human-review checks are separate
+release evidence. A missing live prerequisite is reported as unavailable; it
+is never converted into a deterministic pass.
 
 Quality diagnostics:
 

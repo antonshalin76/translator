@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 import gc
 import logging
-from threading import Event as ThreadEvent
 import traceback
-from uuid import UUID, uuid4
 import weakref
+from collections.abc import Iterator
+from threading import Event as ThreadEvent
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -15,8 +15,8 @@ import translator_sidecar.local.local_provider as local_provider_module
 from translator_sidecar.local.inference_scheduler import InferenceScheduler
 from translator_sidecar.local.local_provider import (
     LocalProvider,
-    LocalProviderPublicationError,
     LocalProviderProtocolError,
+    LocalProviderPublicationError,
 )
 from translator_sidecar.local.tts import TtsOutputLimit
 from translator_sidecar.provider_contract import (
@@ -31,10 +31,10 @@ from translator_sidecar.provider_contract import (
     ModelState,
     OpenProviderSession,
     PcmFormat,
-    ProviderId,
     PrivacySafeProviderError,
     ProviderAudioDelta,
     ProviderHealth,
+    ProviderId,
     ProviderInputFrame,
     ProviderLatency,
     ProviderSessionClosed,
@@ -119,9 +119,7 @@ class FakeTranslator:
         self.after_call = after_call
         self.failure = failure
         self.require_boundary = require_boundary
-        self.calls: list[
-            tuple[str, Language, Language, TranslationMode]
-        ] = []
+        self.calls: list[tuple[str, Language, Language, TranslationMode]] = []
 
     def translate(
         self,
@@ -131,13 +129,8 @@ class FakeTranslator:
         target_language: Language,
         mode: TranslationMode,
     ) -> str:
-        self.calls.append(
-            (text, source_language, target_language, mode)
-        )
-        if (
-            self.require_boundary is not None
-            and not self.require_boundary()
-        ):
+        self.calls.append((text, source_language, target_language, mode))
+        if self.require_boundary is not None and not self.require_boundary():
             raise AssertionError("MT ran outside source commit")
         if self.after_call is not None:
             self.after_call()
@@ -146,11 +139,7 @@ class FakeTranslator:
         return self.result
 
     def count_tokens(self, text: str) -> int:
-        return (
-            self.token_count
-            if self.token_count is not None
-            else len(text.split())
-        )
+        return self.token_count if self.token_count is not None else len(text.split())
 
 
 class FakeTts:
@@ -200,17 +189,10 @@ class FakeTts:
                 "continuation": continuation,
             }
         )
-        if (
-            self.require_boundary is not None
-            and not self.require_boundary()
-        ):
+        if self.require_boundary is not None and not self.require_boundary():
             raise AssertionError("TTS ran outside source commit")
         frame_bytes = (
-            output_sample_rate_hz
-            * output_channels
-            * frame_duration_ms
-            // 1000
-            * 2
+            output_sample_rate_hz * output_channels * frame_duration_ms // 1000 * 2
         )
         if self.failure is not None:
             raise self.failure
@@ -220,9 +202,7 @@ class FakeTts:
             if index == 0 and self.before_first_frame is not None:
                 self.before_first_frame()
             value = (
-                self.frame_byte
-                if self.frame_byte is not None
-                else (index % 255) + 1
+                self.frame_byte if self.frame_byte is not None else (index % 255) + 1
             )
             yield bytes([value]) * frame_bytes
         if self.raise_output_limit:
@@ -291,9 +271,7 @@ def input_frame(
         session_id=session.session_id,
         direction_id=session.direction_id,
         stream_id=UUID(
-            int=1
-            if session.direction_id is AudioDirection.MICROPHONE
-            else 2
+            int=1 if session.direction_id is AudioDirection.MICROPHONE else 2
         ),
         utterance_id=utterance_id,
         sequence=sequence,
@@ -466,7 +444,7 @@ def test_duplex_sessions_translate_only_after_eou_and_keep_events_isolated() -> 
                 opening[session.session_id] = (opened, health)
 
             utterances = [uuid4(), uuid4()]
-            for session, utterance_id in zip(sessions, utterances):
+            for session, utterance_id in zip(sessions, utterances, strict=True):
                 await provider.submit_frame(
                     input_frame(
                         session,
@@ -489,9 +467,7 @@ def test_duplex_sessions_translate_only_after_eou_and_keep_events_isolated() -> 
                             end_of_utterance=True,
                         )
                     )
-                    for session, utterance_id in zip(
-                        sessions, utterances
-                    )
+                    for session, utterance_id in zip(sessions, utterances, strict=True)
                 )
             )
             await provider.wait_idle()
@@ -500,9 +476,7 @@ def test_duplex_sessions_translate_only_after_eou_and_keep_events_isolated() -> 
                 Language.RU,
                 Language.EN,
             }
-            assert {
-                (call[1], call[2]) for call in translator.calls
-            } == {
+            assert {(call[1], call[2]) for call in translator.calls} == {
                 (Language.RU, Language.EN),
                 (Language.EN, Language.RU),
             }
@@ -524,15 +498,12 @@ def test_duplex_sessions_translate_only_after_eou_and_keep_events_isolated() -> 
                 and call["frame_duration_ms"] == 20
                 for call in tts.calls
             )
-            for session, utterance_id in zip(sessions, utterances):
+            for session, utterance_id in zip(sessions, utterances, strict=True):
                 session_events = events[session.session_id]
                 assert all(
-                    event.session_id == session.session_id
-                    for event in session_events
+                    event.session_id == session.session_id for event in session_events
                 )
-                assert [
-                    type(event) for event in session_events
-                ] == [
+                assert [type(event) for event in session_events] == [
                     ProviderAudioDelta,
                     ProviderAudioDelta,
                     ProviderLatency,
@@ -544,8 +515,7 @@ def test_duplex_sessions_translate_only_after_eou_and_keep_events_isolated() -> 
                     event.stream_id
                     == UUID(
                         int=1
-                        if session.direction_id
-                        is AudioDirection.MICROPHONE
+                        if session.direction_id is AudioDirection.MICROPHONE
                         else 2
                     )
                     and event.direction_id == session.direction_id
@@ -556,8 +526,7 @@ def test_duplex_sessions_translate_only_after_eou_and_keep_events_isolated() -> 
                     for event in audio
                 )
                 assert all(
-                    event.utterance_id == utterance_id
-                    for event in session_events
+                    event.utterance_id == utterance_id for event in session_events
                 )
                 assert session_events[-1].outcome is UtteranceOutcome.COMPLETED
                 assert session_events[-1].final_audio_sequence == 1
@@ -594,16 +563,12 @@ def test_source_overflow_discards_until_eou_then_emits_atomic_terminal(
 ) -> None:
     async def scenario() -> None:
         clock = iter((3_000_000_000,) * 20)
-        provider, asr, translator, tts = build_provider(
-            now_ns=lambda: next(clock)
-        )
+        provider, asr, translator, tts = build_provider(now_ns=lambda: next(clock))
         session = request(AudioDirection.MICROPHONE, mode=mode)
         utterance_id = uuid4()
         try:
             collector = Collector()
-            opened, health = await provider.open_session(
-                session, collector.publish
-            )
+            opened, health = await provider.open_session(session, collector.publish)
             for sequence in range(300):
                 await provider.submit_frame(
                     input_frame(
@@ -623,9 +588,7 @@ def test_source_overflow_discards_until_eou_then_emits_atomic_terminal(
             )
             assert collector.batches == []
             overflow_health = await provider.health(session.session_id)
-            assert (
-                overflow_health.queues.provider_input_buffered_ms == 0
-            )
+            assert overflow_health.queues.provider_input_buffered_ms == 0
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -676,7 +639,7 @@ def test_source_overflow_discards_until_eou_then_emits_atomic_terminal(
 
 @pytest.mark.parametrize(
     ("mode", "accepted_ms"),
-        [
+    [
         (mode, accepted_ms)
         for mode in TranslationMode
         for accepted_ms in (11_900, 12_000, 23_900, 24_000, 29_900, 30_000)
@@ -711,13 +674,8 @@ def test_source_at_or_just_below_cap_is_accepted_and_all_pcm_is_transcribed(
             assert len(asr.calls) == 1
             assert asr.calls[0][0] == b"".join(expected_pcm)
             assert asr.calls[0][2] is mode
-            assert isinstance(
-                collector.events[-1], ProviderUtteranceFinal
-            )
-            assert (
-                collector.events[-1].outcome
-                is UtteranceOutcome.COMPLETED
-            )
+            assert isinstance(collector.events[-1], ProviderUtteranceFinal)
+            assert collector.events[-1].outcome is UtteranceOutcome.COMPLETED
         finally:
             await provider.shutdown()
 
@@ -826,18 +784,13 @@ def test_first_over_cap_frame_with_eou_drops_immediately() -> None:
                 )
             )
             await provider.wait_publications(session.session_id)
-            assert [
-                type(event) for event in collector.events
-            ] == [
+            assert [type(event) for event in collector.events] == [
                 ProviderLatency,
                 PrivacySafeProviderError,
                 ProviderUtteranceFinal,
             ]
             assert collector.events[1].code is SafeErrorCode.QUEUE_OVERFLOW
-            assert (
-                collector.events[2].outcome
-                is UtteranceOutcome.DROPPED
-            )
+            assert collector.events[2].outcome is UtteranceOutcome.DROPPED
             assert asr.calls == []
         finally:
             await provider.shutdown()
@@ -859,9 +812,7 @@ def test_debug_text_is_checked_at_publication_and_never_reaches_tts_early() -> N
         collector = Collector()
         utterance_id = uuid4()
         try:
-            await provider.open_session(
-                session, collector.publish
-            )
+            await provider.open_session(session, collector.publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -914,12 +865,8 @@ def test_debug_text_can_be_enabled_before_publication_per_session() -> None:
         normal_collector = Collector()
         normal_utterance = uuid4()
         try:
-            await provider.open_session(
-                debug_session, debug_collector.publish
-            )
-            await provider.open_session(
-                normal_session, normal_collector.publish
-            )
+            await provider.open_session(debug_session, debug_collector.publish)
+            await provider.open_session(normal_session, normal_collector.publish)
             await provider.submit_frame(
                 input_frame(
                     debug_session,
@@ -945,9 +892,7 @@ def test_debug_text_can_be_enabled_before_publication_per_session() -> None:
             )
             release.set()
             await provider.wait_idle()
-            assert [
-                type(event) for event in debug_collector.events[:2]
-            ] == [
+            assert [type(event) for event in debug_collector.events[:2]] == [
                 ProviderTranscriptDelta,
                 ProviderTranslationDelta,
             ]
@@ -964,10 +909,7 @@ def test_debug_text_can_be_enabled_before_publication_per_session() -> None:
                 )
                 for event in normal_collector.events
             )
-            assert (
-                normal_collector.events[-1].outcome
-                is UtteranceOutcome.COMPLETED
-            )
+            assert normal_collector.events[-1].outcome is UtteranceOutcome.COMPLETED
         finally:
             release.set()
             await provider.shutdown()
@@ -1033,9 +975,7 @@ def test_cancel_during_native_asr_emits_one_terminal_and_no_late_events() -> Non
         collector = Collector()
         utterance_id = uuid4()
         try:
-            await provider.open_session(
-                session, collector.publish
-            )
+            await provider.open_session(session, collector.publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -1058,13 +998,8 @@ def test_cancel_during_native_asr_emits_one_terminal_and_no_late_events() -> Non
             )
             await provider.wait_publications(session.session_id)
             assert len(collector.events) == 1
-            assert isinstance(
-                collector.events[0], ProviderUtteranceFinal
-            )
-            assert (
-                collector.events[0].outcome
-                is UtteranceOutcome.CANCELLED
-            )
+            assert isinstance(collector.events[0], ProviderUtteranceFinal)
+            assert collector.events[0].outcome is UtteranceOutcome.CANCELLED
             release.set()
             await provider.wait_idle()
             await asyncio.sleep(0)
@@ -1120,10 +1055,7 @@ def test_cancel_purges_collecting_and_overflow_states(
             await provider.wait_publications(session.session_id)
             assert len(collector.batches) == 1
             assert len(collector.batches[0]) == 1
-            assert (
-                collector.batches[0][0].outcome
-                is UtteranceOutcome.CANCELLED
-            )
+            assert collector.batches[0][0].outcome is UtteranceOutcome.CANCELLED
             assert asr.calls == []
             with pytest.raises(
                 LocalProviderProtocolError,
@@ -1156,9 +1088,7 @@ def test_cancel_is_isolated_from_opposite_direction() -> None:
         speaker_events = Collector()
         microphone_utterance = uuid4()
         try:
-            await provider.open_session(
-                microphone, microphone_events.publish
-            )
+            await provider.open_session(microphone, microphone_events.publish)
             await provider.open_session(speaker, speaker_events.publish)
             await provider.submit_frame(
                 input_frame(
@@ -1209,9 +1139,7 @@ def test_close_purges_session_and_prevents_late_native_events() -> None:
         session = request(AudioDirection.MICROPHONE)
         collector = Collector()
         try:
-            opened, health = await provider.open_session(
-                session, collector.publish
-            )
+            opened, health = await provider.open_session(session, collector.publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -1232,9 +1160,7 @@ def test_close_purges_session_and_prevents_late_native_events() -> None:
             )
             await provider.wait_publications(session.session_id)
             assert len(collector.events) == 1
-            assert isinstance(
-                collector.events[0], ProviderSessionClosed
-            )
+            assert isinstance(collector.events[0], ProviderSessionClosed)
             closed = collector.events[0]
             assert closed.reason is SessionCloseReason.USER_STOP
             assert [
@@ -1280,9 +1206,7 @@ def test_translation_limits_drop_without_tts_or_content_in_errors(
         collector = Collector()
         utterance_id = uuid4()
         try:
-            opened, health = await provider.open_session(
-                session, collector.publish
-            )
+            opened, health = await provider.open_session(session, collector.publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -1293,16 +1217,12 @@ def test_translation_limits_drop_without_tts_or_content_in_errors(
             )
             await provider.wait_idle()
             assert collector.events[-1].outcome is outcome
-            assert_session_sequence(
-                opened, health, utterance_id, collector.events
-            )
+            assert_session_sequence(opened, health, utterance_id, collector.events)
             if outcome is UtteranceOutcome.COMPLETED:
                 assert len(tts.calls) == 1
             else:
                 assert len(collector.batches) == 1
-                assert [
-                    type(event) for event in collector.batches[0]
-                ] == [
+                assert [type(event) for event in collector.batches[0]] == [
                     ProviderLatency,
                     PrivacySafeProviderError,
                     ProviderUtteranceFinal,
@@ -1366,22 +1286,14 @@ def test_scheduler_admission_overflow_is_an_atomic_drop() -> None:
         provider, _, _, _ = build_provider(
             asr=FakeAsr(started=started, release=release)
         )
-        sessions = [
-            request(AudioDirection.MICROPHONE) for _ in range(4)
-        ]
+        sessions = [request(AudioDirection.MICROPHONE) for _ in range(4)]
         collectors = [Collector() for _ in sessions]
         openings: list[tuple[object, object]] = []
         utterances = [uuid4() for _ in sessions]
         try:
-            for session, collector in zip(sessions, collectors):
-                openings.append(
-                    await provider.open_session(
-                        session, collector.publish
-                    )
-                )
-            for session, utterance_id in zip(
-                sessions[:3], utterances[:3]
-            ):
+            for session, collector in zip(sessions, collectors, strict=True):
+                openings.append(await provider.open_session(session, collector.publish))
+            for session, utterance_id in zip(sessions[:3], utterances[:3], strict=True):
                 await provider.submit_frame(
                     input_frame(
                         session,
@@ -1399,30 +1311,20 @@ def test_scheduler_admission_overflow_is_an_atomic_drop() -> None:
                 )
             )
             await provider.wait_publications(sessions[3].session_id)
-            assert [
-                type(event) for event in collectors[3].events
-            ] == [
+            assert [type(event) for event in collectors[3].events] == [
                 ProviderLatency,
                 PrivacySafeProviderError,
                 ProviderUtteranceFinal,
             ]
-            assert (
-                collectors[3].events[1].code
-                is SafeErrorCode.QUEUE_OVERFLOW
-            )
-            assert (
-                collectors[3].events[2].outcome
-                is UtteranceOutcome.DROPPED
-            )
+            assert collectors[3].events[1].code is SafeErrorCode.QUEUE_OVERFLOW
+            assert collectors[3].events[2].outcome is UtteranceOutcome.DROPPED
             assert_session_sequence(
                 *openings[3],
                 utterances[3],
                 collectors[3].events,
             )
             dropped_snapshot = tuple(collectors[3].events)
-            for session, utterance_id in zip(
-                sessions[:3], utterances[:3]
-            ):
+            for session, utterance_id in zip(sessions[:3], utterances[:3], strict=True):
                 await provider.cancel_utterance(
                     CancelUtterance(
                         session_id=session.session_id,
@@ -1454,9 +1356,7 @@ def test_tts_output_limit_ends_with_atomic_drop_and_no_late_events() -> None:
         collector = Collector()
         utterance_id = uuid4()
         try:
-            opened, health = await provider.open_session(
-                session, collector.publish
-            )
+            opened, health = await provider.open_session(session, collector.publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -1466,34 +1366,25 @@ def test_tts_output_limit_ends_with_atomic_drop_and_no_late_events() -> None:
                 )
             )
             await provider.wait_idle()
-            assert len(
-                [
-                    event
-                    for event in collector.events
-                    if isinstance(event, ProviderAudioDelta)
-                ]
-            ) == 600
-            assert [
-                type(event) for event in collector.batches[-1]
-            ] == [
+            assert (
+                len(
+                    [
+                        event
+                        for event in collector.events
+                        if isinstance(event, ProviderAudioDelta)
+                    ]
+                )
+                == 600
+            )
+            assert [type(event) for event in collector.batches[-1]] == [
                 ProviderLatency,
                 PrivacySafeProviderError,
                 ProviderUtteranceFinal,
             ]
-            assert (
-                collector.batches[-1][1].code
-                is SafeErrorCode.QUEUE_OVERFLOW
-            )
-            assert (
-                collector.batches[-1][2].outcome
-                is UtteranceOutcome.DROPPED
-            )
-            assert (
-                collector.batches[-1][2].final_audio_sequence == 599
-            )
-            assert_session_sequence(
-                opened, health, utterance_id, collector.events
-            )
+            assert collector.batches[-1][1].code is SafeErrorCode.QUEUE_OVERFLOW
+            assert collector.batches[-1][2].outcome is UtteranceOutcome.DROPPED
+            assert collector.batches[-1][2].final_audio_sequence == 599
+            assert_session_sequence(opened, health, utterance_id, collector.events)
             terminal_count = len(collector.events)
             await asyncio.sleep(0)
             assert len(collector.events) == terminal_count
@@ -1507,15 +1398,9 @@ def test_nonzero_latency_fields_use_original_capture_onset() -> None:
     async def scenario() -> None:
         clock = MutableClock(1_000_000_000)
         provider, _, _, _ = build_provider(
-            asr=FakeAsr(
-                after_call=lambda: clock.set(1_100_000_000)
-            ),
-            translator=FakeTranslator(
-                after_call=lambda: clock.set(1_200_000_000)
-            ),
-            tts=FakeTts(
-                before_first_frame=lambda: clock.set(1_300_000_000)
-            ),
+            asr=FakeAsr(after_call=lambda: clock.set(1_100_000_000)),
+            translator=FakeTranslator(after_call=lambda: clock.set(1_200_000_000)),
+            tts=FakeTts(before_first_frame=lambda: clock.set(1_300_000_000)),
             now_ns=clock,
         )
         session = request(AudioDirection.MICROPHONE)
@@ -1575,26 +1460,14 @@ def test_runtime_model_failure_has_partial_latency_and_no_private_leak(
         clock = MutableClock(1_000_000_000)
         asr = FakeAsr(
             after_call=lambda: clock.set(1_100_000_000),
-            failure=(
-                RuntimeError(marker)
-                if stage is ModelKind.ASR
-                else None
-            ),
+            failure=(RuntimeError(marker) if stage is ModelKind.ASR else None),
         )
         translator = FakeTranslator(
             after_call=lambda: clock.set(1_200_000_000),
-            failure=(
-                RuntimeError(marker)
-                if stage is ModelKind.MT
-                else None
-            ),
+            failure=(RuntimeError(marker) if stage is ModelKind.MT else None),
         )
         tts = FakeTts(
-            failure=(
-                RuntimeError(marker)
-                if stage is ModelKind.TTS
-                else None
-            )
+            failure=(RuntimeError(marker) if stage is ModelKind.TTS else None)
         )
         provider, _, _, _ = build_provider(
             asr=asr,
@@ -1607,9 +1480,7 @@ def test_runtime_model_failure_has_partial_latency_and_no_private_leak(
         utterance_id = uuid4()
         caplog.set_level(logging.DEBUG)
         try:
-            opened, health = await provider.open_session(
-                session, collector.publish
-            )
+            opened, health = await provider.open_session(session, collector.publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -1620,9 +1491,7 @@ def test_runtime_model_failure_has_partial_latency_and_no_private_leak(
                 )
             )
             await provider.wait_idle()
-            assert [
-                type(event) for event in collector.events
-            ] == [
+            assert [type(event) for event in collector.events] == [
                 ProviderLatency,
                 PrivacySafeProviderError,
                 ProviderUtteranceFinal,
@@ -1636,28 +1505,19 @@ def test_runtime_model_failure_has_partial_latency_and_no_private_leak(
             assert error.code is SafeErrorCode.PROVIDER_UNAVAILABLE
             assert final.outcome is UtteranceOutcome.DROPPED
             assert final.final_audio_sequence is None
-            assert_session_sequence(
-                opened, health, utterance_id, collector.events
-            )
+            assert_session_sequence(opened, health, utterance_id, collector.events)
             assert (
                 len(asr.calls),
                 len(translator.calls),
                 len(tts.calls),
             ) == native_call_counts
-            failed_health = await provider.health(
-                session.session_id
-            )
+            failed_health = await provider.health(session.session_id)
             assert failed_health.state is ProviderState.UNAVAILABLE
             failed_model = next(
-                model
-                for model in failed_health.models
-                if model.kind is stage
+                model for model in failed_health.models if model.kind is stage
             )
             assert failed_model.state is ModelState.FAILED
-            assert (
-                failed_model.safe_error_code
-                == SafeErrorCode.MODEL_NOT_LOADED.value
-            )
+            assert failed_model.safe_error_code == SafeErrorCode.MODEL_NOT_LOADED.value
             assert marker not in repr(collector.events)
             assert marker not in caplog.text
             snapshot = tuple(collector.events)
@@ -1738,9 +1598,7 @@ def test_health_has_separate_models_and_runtime_state(
         session = request(AudioDirection.SPEAKER)
         try:
             collector = Collector()
-            _, health = await provider.open_session(
-                session, collector.publish
-            )
+            _, health = await provider.open_session(session, collector.publish)
             assert isinstance(health, ProviderHealth)
             assert health.state is expected_state
             assert [model.kind for model in health.models] == [
@@ -1762,14 +1620,10 @@ def test_health_has_separate_models_and_runtime_state(
                     health.models[1].safe_error_code
                     == SafeErrorCode.MODEL_NOT_LOADED.value
                 )
-                assert (
-                    health.safe_error.code
-                    is SafeErrorCode.MODEL_NOT_LOADED
-                )
+                assert health.safe_error.code is SafeErrorCode.MODEL_NOT_LOADED
             else:
                 assert all(
-                    model.state is ModelState.READY
-                    and model.safe_error_code is None
+                    model.state is ModelState.READY and model.safe_error_code is None
                     for model in health.models
                 )
                 assert health.safe_error is None
@@ -1807,20 +1661,13 @@ def test_unavailable_model_fails_closed_without_native_calls(
         collector = Collector()
         utterance_id = uuid4()
         try:
-            opened, health = await provider.open_session(
-                session, collector.publish
-            )
+            opened, health = await provider.open_session(session, collector.publish)
             assert health.state is ProviderState.UNAVAILABLE
             failed = next(
-                model
-                for model in health.models
-                if model.kind is unavailable_kind
+                model for model in health.models if model.kind is unavailable_kind
             )
             assert failed.state is ModelState.FAILED
-            assert (
-                failed.safe_error_code
-                == SafeErrorCode.MODEL_NOT_LOADED.value
-            )
+            assert failed.safe_error_code == SafeErrorCode.MODEL_NOT_LOADED.value
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -1830,9 +1677,7 @@ def test_unavailable_model_fails_closed_without_native_calls(
                 )
             )
             await provider.wait_publications(session.session_id)
-            assert [
-                type(event) for event in collector.events
-            ] == [
+            assert [type(event) for event in collector.events] == [
                 ProviderLatency,
                 PrivacySafeProviderError,
                 ProviderUtteranceFinal,
@@ -1845,9 +1690,7 @@ def test_unavailable_model_fails_closed_without_native_calls(
             assert error.code is SafeErrorCode.MODEL_NOT_LOADED
             assert final.outcome is UtteranceOutcome.DROPPED
             assert final.final_audio_sequence is None
-            assert_session_sequence(
-                opened, health, utterance_id, collector.events
-            )
+            assert_session_sequence(opened, health, utterance_id, collector.events)
             assert asr.calls == []
             assert translator.calls == []
             assert tts.calls == []
@@ -1898,9 +1741,7 @@ def test_post_eou_frame_is_a_protocol_error() -> None:
         session = request(AudioDirection.MICROPHONE)
         utterance_id = uuid4()
         try:
-            await provider.open_session(
-                session, Collector().publish
-            )
+            await provider.open_session(session, Collector().publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -1987,9 +1828,7 @@ def test_gated_audio_publication_does_not_block_cancel() -> None:
         collector = GatedCollector()
         utterance_id = uuid4()
         try:
-            opened, health = await provider.open_session(
-                session, collector.publish
-            )
+            opened, health = await provider.open_session(session, collector.publish)
             await provider.submit_frame(
                 input_frame(
                     session,
@@ -2020,15 +1859,10 @@ def test_gated_audio_publication_does_not_block_cancel() -> None:
             )
             collector.release.set()
             await provider.wait_idle()
-            assert [
-                type(event) for event in collector.events
-            ] == [
+            assert [type(event) for event in collector.events] == [
                 ProviderUtteranceFinal,
             ]
-            assert (
-                collector.events[-1].outcome
-                is UtteranceOutcome.CANCELLED
-            )
+            assert collector.events[-1].outcome is UtteranceOutcome.CANCELLED
             final = collector.events[-1]
             assert final.final_audio_sequence is None
             assert final.event_sequence > health.event_sequence
@@ -2075,20 +1909,15 @@ def test_visible_in_flight_batch_never_reuses_event_sequence() -> None:
             )
             collector.release.set()
             await provider.wait_idle()
-            event_sequences = [
-                event.event_sequence for event in collector.events
-            ]
+            event_sequences = [event.event_sequence for event in collector.events]
             assert event_sequences == sorted(set(event_sequences))
-            assert [
-                type(event) for event in collector.events
-            ] == [
+            assert [type(event) for event in collector.events] == [
                 ProviderAudioDelta,
                 ProviderUtteranceFinal,
             ]
             assert collector.events[-1].final_audio_sequence == 0
             assert (
-                collector.events[-1].event_sequence
-                > collector.events[0].event_sequence
+                collector.events[-1].event_sequence > collector.events[0].event_sequence
             )
         finally:
             collector.release.set()
@@ -2140,9 +1969,7 @@ def test_publisher_failure_terminates_session_without_model_error_mapping(
                 await provider.wait_publications(session.session_id)
             assert len(attempts) == 1
             assert len(attempts[0]) == 1
-            assert isinstance(
-                attempts[0][0], ProviderAudioDelta
-            )
+            assert isinstance(attempts[0][0], ProviderAudioDelta)
             assert not any(
                 isinstance(event, PrivacySafeProviderError)
                 for batch in attempts
@@ -2238,8 +2065,7 @@ def test_failed_shared_model_rejects_already_queued_native_work() -> None:
             assert failed.state is ProviderState.UNAVAILABLE
             assert failed.models[0].state is ModelState.FAILED
             assert all(
-                events.events[-1].outcome
-                is UtteranceOutcome.DROPPED
+                events.events[-1].outcome is UtteranceOutcome.DROPPED
                 for events in (first_events, second_events)
             )
         finally:
@@ -2272,9 +2098,7 @@ def test_reopen_failed_session_does_not_replay_stale_publication_error() -> None
             async with asyncio.timeout(1):
                 while True:
                     try:
-                        await provider.open_session(
-                            session, Collector().publish
-                        )
+                        await provider.open_session(session, Collector().publish)
                     except LocalProviderProtocolError:
                         await asyncio.sleep(0)
                         continue
@@ -2308,9 +2132,7 @@ def test_failed_publication_errors_obey_completion_ledger_bound(
             raise RuntimeError("private-publisher-failure")
 
         provider, _, _, _ = build_provider()
-        sessions = [
-            request(AudioDirection.MICROPHONE) for _ in range(3)
-        ]
+        sessions = [request(AudioDirection.MICROPHONE) for _ in range(3)]
         try:
             for session in sessions:
                 await provider.open_session(session, failing_publish)
@@ -2344,9 +2166,7 @@ def test_failed_publication_errors_obey_completion_ledger_bound(
 
 def test_empty_asr_result_drops_only_utterance_without_model_failure() -> None:
     async def scenario() -> None:
-        provider, asr, translator, tts = build_provider(
-            asr=FakeAsr(result="  ")
-        )
+        provider, asr, translator, tts = build_provider(asr=FakeAsr(result="  "))
         session = request(AudioDirection.MICROPHONE)
         collector = Collector()
         try:
@@ -2363,9 +2183,7 @@ def test_empty_asr_result_drops_only_utterance_without_model_failure() -> None:
             assert len(asr.calls) == 1
             assert translator.calls == []
             assert tts.calls == []
-            assert [
-                type(event) for event in collector.events
-            ] == [
+            assert [type(event) for event in collector.events] == [
                 ProviderLatency,
                 PrivacySafeProviderError,
                 ProviderUtteranceFinal,
@@ -2376,9 +2194,7 @@ def test_empty_asr_result_drops_only_utterance_without_model_failure() -> None:
             assert latency.mt_first_text_ms is None
             assert latency.tts_first_audio_ms is None
             assert error.code.value == "no_speech"
-            assert (
-                final.outcome is UtteranceOutcome.DROPPED
-            )
+            assert final.outcome is UtteranceOutcome.DROPPED
             health = await provider.health(session.session_id)
             assert health.state in {
                 ProviderState.READY,
@@ -2410,9 +2226,7 @@ def test_health_reports_cold_models_and_queued_source_truthfully() -> None:
         first_events = Collector()
         second_events = Collector()
         try:
-            _, cold = await provider.open_session(
-                first, first_events.publish
-            )
+            _, cold = await provider.open_session(first, first_events.publish)
             await provider.open_session(second, second_events.publish)
             assert cold.state is ProviderState.STARTING
             assert [model.state for model in cold.models] == [
@@ -2451,9 +2265,7 @@ def test_health_reports_cold_models_and_queued_source_truthfully() -> None:
             assert warm.models[0].state is ModelState.READY
             assert warm.models[2].state is ModelState.READY
             third = request(AudioDirection.MICROPHONE)
-            _, shared_warm = await provider.open_session(
-                third, Collector().publish
-            )
+            _, shared_warm = await provider.open_session(third, Collector().publish)
             assert shared_warm.models[0].state is ModelState.READY
             assert shared_warm.models[2].state is ModelState.READY
         finally:
@@ -2476,9 +2288,7 @@ def test_local_provider_routes_actual_callbacks_through_source_commit(
                 calls["finalize_async"] += 1
                 boundary["mt"] = True
                 try:
-                    return await super().finalize_async(
-                        *args, **kwargs
-                    )
+                    return await super().finalize_async(*args, **kwargs)
                 finally:
                     boundary["mt"] = False
 
@@ -2486,9 +2296,7 @@ def test_local_provider_routes_actual_callbacks_through_source_commit(
                 calls["stream_once"] += 1
                 boundary["tts"] = True
                 try:
-                    async for frame in super().stream_once(
-                        *args, **kwargs
-                    ):
+                    async for frame in super().stream_once(*args, **kwargs):
                         yield frame
                 finally:
                     boundary["tts"] = False
@@ -2499,12 +2307,8 @@ def test_local_provider_routes_actual_callbacks_through_source_commit(
             TrackingSourceCommit,
         )
         provider, _, _, _ = build_provider(
-            translator=FakeTranslator(
-                require_boundary=lambda: boundary["mt"]
-            ),
-            tts=FakeTts(
-                require_boundary=lambda: boundary["tts"]
-            ),
+            translator=FakeTranslator(require_boundary=lambda: boundary["mt"]),
+            tts=FakeTts(require_boundary=lambda: boundary["tts"]),
         )
         session = request(AudioDirection.MICROPHONE)
         collector = Collector()
@@ -2544,9 +2348,7 @@ def test_terminal_id_capacity_fails_closed_without_eviction(
         utterance_ids = [uuid4(), uuid4(), uuid4()]
         try:
             await provider.open_session(session, collector.publish)
-            for sequence, utterance_id in enumerate(
-                utterance_ids[:2]
-            ):
+            for sequence, utterance_id in enumerate(utterance_ids[:2]):
                 await provider.submit_frame(
                     input_frame(
                         session,
@@ -2563,9 +2365,7 @@ def test_terminal_id_capacity_fails_closed_without_eviction(
                         reason=CancelReason.USER_INTERRUPT,
                     )
                 )
-                await provider.wait_publications(
-                    session.session_id
-                )
+                await provider.wait_publications(session.session_id)
             with pytest.raises(
                 LocalProviderProtocolError,
                 match="terminal",
@@ -2657,16 +2457,12 @@ def test_retired_session_completion_ledger_is_bounded(
             raising=False,
         )
         provider, _, _, _ = build_provider()
-        sessions = [
-            request(AudioDirection.MICROPHONE) for _ in range(3)
-        ]
+        sessions = [request(AudioDirection.MICROPHONE) for _ in range(3)]
         collector_refs = []
         try:
             for session in sessions:
                 collector = Collector()
-                await provider.open_session(
-                    session, collector.publish
-                )
+                await provider.open_session(session, collector.publish)
                 collector_refs.append(weakref.ref(collector))
                 await provider.close_session(
                     CloseProviderSession(
@@ -2679,9 +2475,7 @@ def test_retired_session_completion_ledger_is_bounded(
                 LocalProviderProtocolError,
                 match="session",
             ):
-                await provider.wait_publications(
-                    sessions[0].session_id
-                )
+                await provider.wait_publications(sessions[0].session_id)
             for session in sessions[1:]:
                 await provider.wait_publications(session.session_id)
             del collector
@@ -2758,9 +2552,7 @@ def test_close_releases_session_id_for_reopen() -> None:
                 )
             )
             await provider.wait_publications(session.session_id)
-            reopened, _ = await provider.open_session(
-                session, Collector().publish
-            )
+            reopened, _ = await provider.open_session(session, Collector().publish)
             assert reopened.session_id == session.session_id
         finally:
             await provider.shutdown()

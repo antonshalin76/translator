@@ -25,12 +25,43 @@ dependencies = [
 dev = [
     "coverage[toml]>=7.6,<8",
     "grpcio-tools>=1.83.0",
-    "pytest>=8.4,<9",
+    "pytest>=9.0.3,<10",
+    "ruff==0.16.4",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# Stable correctness, modernization, import, and bug-risk rules. Generated
+# protobuf bindings are validated by protoc and are not hand-maintained Python.
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+extend-exclude = ["**/translator_sidecar/generated/**"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["translator_sidecar"]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules intentionally contain Cyrillic translation fixtures and Unicode
+# punctuation that the normalization logic must preserve verbatim.
+"**/translator_sidecar/benchmark/task6.py" = ["RUF001"]
+"**/translator_sidecar/local/mt.py" = ["RUF001"]
+"**/translator_sidecar/local/tts.py" = ["RUF001"]
+"**/tests/test_local_mt.py" = ["RUF001"]
+"**/tests/test_task6_benchmark.py" = ["RUF001"]
+# Wire enums retain their established `str, Enum` stringification contract.
+"**/translator_sidecar/benchmark/task7.py" = ["UP042"]
+"**/translator_sidecar/local/local_provider.py" = ["UP042"]
+"**/translator_sidecar/local/source_commit.py" = ["UP042"]
+"**/translator_sidecar/provider_contract.py" = ["UP042"]
+
+[tool.ruff.format]
+docstring-code-format = true
 
 [build-system]
 requires = ["hatchling>=1.27"]

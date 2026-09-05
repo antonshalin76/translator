@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
 import logging
 import os
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -19,7 +19,6 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
-
 
 _ALLOWED_SAMPLE_RATES = {16_000, 24_000, 48_000}
 _ALLOWED_FRAME_DURATIONS_MS = {20, 40, 60, 80, 100}

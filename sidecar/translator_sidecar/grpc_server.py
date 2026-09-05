@@ -7,9 +7,10 @@ import hmac
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 from uuid import UUID
 
 import grpc
@@ -17,8 +18,8 @@ import grpc
 from .generated.translator.provider.v1 import provider_pb2, provider_pb2_grpc
 from .local.local_provider import (
     LocalProvider,
-    LocalProviderPublicationError,
     LocalProviderProtocolError,
+    LocalProviderPublicationError,
 )
 from .provider_contract import (
     AudioDirection,
@@ -56,6 +57,7 @@ from .provider_engine import ProviderEngine, ProviderProtocolError
 
 AUTH_METADATA_KEY = "authorization"
 CHANNEL_CAPACITY = 64
+SERVER_STOP_GRACE_SECONDS = 0.25
 
 _OPEN_VERSION = "translator.provider.open_session.v1"
 _INPUT_VERSION = "translator.provider.input.v1"
@@ -64,6 +66,7 @@ _CLOSE_VERSION = "translator.provider.close_session.v1"
 _DEBUG_VERSION = "translator.provider.update_debug_text.v1"
 _PROBE_REQUEST_VERSION = "translator.provider.probe_request.v1"
 _PROBE_RESPONSE_VERSION = "translator.provider.probe_response.v1"
+
 
 def _proto_events(
     *events: provider_pb2.ProviderEvent,
@@ -810,7 +813,9 @@ class ProviderGrpcServer:
                 await self._shutdown_openai_provider()
                 return
             server = self._server
-            stop_task = asyncio.ensure_future(server.stop(grace=0))
+            stop_task = asyncio.ensure_future(
+                server.stop(grace=SERVER_STOP_GRACE_SECONDS)
+            )
             cancelled: BaseException | None = None
             try:
                 while not stop_task.done():
@@ -923,7 +928,7 @@ _CANCEL_FROM_PROTO = {
 }
 
 
-def _enum(mapping: dict[int, T], value: int) -> T:
+def _enum[T](mapping: dict[int, T], value: int) -> T:
     try:
         return mapping[value]
     except KeyError as error:

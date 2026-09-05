@@ -1,11 +1,11 @@
 import asyncio
-from collections.abc import Iterator
 import os
 import signal
 import stat
 import time
-from typing import Any
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import grpc
@@ -16,9 +16,21 @@ from translator_sidecar.generated.translator.provider.v1 import (
     provider_pb2,
     provider_pb2_grpc,
 )
+from translator_sidecar.grpc_server import (
+    AUTH_METADATA_KEY,
+    BoundedChannel,
+    ChannelOverflow,
+    ProviderGrpcServer,
+    SidecarServerConfig,
+    _event_to_proto,
+)
+from translator_sidecar.local.inference_scheduler import InferenceScheduler
+from translator_sidecar.local.local_provider import LocalProvider
 from translator_sidecar.provider_contract import (
     AudioDirection,
     CloseRequestReason,
+    ComputeDevice,
+    Language,
     ModelHealth,
     ModelKind,
     ModelState,
@@ -32,26 +44,12 @@ from translator_sidecar.provider_contract import (
     ProviderUtteranceFinal,
     SafeErrorCode,
     SafeErrorSummary,
+    TranslationMode,
     UtteranceOutcome,
+    VoiceProfile,
     make_provider_error,
 )
 from translator_sidecar.provider_engine import MockInjection, ProviderEngine
-from translator_sidecar.local.inference_scheduler import InferenceScheduler
-from translator_sidecar.local.local_provider import LocalProvider
-from translator_sidecar.provider_contract import (
-    ComputeDevice,
-    Language,
-    TranslationMode,
-    VoiceProfile,
-)
-from translator_sidecar.grpc_server import (
-    AUTH_METADATA_KEY,
-    BoundedChannel,
-    ChannelOverflow,
-    ProviderGrpcServer,
-    SidecarServerConfig,
-    _event_to_proto,
-)
 
 TOKEN = "ab" * 32
 
@@ -121,6 +119,7 @@ class LocalGrpcTts:
         output_channels: int,
         frame_duration_ms: int,
         cancelled,
+        continuation: bool = False,
     ) -> Iterator[bytes]:
         self.calls.append(
             {
@@ -128,6 +127,7 @@ class LocalGrpcTts:
                 "target_language": target_language,
                 "voice_profile": voice_profile,
                 "mode": mode,
+                "continuation": continuation,
             }
         )
         if cancelled():
@@ -810,7 +810,7 @@ def test_authenticated_duplex_stream_uses_local_provider_pipeline(
                     speaker_id,
                     provider_pb2.AUDIO_DIRECTION_SPEAKER,
                     utterance_id=speaker_utterance,
-                    pcm=b"\x41\x42" * 1600,
+                    pcm=b"\x00\x00" * 1600,
                 )
             )
             microphone_events, speaker_events = await asyncio.gather(
@@ -880,7 +880,7 @@ def test_authenticated_duplex_stream_uses_local_provider_pipeline(
 
             assert {(call[0], call[1]) for call in asr.calls} == {
                 (b"\x31\x32" * 1600, Language.RU),
-                (b"\x41\x42" * 1600, Language.EN),
+                (b"\x00\x00" * 1600, Language.EN),
             }
             assert {(call[1], call[2]) for call in translator.calls} == {
                 (Language.RU, Language.EN),
@@ -889,6 +889,12 @@ def test_authenticated_duplex_stream_uses_local_provider_pipeline(
             assert {call["target_language"] for call in tts.calls} == {
                 Language.RU,
                 Language.EN,
+            }
+            assert {
+                (call["target_language"], call["continuation"]) for call in tts.calls
+            } == {
+                (Language.EN, True),
+                (Language.RU, False),
             }
 
             reopened_microphone, reopened_speaker = await asyncio.gather(
@@ -1525,7 +1531,10 @@ def test_openai_stream_dispatches_to_openai_provider_when_local_provider_is_load
             kinds = [event.WhichOneof("event") for event in events]
             assert kinds[:2] == ["session_opened", "health"]
             assert events[0].session_opened.capabilities.cloud_egress is True
-            assert events[0].session_opened.negotiated_input_format.sample_rate_hz == 16_000
+            assert (
+                events[0].session_opened.negotiated_input_format.sample_rate_hz
+                == 16_000
+            )
             assert events[1].health.provider_id == provider_pb2.PROVIDER_ID_OPENAI
             assert [item[0].provider_id for item in openai_provider.opens] == [
                 ProviderId.OPENAI
@@ -1821,8 +1830,8 @@ def test_server_stop_cancellation_finishes_stop_and_clears_owned_state(
             self.release = asyncio.Event()
             self.finished = False
 
-        async def stop(self, grace: int) -> None:
-            assert grace == 0
+        async def stop(self, grace: float) -> None:
+            assert grace == 0.25
             self.started.set()
             await self.release.wait()
             self.finished = True
@@ -1860,8 +1869,8 @@ def test_server_stop_defers_repeated_cancellation_until_stop_finishes(
             self.release = asyncio.Event()
             self.finished = False
 
-        async def stop(self, grace: int) -> None:
-            assert grace == 0
+        async def stop(self, grace: float) -> None:
+            assert grace == 0.25
             self.started.set()
             await self.release.wait()
             self.finished = True

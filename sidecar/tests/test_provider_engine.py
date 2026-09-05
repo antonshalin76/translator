@@ -1,3 +1,4 @@
+from itertools import pairwise
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,14 +12,14 @@ from translator_sidecar.provider_contract import (
     Language,
     OpenProviderSession,
     PcmFormat,
-    ProviderId,
     PrivacySafeProviderError,
     ProviderAudioDelta,
     ProviderHealth,
+    ProviderId,
     ProviderInputFrame,
     ProviderLatency,
-    ProviderState,
     ProviderSessionClosed,
+    ProviderState,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
     ProviderUtteranceFinal,
@@ -93,7 +94,9 @@ def frame(
     return ProviderInputFrame(
         session_id=session.session_id,
         direction_id=session.direction_id,
-        stream_id=UUID(int=1 if session.direction_id is AudioDirection.MICROPHONE else 2),
+        stream_id=UUID(
+            int=1 if session.direction_id is AudioDirection.MICROPHONE else 2
+        ),
         utterance_id=utterance_id or uuid4(),
         sequence=sequence,
         capture_monotonic_ns=capture_monotonic_ns,
@@ -124,9 +127,12 @@ def test_two_sessions_keep_direction_queues_and_event_sequences_independent() ->
     assert engine.queue_state(microphone.session_id).provider_input_buffered_ms == 0
     assert engine.queue_state(speaker.session_id).provider_input_buffered_ms == 0
 
-    assert engine.enqueue_frame(
-        frame(microphone, sequence=0, capture_monotonic_ns=0), now_ns=0
-    ) is None
+    assert (
+        engine.enqueue_frame(
+            frame(microphone, sequence=0, capture_monotonic_ns=0), now_ns=0
+        )
+        is None
+    )
     assert engine.queue_state(microphone.session_id).provider_input_buffered_ms == 100
     assert engine.queue_state(speaker.session_id).provider_input_buffered_ms == 0
 
@@ -140,8 +146,7 @@ def test_two_sessions_keep_direction_queues_and_event_sequences_independent() ->
         microphone_health.event_sequence,
     ]
     assert all(
-        current > previous
-        for previous, current in zip(microphone_sequences, microphone_sequences[1:])
+        current > previous for previous, current in pairwise(microphone_sequences)
     )
     assert speaker_health.event_sequence > speaker_opened.event_sequence
 
@@ -162,10 +167,13 @@ def test_input_and_output_queues_are_bounded_by_buffered_duration() -> None:
     opened = engine.open_session(request)
 
     for sequence in range(8):
-        assert engine.enqueue_frame(
-            frame(request, sequence=sequence, capture_monotonic_ns=0),
-            now_ns=0,
-        ) is None
+        assert (
+            engine.enqueue_frame(
+                frame(request, sequence=sequence, capture_monotonic_ns=0),
+                now_ns=0,
+            )
+            is None
+        )
     overflow_events = engine.enqueue_frame(
         frame(request, sequence=8, capture_monotonic_ns=0),
         now_ns=0,
@@ -183,18 +191,25 @@ def test_input_and_output_queues_are_bounded_by_buffered_duration() -> None:
     output_request = open_request(AudioDirection.SPEAKER)
     output_opened = output_engine.open_session(output_request)
     for sequence in range(12):
-        assert output_engine.enqueue_frame(
-            frame(output_request, sequence=sequence, capture_monotonic_ns=0),
-            now_ns=0,
-        ) is None
+        assert (
+            output_engine.enqueue_frame(
+                frame(output_request, sequence=sequence, capture_monotonic_ns=0),
+                now_ns=0,
+            )
+            is None
+        )
         assert output_engine.process_next(output_request.session_id, now_ns=0) == ()
-    assert output_engine.queue_state(
-        output_request.session_id
-    ).provider_output_buffered_ms == 1200
-    assert output_engine.enqueue_frame(
-        frame(output_request, sequence=12, capture_monotonic_ns=0),
-        now_ns=0,
-    ) is None
+    assert (
+        output_engine.queue_state(output_request.session_id).provider_output_buffered_ms
+        == 1200
+    )
+    assert (
+        output_engine.enqueue_frame(
+            frame(output_request, sequence=12, capture_monotonic_ns=0),
+            now_ns=0,
+        )
+        is None
+    )
     output_overflow = output_engine.process_next(output_request.session_id, now_ns=0)
     assert len(output_overflow) == 2
     assert isinstance(output_overflow[0], PrivacySafeProviderError)
@@ -205,9 +220,10 @@ def test_input_and_output_queues_are_bounded_by_buffered_duration() -> None:
         < output_overflow[0].event_sequence
         < output_overflow[1].event_sequence
     )
-    assert output_engine.queue_state(
-        output_request.session_id
-    ).provider_output_buffered_ms == 1200
+    assert (
+        output_engine.queue_state(output_request.session_id).provider_output_buffered_ms
+        == 1200
+    )
 
 
 def test_queue_durations_are_accounted_exactly_once_per_utterance() -> None:
@@ -285,9 +301,7 @@ def test_queue_durations_are_accounted_exactly_once_per_utterance() -> None:
     output_engine.process_next(output_request.session_id, now_ns=0)
     output_engine.process_next(output_request.session_id, now_ns=0)
     assert (
-        output_engine.queue_state(
-            output_request.session_id
-        ).provider_output_buffered_ms
+        output_engine.queue_state(output_request.session_id).provider_output_buffered_ms
         == 200
     )
     output_engine.cancel_utterance(
@@ -299,14 +313,10 @@ def test_queue_durations_are_accounted_exactly_once_per_utterance() -> None:
         )
     )
     assert (
-        output_engine.queue_state(
-            output_request.session_id
-        ).provider_output_buffered_ms
+        output_engine.queue_state(output_request.session_id).provider_output_buffered_ms
         == 100
     )
-    retained_output = output_engine.drain_output(
-        output_request.session_id, now_ns=0
-    )
+    retained_output = output_engine.drain_output(output_request.session_id, now_ns=0)
     assert any(
         isinstance(event, ProviderAudioDelta)
         and event.utterance_id == retained_output_id
@@ -318,9 +328,7 @@ def test_queue_durations_are_accounted_exactly_once_per_utterance() -> None:
         for event in retained_output
     )
     assert (
-        output_engine.queue_state(
-            output_request.session_id
-        ).provider_output_buffered_ms
+        output_engine.queue_state(output_request.session_id).provider_output_buffered_ms
         == 0
     )
 
@@ -348,9 +356,7 @@ def test_multi_frame_utterance_emits_exactly_one_terminal_event() -> None:
     engine.enqueue_frame(last, now_ns=0)
     engine.process_next(request.session_id, now_ns=0)
     first_events = engine.drain_output(request.session_id, now_ns=0)
-    assert not any(
-        isinstance(event, ProviderUtteranceFinal) for event in first_events
-    )
+    assert not any(isinstance(event, ProviderUtteranceFinal) for event in first_events)
     engine.process_next(request.session_id, now_ns=0)
     last_events = engine.drain_output(request.session_id, now_ns=0)
     finals = [
@@ -380,9 +386,7 @@ def test_audio_sequence_restarts_for_each_utterance_in_one_session() -> None:
     first_utterance = uuid4()
     second_utterance = uuid4()
 
-    for input_sequence, utterance_id in enumerate(
-        (first_utterance, second_utterance)
-    ):
+    for input_sequence, utterance_id in enumerate((first_utterance, second_utterance)):
         engine.enqueue_frame(
             frame(
                 request,
@@ -396,9 +400,7 @@ def test_audio_sequence_restarts_for_each_utterance_in_one_session() -> None:
 
     events = engine.drain_output(request.session_id, now_ns=0)
     audio = [event for event in events if isinstance(event, ProviderAudioDelta)]
-    finals = [
-        event for event in events if isinstance(event, ProviderUtteranceFinal)
-    ]
+    finals = [event for event in events if isinstance(event, ProviderUtteranceFinal)]
     assert [event.utterance_id for event in audio] == [
         first_utterance,
         second_utterance,
@@ -415,9 +417,7 @@ def test_open_rejects_mismatched_negotiated_formats() -> None:
     )
     with pytest.raises(ProviderProtocolError, match="negotiated_format_mismatch"):
         engine.open_session(
-            request.model_copy(
-                update={"requested_output_format": mismatched_output}
-            )
+            request.model_copy(update={"requested_output_format": mismatched_output})
         )
 
 
@@ -490,9 +490,7 @@ def test_mode_age_deadline_drops_stale_input_and_output(
     assert expired_output[-1].outcome is UtteranceOutcome.DROPPED
 
     stale = frame(request, sequence=1, capture_monotonic_ns=0)
-    dropped = engine.enqueue_frame(
-        stale, now_ns=(deadline_ms + 1) * 1_000_000
-    )
+    dropped = engine.enqueue_frame(stale, now_ns=(deadline_ms + 1) * 1_000_000)
     assert isinstance(dropped, ProviderUtteranceFinal)
     assert dropped.outcome is UtteranceOutcome.DROPPED
     assert dropped.final_audio_sequence is None
@@ -719,15 +717,18 @@ def test_duplicate_post_final_cancel_and_close_transitions_fail_closed() -> None
         )
 
     cancelled_id = uuid4()
-    assert engine.enqueue_frame(
-        frame(
-            request,
-            sequence=2,
-            capture_monotonic_ns=0,
-            utterance_id=cancelled_id,
-        ),
-        now_ns=0,
-    ) is None
+    assert (
+        engine.enqueue_frame(
+            frame(
+                request,
+                sequence=2,
+                capture_monotonic_ns=0,
+                utterance_id=cancelled_id,
+            ),
+            now_ns=0,
+        )
+        is None
+    )
     cancelled = engine.cancel_utterance(
         CancelUtterance(
             session_id=request.session_id,
@@ -801,9 +802,12 @@ def test_injected_latency_and_error_modes_are_typed_and_content_free() -> None:
     )
     request = open_request(AudioDirection.SPEAKER, debug_text_enabled=True)
     engine.open_session(request)
-    assert engine.enqueue_frame(
-        frame(request, sequence=0, capture_monotonic_ns=0), now_ns=0
-    ) is None
+    assert (
+        engine.enqueue_frame(
+            frame(request, sequence=0, capture_monotonic_ns=0), now_ns=0
+        )
+        is None
+    )
 
     assert engine.process_next(request.session_id, now_ns=249_000_000) == ()
     failure = engine.process_next(request.session_id, now_ns=250_000_000)
@@ -812,9 +816,12 @@ def test_injected_latency_and_error_modes_are_typed_and_content_free() -> None:
     assert failure[0].code is SafeErrorCode.PROVIDER_UNAVAILABLE
     assert failure[1].outcome is UtteranceOutcome.DROPPED
     assert marker not in repr(failure)
-    assert engine.enqueue_frame(
-        frame(request, sequence=1, capture_monotonic_ns=0), now_ns=250_000_000
-    ) is None
+    assert (
+        engine.enqueue_frame(
+            frame(request, sequence=1, capture_monotonic_ns=0), now_ns=250_000_000
+        )
+        is None
+    )
     assert isinstance(
         engine.health(request.session_id, now_ns=250_000_000), ProviderHealth
     )

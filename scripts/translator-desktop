@@ -1,12 +1,12 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash -p
 set -euo pipefail
 
 script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
 project_root="$(cd -- "$(dirname -- "${script_path}")/.." && pwd)"
 unit_source="${project_root}/systemd/translator.service"
-config_root="${XDG_CONFIG_HOME:-"$HOME/.config"}"
-systemd_user_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user"
-autostart_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/autostart"
+config_root="$(/usr/bin/systemd-path user-configuration)"
+systemd_user_dir="${config_root}/systemd/user"
+autostart_dir="${config_root}/autostart"
 unit_target="${systemd_user_dir}/translator.service"
 autostart_target="${autostart_dir}/translator-ui.desktop"
 user_bin_dir="${HOME}/.local/bin"
@@ -20,6 +20,278 @@ ui_project_dir="${project_root}/apps/translator-ui"
 
 usage() {
   printf 'usage: %s {install|up|start|stop|down|restart|status|logs|disable|uninstall}\n' "${0##*/}" >&2
+}
+
+service_environment_runtime_code='
+import hashlib
+import os
+import re
+import stat
+import sys
+
+MAX_ENVIRONMENT_BYTES = 65536
+MAX_ENVIRONMENT_LINES = 256
+ALLOWED_KEYS = frozenset({
+    "OPENAI_API_KEY",
+    "TRANSLATOR_ASR_MODEL_ID",
+    "TRANSLATOR_CONTINUATION_TAIL_RMS",
+    "TRANSLATOR_CUDA_LIBRARY_PATH",
+    "TRANSLATOR_DISABLE_HEADPHONE_AEC",
+    "TRANSLATOR_ENABLE_HEADPHONE_AEC",
+    "TRANSLATOR_HEADPHONE_SINK",
+    "TRANSLATOR_LOCAL_RUNTIME_MODE",
+    "TRANSLATOR_MODEL_CACHE_ROOT",
+    "TRANSLATOR_PYTHON",
+    "TRANSLATOR_SIDECAR_ROOT",
+    "TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS",
+    "TRANSLATOR_VAD_CONFIRMATION_FRAMES",
+    "TRANSLATOR_VAD_MAX_UTTERANCE_MS",
+    "TRANSLATOR_VAD_MIN_RMS",
+    "TRANSLATOR_VAD_MIN_UTTERANCE_MS",
+})
+KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def refuse(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(78)
+
+
+def checked_open(path, flags, message, *, dir_fd=None, mode=None):
+    try:
+        if mode is None:
+            return os.open(path, flags, dir_fd=dir_fd)
+        return os.open(path, flags, mode, dir_fd=dir_fd)
+    except OSError:
+        refuse(message)
+
+
+def check_directory(fd, expected_mode, exact_mode):
+    info = os.fstat(fd)
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        refuse("refusing unsafe service environment directory")
+    if exact_mode and mode != expected_mode:
+        refuse("refusing unsafe service environment directory mode")
+    if not exact_mode and mode & 0o022:
+        refuse("refusing attacker-writable service configuration root")
+
+
+def check_environment_file(fd):
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        refuse("refusing unsafe service environment file")
+    if info.st_size > MAX_ENVIRONMENT_BYTES:
+        refuse("refusing oversized service environment file")
+    return info
+
+
+def signature(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_stable_file(fd, before):
+    def read_once():
+        chunks = []
+        remaining = MAX_ENVIRONMENT_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    data = read_once()
+    middle = os.fstat(fd)
+    os.lseek(fd, 0, os.SEEK_SET)
+    verification_data = read_once()
+    after = os.fstat(fd)
+    expected_size = before.st_size
+    if (
+        len(data) > MAX_ENVIRONMENT_BYTES
+        or len(data) != expected_size
+        or len(verification_data) != expected_size
+    ):
+        refuse("refusing unstable service environment file")
+    if signature(before) != signature(middle) or signature(middle) != signature(after):
+        refuse("refusing service environment file changed during read")
+    if hashlib.sha256(data).digest() != hashlib.sha256(verification_data).digest():
+        refuse("refusing service environment content changed during read")
+    return data
+
+
+def parse_environment(data):
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        refuse("refusing non-UTF-8 service environment file")
+    if "\x00" in text:
+        refuse("refusing NUL in service environment file")
+
+    lines = text.split("\n")
+    if len(lines) > MAX_ENVIRONMENT_LINES:
+        refuse("refusing too many service environment lines")
+    parsed = {}
+    for line in lines:
+        if line.endswith("\r"):
+            line = line[:-1]
+        if "\r" in line:
+            refuse("refusing malformed service environment line")
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or KEY_PATTERN.fullmatch(key) is None:
+            refuse("refusing malformed service environment line")
+        if key not in ALLOWED_KEYS:
+            refuse("unsupported service environment key")
+        if key in parsed:
+            refuse("refusing duplicate service environment key")
+        parsed[key] = value
+    return parsed
+
+
+def open_environment_tree(root, create):
+    if not os.path.isabs(root):
+        refuse("refusing non-absolute service configuration root")
+    if create:
+        previous_umask = os.umask(0o077)
+        try:
+            os.makedirs(root, mode=0o700, exist_ok=True)
+        except OSError:
+            refuse("failed to create service configuration root safely")
+        finally:
+            os.umask(previous_umask)
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    root_fd = checked_open(
+        root,
+        directory_flags,
+        "refusing unsafe service configuration root",
+    )
+    check_directory(root_fd, 0, False)
+
+    if create:
+        try:
+            os.mkdir("translator", mode=0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        except OSError:
+            refuse("failed to create service environment directory safely")
+    environment_directory_fd = checked_open(
+        "translator",
+        directory_flags,
+        "refusing unsafe service environment directory",
+        dir_fd=root_fd,
+    )
+    check_directory(environment_directory_fd, 0o700, True)
+
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    if create:
+        try:
+            environment_fd = os.open(
+                "environment",
+                file_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=environment_directory_fd,
+            )
+            os.fchmod(environment_fd, 0o600)
+        except FileExistsError:
+            environment_fd = checked_open(
+                "environment",
+                file_flags,
+                "refusing unsafe service environment file",
+                dir_fd=environment_directory_fd,
+            )
+        except OSError:
+            refuse("failed to create service environment file safely")
+    else:
+        environment_fd = checked_open(
+            "environment",
+            file_flags,
+            "refusing unsafe service environment file",
+            dir_fd=environment_directory_fd,
+        )
+    return root_fd, environment_directory_fd, environment_fd
+
+
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+root = sys.argv[2] if len(sys.argv) > 2 else ""
+if mode not in {"prepare", "exec"}:
+    refuse("invalid service environment runtime mode")
+
+root_fd, environment_directory_fd, environment_fd = open_environment_tree(
+    root, mode == "prepare"
+)
+environment_info = check_environment_file(environment_fd)
+environment_data = read_stable_file(environment_fd, environment_info)
+service_environment = parse_environment(environment_data)
+if mode == "prepare":
+    os.close(environment_fd)
+    os.close(environment_directory_fd)
+    os.close(root_fd)
+    raise SystemExit(0)
+
+if len(sys.argv) != 4:
+    refuse("invalid daemon wrapper arguments")
+daemon_path = sys.argv[3]
+expected_daemon_path = os.path.join(
+    os.environ.get("HOME", ""), ".local", "bin", "translator-daemon"
+)
+if daemon_path != expected_daemon_path or not os.path.isabs(daemon_path):
+    refuse("refusing unexpected translator daemon path")
+
+os.close(environment_fd)
+os.close(environment_directory_fd)
+os.close(root_fd)
+
+daemon_fd = checked_open(
+    daemon_path,
+    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    "refusing unsafe translator daemon executable",
+)
+daemon_info = os.fstat(daemon_fd)
+daemon_mode = stat.S_IMODE(daemon_info.st_mode)
+if (
+    not stat.S_ISREG(daemon_info.st_mode)
+    or daemon_info.st_uid != os.geteuid()
+    or daemon_mode & 0o100 == 0
+    or daemon_mode & 0o022
+):
+    refuse("refusing unsafe translator daemon executable")
+
+daemon_environment = dict(os.environ)
+for inherited_key in tuple(daemon_environment):
+    if (
+        inherited_key.startswith("LD_")
+        or inherited_key.startswith("PYTHON")
+        or inherited_key in {"BASH_ENV", "ENV", "SHELLOPTS"}
+    ):
+        daemon_environment.pop(inherited_key, None)
+daemon_environment.update(service_environment)
+os.execve(daemon_fd, [daemon_path], daemon_environment)
+'
+
+prepare_service_environment() {
+  /usr/bin/python3 -I -c "${service_environment_runtime_code}" prepare "${config_root}"
+}
+
+run_daemon_with_service_environment() {
+  exec /usr/bin/python3 -I -c "${service_environment_runtime_code}" exec "${1}" "${2}"
 }
 
 write_autostart() {
@@ -110,6 +382,7 @@ remove_command_if_owned() {
 }
 
 install_unit() {
+  prepare_service_environment
   test -f "${unit_source}"
   install_command
   install_daemon_binary_if_available
@@ -126,12 +399,14 @@ unit_file_loaded() {
 }
 
 start_unit_installing_if_needed() {
+  prepare_service_environment
   install_command
   install_daemon_binary_if_available
   install_ui_binary_if_available
   if ! unit_file_loaded; then
     install_unit
   fi
+  prepare_service_environment
   systemctl --user start translator.service
 }
 
@@ -216,6 +491,12 @@ disable_unit_if_loaded() {
 }
 
 case "${1:-}" in
+  _run-daemon)
+    if [ "$#" -ne 3 ]; then
+      exit 64
+    fi
+    run_daemon_with_service_environment "${2}" "${3}"
+    ;;
   install)
     install_unit
     ;;

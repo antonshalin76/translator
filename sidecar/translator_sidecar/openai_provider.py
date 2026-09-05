@@ -38,7 +38,6 @@ from .provider_contract import (
     make_provider_error,
 )
 
-
 OPENAI_REALTIME_TRANSLATION_MODEL = "gpt-realtime-translate"
 OPENAI_REALTIME_TRANSLATION_ENDPOINT = "wss://api.openai.com/v1/realtime/translations"
 OPENAI_PROVIDER_NAME = "openai-realtime-translation"

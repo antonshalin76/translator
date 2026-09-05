@@ -239,7 +239,7 @@ def test_bridge_event_stream_timeout_names_direction_and_buffered_events() -> No
 
     with pytest.raises(
         RuntimeError,
-        match=("ru_to_en.*expected=speech_started.*buffered=provider_latency"),
+        match=r"ru_to_en.*expected=speech_started.*buffered=provider_latency",
     ):
         stream.next_for(
             BenchmarkDirection.RU_TO_EN,

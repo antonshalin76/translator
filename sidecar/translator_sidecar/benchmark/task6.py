@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import hashlib
 import json
 import math
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol
 from uuid import UUID, uuid4
 
-from jiwer import wer
 import regex
+from jiwer import wer
 from sacrebleu.metrics import CHRF
 
 from translator_sidecar.provider_contract import Language, TranslationMode
-
 
 _SCHEMA_VERSION = "translator.quality-corpus.v4"
 _REQUIRED_SCENARIOS = frozenset({"short", "long", "duplex_overlap"})
@@ -556,9 +555,7 @@ def critical_review_content_sha256(
                     "reference": (
                         case.en if target_language is Language.EN else case.ru
                     ),
-                    "source": (
-                        case.ru if source_language is Language.RU else case.en
-                    ),
+                    "source": (case.ru if source_language is Language.RU else case.en),
                 }
             )
     canonical = json.dumps(
@@ -919,9 +916,7 @@ def _name_is_preserved(
         for token in output_tokens
     ):
         return False
-    conjunctions = (
-        {"and", "or"} if target_language is Language.EN else {"и", "или"}
-    )
+    conjunctions = {"and", "or"} if target_language is Language.EN else {"и", "или"}
     return all(
         (start == 0 or folded_tokens[start - 1] not in conjunctions)
         and (end == len(folded_tokens) or folded_tokens[end] not in conjunctions)

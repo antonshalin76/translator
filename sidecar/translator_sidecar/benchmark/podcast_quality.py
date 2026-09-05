@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Iterable
-from contextlib import contextmanager
 import datetime as dt
 import gc
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -49,7 +49,6 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
-
 
 _ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_OUTPUT = _ROOT / "docs" / "benchmarks" / "podcast-quality-debug.json"
@@ -91,7 +90,7 @@ class _Collector:
 
 
 def _utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
@@ -99,8 +98,7 @@ def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
         command,
         cwd=cwd,
         check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     if completed.returncode != 0:
@@ -412,9 +410,7 @@ async def _run_segment(
             "frame_count": len(frames),
             "outcome": final.outcome.value if final is not None else None,
             "safe_error_code": error.code.value if error is not None else None,
-            "transcript_chars": (
-                len(transcript.text) if transcript is not None else 0
-            ),
+            "transcript_chars": (len(transcript.text) if transcript is not None else 0),
             "transcript_words": (
                 len(transcript.text.split()) if transcript is not None else 0
             ),
@@ -428,9 +424,7 @@ async def _run_segment(
                 )
             ),
             "audio_output_frames": len(output_pcm) // _FRAME_BYTES,
-            "tts_asr_transcript_chars": (
-                len(synthesized_transcript or "")
-            ),
+            "tts_asr_transcript_chars": (len(synthesized_transcript or "")),
             "tts_asr_wer": synthesized_wer,
             "output_to_source_duration_ratio": (
                 (len(output_pcm) // _FRAME_BYTES * _FRAME_DURATION_MS)
@@ -507,10 +501,7 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "tts_asr_wer_p50": _percentile(tts_wer, 0.50),
         "tts_asr_wer_p95": _percentile(tts_wer, 0.95),
         "median_output_to_source_duration_ratio": _percentile(
-            [
-                result["output_to_source_duration_ratio"]
-                for result in results
-            ],
+            [result["output_to_source_duration_ratio"] for result in results],
             0.50,
         ),
     }
@@ -590,18 +581,14 @@ async def _run_model(
 def _parse_model_ids(values: list[str]) -> list[str]:
     model_ids: list[str] = []
     for value in values:
-        model_ids.extend(
-            item.strip() for item in value.split(",") if item.strip()
-        )
+        model_ids.extend(item.strip() for item in value.split(",") if item.strip())
     return model_ids or default_asr_candidate_ids()
 
 
 def _parse_tts_model_ids(values: list[str]) -> list[str]:
     model_ids: list[str] = []
     for value in values:
-        model_ids.extend(
-            item.strip() for item in value.split(",") if item.strip()
-        )
+        model_ids.extend(item.strip() for item in value.split(",") if item.strip())
     return model_ids or default_tts_candidate_ids()
 
 
@@ -654,9 +641,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
-    run_dir = args.work_dir / dt.datetime.now(dt.timezone.utc).strftime(
-        "%Y%m%dT%H%M%SZ"
-    )
+    run_dir = args.work_dir / dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     run_dir.mkdir(parents=True, exist_ok=False)
     ru_pcm, ru_source = _load_audio_pcm(
         youtube_source=args.ru_youtube,

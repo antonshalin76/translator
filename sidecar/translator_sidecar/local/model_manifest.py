@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import stat
-from typing import BinaryIO, Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from urllib.parse import quote, urlparse
 from uuid import uuid4
-
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -20,6 +20,7 @@ _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _HUGGINGFACE_HOST = "huggingface.co"
 _QUARANTINE_DIR = ".quarantine"
+_MODEL_CACHE_ROOT_ENV = "TRANSLATOR_MODEL_CACHE_ROOT"
 _LANGUAGES = {"ru", "en"}
 _ROLES = {"asr", "mt", "tts"}
 _ACQUISITIONS = {"reuse", "download"}
@@ -157,6 +158,7 @@ class ModelManifest:
     policy: ManifestPolicy
     models: dict[str, ModelEntry]
     planned_download_bytes: int
+    cache_root: Path | None
 
     def model_file(self, model_id: str, file_path: str) -> tuple[ModelEntry, ModelFile]:
         try:
@@ -760,14 +762,15 @@ def load_manifest(path: Path) -> ModelManifest:
     if not isinstance(document, dict) or document.get("schema_version") != 1:
         raise ManifestError("unsupported model manifest schema")
 
-    policy = _parse_policy(document.get("policy"))
+    path_resolver = _ManifestPathResolver()
+    policy = _parse_policy(document.get("policy"), path_resolver)
     raw_models = document.get("models")
     if not isinstance(raw_models, list) or not raw_models:
         raise ManifestError("manifest must contain models")
 
     models: dict[str, ModelEntry] = {}
     for raw_model in raw_models:
-        model = _parse_model(raw_model, policy)
+        model = _parse_model(raw_model, policy, path_resolver)
         if model.id in models:
             raise ManifestError("duplicate model id")
         models[model.id] = model
@@ -784,10 +787,73 @@ def load_manifest(path: Path) -> ModelManifest:
         policy=policy,
         models=models,
         planned_download_bytes=planned,
+        cache_root=path_resolver.cache_root,
     )
 
 
-def _parse_policy(raw: object) -> ManifestPolicy:
+class _ManifestPathResolver:
+    def __init__(self) -> None:
+        self.cache_root: Path | None = None
+
+    def resolve(self, value: object, *, label: str) -> Path:
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise ManifestError(f"{label} is invalid")
+        path = Path(value)
+        if path.is_absolute():
+            # External manifests may target an operator-provisioned absolute cache.
+            if ".." in path.parts:
+                raise ManifestError(f"{label} is invalid")
+            return path.resolve(strict=False)
+
+        reference = PurePosixPath(value)
+        if (
+            reference.is_absolute()
+            or not reference.parts
+            or "\\" in value
+            or any(component in {"", ".", ".."} for component in reference.parts)
+        ):
+            raise ManifestError(f"{label} escapes the model cache root")
+        if self.cache_root is None:
+            self.cache_root = resolve_model_cache_root()
+        resolved = self.cache_root.joinpath(*reference.parts).resolve(strict=False)
+        try:
+            resolved.relative_to(self.cache_root)
+        except ValueError as error:
+            raise ManifestError(f"{label} escapes the model cache root") from error
+        return resolved
+
+
+def resolve_model_cache_root() -> Path:
+    """Return the absolute operator-owned root for portable manifest paths."""
+
+    explicit = os.environ.get(_MODEL_CACHE_ROOT_ENV)
+    if explicit is not None:
+        return _validated_environment_root(explicit, _MODEL_CACHE_ROOT_ENV)
+
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache:
+        base = _validated_environment_root(xdg_cache, "XDG_CACHE_HOME")
+    else:
+        home = os.environ.get("HOME")
+        if not home:
+            raise ManifestError("HOME is required to resolve the model cache root")
+        base = _validated_environment_root(home, "HOME") / ".cache"
+    return (base / "translator" / "models").resolve(strict=False)
+
+
+def _validated_environment_root(value: str, name: str) -> Path:
+    if not value or "\x00" in value:
+        raise ManifestError(f"{name} must be a non-empty absolute path")
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ManifestError(f"{name} must be an absolute normalized path")
+    resolved = path.resolve(strict=False)
+    if resolved == Path(resolved.anchor):
+        raise ManifestError(f"{name} cannot resolve to the filesystem root")
+    return resolved
+
+
+def _parse_policy(raw: object, path_resolver: _ManifestPathResolver) -> ManifestPolicy:
     if not isinstance(raw, dict):
         raise ManifestError("manifest policy is missing")
     try:
@@ -796,7 +862,7 @@ def _parse_policy(raw: object) -> ManifestPolicy:
         usage_mode = raw["usage_mode"]
         redistribution = raw["redistribution"]
         safety = raw["certified_or_safety_critical"]
-        staging = Path(raw["staging_path"])
+        staging = path_resolver.resolve(raw["staging_path"], label="staging path")
         redirect_hosts = raw["redirect_hosts"]
     except (KeyError, TypeError) as error:
         raise ManifestError("manifest policy is incomplete") from error
@@ -806,8 +872,6 @@ def _parse_policy(raw: object) -> ManifestPolicy:
         or safety is not False
     ):
         raise ManifestError("manifest usage policy is not approved")
-    if not staging.is_absolute():
-        raise ManifestError("staging path must be absolute")
     if not isinstance(redirect_hosts, list) or not redirect_hosts:
         raise ManifestError("redirect host allowlist is missing")
     normalized_hosts: list[str] = []
@@ -834,7 +898,11 @@ def _parse_policy(raw: object) -> ManifestPolicy:
     )
 
 
-def _parse_model(raw: object, policy: ManifestPolicy) -> ModelEntry:
+def _parse_model(
+    raw: object,
+    policy: ManifestPolicy,
+    path_resolver: _ManifestPathResolver,
+) -> ModelEntry:
     if not isinstance(raw, dict):
         raise ManifestError("model entry must be an object")
     try:
@@ -842,7 +910,7 @@ def _parse_model(raw: object, policy: ManifestPolicy) -> ModelEntry:
         role = raw["role"]
         acquisition = raw["acquisition"]
         languages = raw["languages"]
-        cache_path = Path(raw["cache_path"])
+        cache_path = path_resolver.resolve(raw["cache_path"], label="model cache path")
         source = _parse_source(raw["source"])
         raw_files = raw["files"]
     except (KeyError, TypeError) as error:
@@ -858,8 +926,6 @@ def _parse_model(raw: object, policy: ManifestPolicy) -> ModelEntry:
         or len(set(languages)) != len(languages)
     ):
         raise ManifestError("model languages are invalid")
-    if not cache_path.is_absolute():
-        raise ManifestError("model cache path must be absolute")
     if not isinstance(raw_files, list) or not raw_files:
         raise ManifestError("model file allowlist is empty")
     files = tuple(_parse_file(raw_file, source, acquisition) for raw_file in raw_files)
@@ -1008,7 +1074,7 @@ def _validate_license_waiver(model: ModelEntry, policy: ManifestPolicy) -> None:
         and model.role == "tts"
         and model.acquisition == "download"
         and model.languages == ("ru",)
-        and model.cache_path.parts[-2:] == ("cache", "piper")
+        and model.cache_path.name == "piper"
         and model.source.repository == "rhasspy/piper-voices"
         and model.source.revision == _IRINA_REVISION
         and model.source.license == "MIT"
