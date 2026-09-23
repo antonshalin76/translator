@@ -43,6 +43,11 @@ The [2026-09-24 ASR input screen](asr-input-screen-20260924.md) freezes Turbo
 as the current comparison leader and records the five-model, paired development
 screen. It is not an ASR model-switch, full-chain result, or release gate.
 
+The [MDC Spontaneous Speech comparison](asr-mdc-sps5-comparison-20260924.md)
+adds a speaker-disjoint RU/EN Turbo-vs-Qwen holdout. Turbo remains the
+single-model development baseline for downstream MT/TTS evaluation; no
+production model was changed.
+
 ## Audited contracts
 
 - [`master-bdd.md`](master-bdd.md) defines 48 executable behavior scenarios.
