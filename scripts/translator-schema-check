@@ -1,0 +1,61 @@
+#!/usr/bin/bash -p
+set -euo pipefail
+
+repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)"
+python_bin="${repo_root}/sidecar/.venv/bin/python"
+proto="${repo_root}/proto/translator/provider/v1/provider.proto"
+committed="${repo_root}/sidecar/translator_sidecar/generated/translator/provider/v1"
+readonly cmp_bin="/usr/bin/cmp"
+readonly diff_bin="/usr/bin/diff"
+readonly mktemp_bin="/usr/bin/mktemp"
+readonly rm_bin="/usr/bin/rm"
+
+if [[ ! -x "${python_bin}" ]]; then
+  printf '%s\n' "sidecar environment is missing; run uv sync --locked --all-groups" >&2
+  exit 2
+fi
+for required_bin in "${cmp_bin}" "${diff_bin}" "${mktemp_bin}" "${rm_bin}"; do
+  if [[ ! -x "${required_bin}" ]]; then
+    printf 'required schema utility is unavailable: %s\n' "${required_bin}" >&2
+    exit 2
+  fi
+done
+
+generated_root="$("${mktemp_bin}" -d)"
+cleanup() {
+  "${rm_bin}" -rf -- "${generated_root}"
+}
+trap cleanup EXIT
+
+"${python_bin}" -m grpc_tools.protoc \
+  -I "${repo_root}/proto" \
+  --python_out="${generated_root}" \
+  --grpc_python_out="${generated_root}" \
+  "${proto}"
+
+generated="${generated_root}/translator/provider/v1"
+"${python_bin}" - "${generated}/provider_pb2_grpc.py" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+absolute = "from translator.provider.v1 import provider_pb2 as "
+relative = "from . import provider_pb2 as "
+if source.count(absolute) != 1 or relative in source:
+    raise SystemExit("unexpected grpc Python import shape")
+path.write_text(source.replace(absolute, relative, 1), encoding="utf-8")
+PY
+
+for name in provider_pb2.py provider_pb2_grpc.py; do
+  if ! "${cmp_bin}" -s "${committed}/${name}" "${generated}/${name}"; then
+    "${diff_bin}" -u \
+      --label "committed/${name}" \
+      --label "generated/${name}" \
+      "${committed}/${name}" "${generated}/${name}" || true
+    printf '%s\n' "generated protobuf bindings are stale" >&2
+    exit 1
+  fi
+done
+
+printf '%s\n' "protobuf schema bindings are current"

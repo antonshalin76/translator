@@ -20,8 +20,9 @@ use tower_http::limit::RequestBodyLimitLayer;
 use translator_audio::{GraphHealth, RoutingSafeError, RoutingState};
 
 use crate::{
-    AudioMixPatch, AudioMixState, ControlToken, DirectionPatch, LatencyPolicyPatch, ProviderPatch,
-    RuntimeEvent, RuntimeMutationError, RuntimeSnapshot, RuntimeStore, VoiceProfilePatch,
+    AecCalibrationControlError, AecCalibrationController, AudioMixPatch, AudioMixState,
+    ControlApplication, ControlCommand, ControlToken, DirectionPatch, LatencyPolicyPatch,
+    ProviderPatch, RuntimeEvent, RuntimeSnapshot, RuntimeStore, VoiceProfilePatch,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
@@ -60,9 +61,9 @@ struct ApiState {
     sse_permits: Arc<Semaphore>,
     keepalive: Duration,
     manual_routes: Option<Arc<dyn ManualRouteController>>,
-    audio_mix: Option<Arc<dyn AudioMixController>>,
-    translation: Option<Arc<dyn TranslationController>>,
+    translation: Option<Arc<ControlApplication>>,
     round_trip: Option<Arc<dyn RoundTripController>>,
+    aec_calibration: Option<Arc<AecCalibrationController>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +107,12 @@ struct ManualRoutePatch {
     stream_id: u32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AecCalibrationCancel {
+    attempt_id: uuid::Uuid,
+}
+
 pub trait ManualRouteController: Send + Sync {
     fn reconcile(&self, stream_id: u32) -> Result<RoutingState, RoutingSafeError>;
 
@@ -117,23 +124,19 @@ pub trait ManualRouteController: Send + Sync {
 }
 
 pub trait AudioMixController: Send + Sync {
-    fn apply(&self, volumes: AudioMixState) -> Result<(), ControlFailure>;
+    fn apply_desired(
+        &self,
+        volumes: AudioMixState,
+        mode: crate::TranslationMixMode,
+    ) -> Result<(), ControlFailure>;
+    fn reconcile_committed(&self, mode: crate::TranslationMixMode) -> Result<(), ControlFailure>;
+    fn recover_committed(&self, mode: crate::TranslationMixMode) -> Result<(), ControlFailure>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlFailure {
     pub status: StatusCode,
     pub code: &'static str,
-}
-
-pub trait TranslationController: Send + Sync {
-    fn start(&self, snapshot: RuntimeSnapshot) -> Result<(), ControlFailure>;
-    fn stop(&self) -> Result<(), ControlFailure>;
-
-    fn reconfigure(&self, snapshot: RuntimeSnapshot) -> Result<(), ControlFailure> {
-        self.stop()?;
-        self.start(snapshot)
-    }
 }
 
 pub trait RoundTripController: Send + Sync {
@@ -144,9 +147,9 @@ pub trait RoundTripController: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ApiControllers {
     pub manual_routes: Option<Arc<dyn ManualRouteController>>,
-    pub audio_mix: Option<Arc<dyn AudioMixController>>,
-    pub translation: Option<Arc<dyn TranslationController>>,
+    pub translation: Option<Arc<ControlApplication>>,
     pub round_trip: Option<Arc<dyn RoundTripController>>,
+    pub aec_calibration: Option<Arc<AecCalibrationController>>,
 }
 
 pub fn build_router(store: RuntimeStore, token: ControlToken, limits: ApiLimits) -> Router {
@@ -181,9 +184,9 @@ pub fn build_router_with_controllers(
         sse_permits: Arc::new(Semaphore::new(limits.max_sse_subscribers)),
         keepalive: limits.sse_keepalive,
         manual_routes: controllers.manual_routes,
-        audio_mix: controllers.audio_mix,
         translation: controllers.translation,
         round_trip: controllers.round_trip,
+        aec_calibration: controllers.aec_calibration,
     };
     let middleware = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(token, authenticate))
@@ -197,6 +200,9 @@ pub fn build_router_with_controllers(
         .route("/v1/routes/candidates", get(route_candidates))
         .route("/v1/translation/start", post(start_translation))
         .route("/v1/translation/stop", post(stop_translation))
+        .route("/v1/aec-calibration/start", post(start_aec_calibration))
+        .route("/v1/aec-calibration/cancel", post(cancel_aec_calibration))
+        .route("/v1/aec-calibration", get(aec_calibration_status))
         .route("/v1/directions", patch(patch_direction))
         .route("/v1/provider", patch(patch_provider))
         .route("/v1/audio-mix", patch(patch_audio_mix))
@@ -295,80 +301,81 @@ async fn route_candidates(State(state): State<ApiState>) -> Json<Value> {
 }
 
 async fn start_translation(State(state): State<ApiState>) -> axum::response::Response {
-    let Some(controller) = state.translation else {
-        return ProblemDetails::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "translation_controller_unavailable",
-        )
-        .into_response();
-    };
-    let snapshot = match state.manual_routes.clone() {
-        Some(manual_routes) => {
-            let store = state.store.clone();
-            match tokio::task::spawn_blocking(move || {
-                manual_routes.refresh_audio_state(&store);
-                store.snapshot()
-            })
-            .await
-            {
-                Ok(snapshot) => snapshot,
-                Err(_) => {
-                    return ProblemDetails::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "audio_refresh_failed",
-                    )
-                    .into_response();
-                }
-            }
-        }
-        None => state.store.snapshot(),
-    };
-    match tokio::task::spawn_blocking(move || controller.start(snapshot)).await {
-        Ok(Ok(())) => {
-            state.store.set_translation_running(true);
-            Json(state.store.snapshot()).into_response()
-        }
-        Ok(Err(error)) => ProblemDetails::new(error.status, error.code).into_response(),
-        Err(_) => ProblemDetails::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "translation_controller_failed",
-        )
-        .into_response(),
-    }
+    execute_translation(state.translation, ControlCommand::Start).await
 }
 
 async fn stop_translation(State(state): State<ApiState>) -> axum::response::Response {
-    let Some(controller) = state.translation else {
+    execute_translation(state.translation, ControlCommand::Stop).await
+}
+
+async fn start_aec_calibration(State(state): State<ApiState>) -> axum::response::Response {
+    let Some(controller) = state.aec_calibration else {
+        return ProblemDetails::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "aec_calibration_controller_unavailable",
+        )
+        .into_response();
+    };
+    match controller.start().await {
+        Ok(status) => (StatusCode::ACCEPTED, Json(status)).into_response(),
+        Err(error) => aec_calibration_error(error).into_response(),
+    }
+}
+
+async fn cancel_aec_calibration(
+    State(state): State<ApiState>,
+    Json(cancel): Json<AecCalibrationCancel>,
+) -> axum::response::Response {
+    let Some(controller) = state.aec_calibration else {
+        return ProblemDetails::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "aec_calibration_controller_unavailable",
+        )
+        .into_response();
+    };
+    Json(controller.cancel(cancel.attempt_id).await).into_response()
+}
+
+async fn aec_calibration_status(State(state): State<ApiState>) -> axum::response::Response {
+    let Some(controller) = state.aec_calibration else {
+        return ProblemDetails::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "aec_calibration_controller_unavailable",
+        )
+        .into_response();
+    };
+    Json(controller.status()).into_response()
+}
+
+fn aec_calibration_error(error: AecCalibrationControlError) -> ProblemDetails {
+    match error {
+        AecCalibrationControlError::Busy => {
+            ProblemDetails::new(StatusCode::CONFLICT, "aec_calibration_busy")
+        }
+        AecCalibrationControlError::Stopping => {
+            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "aec_calibration_stopping")
+        }
+        AecCalibrationControlError::Unavailable => ProblemDetails::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "aec_calibration_unavailable",
+        ),
+    }
+}
+
+async fn execute_translation(
+    application: Option<Arc<ControlApplication>>,
+    command: ControlCommand,
+) -> axum::response::Response {
+    let Some(application) = application else {
         return ProblemDetails::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "translation_controller_unavailable",
         )
         .into_response();
     };
-    match tokio::task::spawn_blocking(move || controller.stop()).await {
-        Ok(Ok(())) => {
-            state.store.set_translation_running(false);
-            if let Some(manual_routes) = state.manual_routes.clone() {
-                let store = state.store.clone();
-                if tokio::task::spawn_blocking(move || manual_routes.refresh_audio_state(&store))
-                    .await
-                    .is_err()
-                {
-                    return ProblemDetails::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "audio_refresh_failed",
-                    )
-                    .into_response();
-                }
-            }
-            Json(state.store.snapshot()).into_response()
-        }
-        Ok(Err(error)) => ProblemDetails::new(error.status, error.code).into_response(),
-        Err(_) => ProblemDetails::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "translation_controller_failed",
-        )
-        .into_response(),
+    match application.execute(command).await {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(error) => ProblemDetails::new(error.status, error.code).into_response(),
     }
 }
 
@@ -386,26 +393,9 @@ async fn patch_debug_capture(
 ) -> axum::response::Response {
     match state.store.set_debug_capture_enabled(patch.enabled) {
         Ok(()) => Json(state.store.snapshot()).into_response(),
-        Err(RuntimeMutationError::DebugCaptureUnavailable) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_unavailable")
-                .into_response()
-        }
-        Err(RuntimeMutationError::DebugCaptureStopped(_)) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_stopped")
-                .into_response()
-        }
-        Err(RuntimeMutationError::InvalidLanguagePair) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_language_pair").into_response()
-        }
-        Err(RuntimeMutationError::VoiceLanguageMismatch) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "voice_language_mismatch").into_response()
-        }
-        Err(RuntimeMutationError::CloudProviderOptInRequired) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "cloud_provider_opt_in_required")
-                .into_response()
-        }
-        Err(RuntimeMutationError::InvalidAudioMixVolume) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_audio_mix_volume").into_response()
+        Err(error) => {
+            let failure = ControlFailure::from(error);
+            ProblemDetails::new(failure.status, failure.code).into_response()
         }
     }
 }
@@ -414,140 +404,21 @@ async fn patch_direction(
     State(state): State<ApiState>,
     Json(patch): Json<DirectionPatch>,
 ) -> axum::response::Response {
-    let was_running = state.store.snapshot().translation_running;
-    match state.store.set_direction(patch) {
-        Ok(()) => {
-            if was_running {
-                let Some(controller) = state.translation else {
-                    return ProblemDetails::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "translation_controller_unavailable",
-                    )
-                    .into_response();
-                };
-                let snapshot = state.store.snapshot();
-                match tokio::task::spawn_blocking(move || controller.reconfigure(snapshot)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        state.store.set_translation_running(false);
-                        return ProblemDetails::new(error.status, error.code).into_response();
-                    }
-                    Err(_) => {
-                        state.store.set_translation_running(false);
-                        return ProblemDetails::new(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "translation_controller_failed",
-                        )
-                        .into_response();
-                    }
-                }
-            }
-            Json(state.store.snapshot()).into_response()
-        }
-        Err(RuntimeMutationError::InvalidLanguagePair) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_language_pair").into_response()
-        }
-        Err(RuntimeMutationError::VoiceLanguageMismatch) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "voice_language_mismatch").into_response()
-        }
-        Err(RuntimeMutationError::DebugCaptureUnavailable) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_unavailable")
-                .into_response()
-        }
-        Err(RuntimeMutationError::DebugCaptureStopped(_)) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_stopped")
-                .into_response()
-        }
-        Err(RuntimeMutationError::CloudProviderOptInRequired) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "cloud_provider_opt_in_required")
-                .into_response()
-        }
-        Err(RuntimeMutationError::InvalidAudioMixVolume) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_audio_mix_volume").into_response()
-        }
-    }
+    execute_translation(state.translation, ControlCommand::PatchDirection(patch)).await
 }
 
 async fn patch_provider(
     State(state): State<ApiState>,
     Json(patch): Json<ProviderPatch>,
 ) -> axum::response::Response {
-    match state.store.set_provider(patch) {
-        Ok(()) => Json(state.store.snapshot()).into_response(),
-        Err(RuntimeMutationError::CloudProviderOptInRequired) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "cloud_provider_opt_in_required")
-                .into_response()
-        }
-        Err(RuntimeMutationError::InvalidLanguagePair) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_language_pair").into_response()
-        }
-        Err(RuntimeMutationError::VoiceLanguageMismatch) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "voice_language_mismatch").into_response()
-        }
-        Err(RuntimeMutationError::DebugCaptureUnavailable) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_unavailable")
-                .into_response()
-        }
-        Err(RuntimeMutationError::DebugCaptureStopped(_)) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_stopped")
-                .into_response()
-        }
-        Err(RuntimeMutationError::InvalidAudioMixVolume) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_audio_mix_volume").into_response()
-        }
-    }
+    execute_translation(state.translation, ControlCommand::PatchProvider(patch)).await
 }
 
 async fn patch_audio_mix(
     State(state): State<ApiState>,
     Json(patch): Json<AudioMixPatch>,
 ) -> axum::response::Response {
-    let volumes = match state.store.set_audio_mix(patch) {
-        Ok(volumes) => volumes,
-        Err(RuntimeMutationError::InvalidAudioMixVolume) => {
-            return ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_audio_mix_volume")
-                .into_response();
-        }
-        Err(RuntimeMutationError::InvalidLanguagePair) => {
-            return ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_language_pair")
-                .into_response();
-        }
-        Err(RuntimeMutationError::VoiceLanguageMismatch) => {
-            return ProblemDetails::new(StatusCode::BAD_REQUEST, "voice_language_mismatch")
-                .into_response();
-        }
-        Err(RuntimeMutationError::CloudProviderOptInRequired) => {
-            return ProblemDetails::new(StatusCode::BAD_REQUEST, "cloud_provider_opt_in_required")
-                .into_response();
-        }
-        Err(RuntimeMutationError::DebugCaptureUnavailable) => {
-            return ProblemDetails::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "debug_capture_unavailable",
-            )
-            .into_response();
-        }
-        Err(RuntimeMutationError::DebugCaptureStopped(_)) => {
-            return ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_stopped")
-                .into_response();
-        }
-    };
-    if let Some(controller) = state.audio_mix {
-        match tokio::task::spawn_blocking(move || controller.apply(volumes)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                return ProblemDetails::new(error.status, error.code).into_response();
-            }
-            Err(_) => {
-                return ProblemDetails::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "audio_mix_controller_failed",
-                )
-                .into_response();
-            }
-        }
-    }
-    Json(state.store.snapshot()).into_response()
+    execute_translation(state.translation, ControlCommand::PatchAudioMix(patch)).await
 }
 
 async fn patch_latency_policy(
@@ -562,58 +433,7 @@ async fn patch_voice_profile(
     State(state): State<ApiState>,
     Json(patch): Json<VoiceProfilePatch>,
 ) -> axum::response::Response {
-    let was_running = state.store.snapshot().translation_running;
-    match state.store.set_voice_profile(patch) {
-        Ok(()) => {
-            if was_running {
-                let Some(controller) = state.translation else {
-                    return ProblemDetails::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "translation_controller_unavailable",
-                    )
-                    .into_response();
-                };
-                let snapshot = state.store.snapshot();
-                match tokio::task::spawn_blocking(move || controller.reconfigure(snapshot)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        state.store.set_translation_running(false);
-                        return ProblemDetails::new(error.status, error.code).into_response();
-                    }
-                    Err(_) => {
-                        state.store.set_translation_running(false);
-                        return ProblemDetails::new(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "translation_controller_failed",
-                        )
-                        .into_response();
-                    }
-                }
-            }
-            Json(state.store.snapshot()).into_response()
-        }
-        Err(RuntimeMutationError::VoiceLanguageMismatch) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "voice_language_mismatch").into_response()
-        }
-        Err(RuntimeMutationError::InvalidLanguagePair) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_language_pair").into_response()
-        }
-        Err(RuntimeMutationError::DebugCaptureUnavailable) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_unavailable")
-                .into_response()
-        }
-        Err(RuntimeMutationError::DebugCaptureStopped(_)) => {
-            ProblemDetails::new(StatusCode::SERVICE_UNAVAILABLE, "debug_capture_stopped")
-                .into_response()
-        }
-        Err(RuntimeMutationError::CloudProviderOptInRequired) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "cloud_provider_opt_in_required")
-                .into_response()
-        }
-        Err(RuntimeMutationError::InvalidAudioMixVolume) => {
-            ProblemDetails::new(StatusCode::BAD_REQUEST, "invalid_audio_mix_volume").into_response()
-        }
-    }
+    execute_translation(state.translation, ControlCommand::PatchVoice(patch)).await
 }
 
 async fn manual_route_override(

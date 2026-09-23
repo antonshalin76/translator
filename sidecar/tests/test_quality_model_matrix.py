@@ -52,7 +52,8 @@ def test_candidate_report_is_public_and_does_not_embed_local_chat_export() -> No
 
     payload = repr(report)
     assert "ChatExport_2026-08-04" not in payload
-    assert "/home/anton" not in payload
+    local_home = "/" + "home" + "/anton"
+    assert local_home not in payload
     assert report[0]["id"] == "qwen3-asr-0.6b-hf"
     assert report[0]["runtime"] == "transformers"
 

@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
+from translator_sidecar.generated.translator.provider.v1 import provider_pb2
 from translator_sidecar.provider_contract import (
     SAFE_ERROR_MESSAGES,
     AudioDirection,
@@ -18,17 +19,17 @@ from translator_sidecar.provider_contract import (
     ModelState,
     OpenProviderSession,
     PcmFormat,
-    ProviderCapabilities,
     ProviderAudioDelta,
+    ProviderCapabilities,
     ProviderHealth,
     ProviderId,
     ProviderInputFrame,
     ProviderLatency,
+    ProviderProbeRequest,
+    ProviderProbeResponse,
     ProviderQueues,
     ProviderSessionClosed,
     ProviderSessionOpened,
-    ProviderProbeRequest,
-    ProviderProbeResponse,
     ProviderState,
     SafeErrorCode,
     SampleFormat,
@@ -41,7 +42,72 @@ from translator_sidecar.provider_contract import (
     make_provider_error,
     provider_log_fields,
 )
-from translator_sidecar.generated.translator.provider.v1 import provider_pb2
+
+VOICE_OVERRIDE_CASES = [
+    pytest.param(model, voice, id=f"{field}-{kind}")
+    for field in ("model", "voice", "both")
+    for kind, value in (
+        ("empty", ""),
+        ("blank", " "),
+        ("value", "private-voice-override"),
+    )
+    for model, voice in [
+        (value if field != "voice" else None, value if field != "model" else None)
+    ]
+]
+
+
+@pytest.mark.parametrize("model_path,provider_voice_id", VOICE_OVERRIDE_CASES)
+def test_voice_override_fields_remain_schema_representable(
+    model_path, provider_voice_id
+):
+    voice = VoiceProfile(
+        language=Language.EN,
+        gender=VoiceGender.FEMALE,
+        engine=VoiceEngine.PIPER,
+        model_path=model_path,
+        provider_voice_id=provider_voice_id,
+    )
+    serialized = voice.model_dump(mode="json")
+    assert serialized["model_path"] == model_path
+    assert serialized["provider_voice_id"] == provider_voice_id
+    assert "has_overrides" not in serialized
+    assert VoiceProfile.model_validate_json(voice.model_dump_json()) == voice
+    message = provider_pb2.VoiceProfile()
+    for field, value in (
+        ("model_path", model_path),
+        ("provider_voice_id", provider_voice_id),
+    ):
+        if value is not None:
+            setattr(message, field, value)
+    restored = provider_pb2.VoiceProfile.FromString(message.SerializeToString())
+    for field, value in (
+        ("model_path", model_path),
+        ("provider_voice_id", provider_voice_id),
+    ):
+        assert restored.HasField(field) is (value is not None)
+        if value is not None:
+            assert getattr(restored, field) == value
+
+
+@pytest.mark.parametrize(
+    "model_path,provider_voice_id",
+    [pytest.param(None, None, id="none"), *VOICE_OVERRIDE_CASES],
+)
+def test_voice_override_presence_is_not_string_truthiness(
+    model_path, provider_voice_id
+):
+    voice = VoiceProfile(
+        language=Language.EN,
+        gender=VoiceGender.FEMALE,
+        engine=VoiceEngine.PIPER,
+        model_path=model_path,
+        provider_voice_id=provider_voice_id,
+    )
+    assert voice.has_overrides is (
+        model_path is not None or provider_voice_id is not None
+    )
+    assert "has_overrides" not in voice.model_dump()
 
 
 def pcm_format() -> PcmFormat:
@@ -304,7 +370,9 @@ def test_provider_error_forbids_unknown_and_content_derived_fields() -> None:
     with pytest.raises(ValidationError):
         from translator_sidecar.provider_contract import PrivacySafeProviderError
 
-        PrivacySafeProviderError.model_validate({**base, "transcript": "private-spoken-marker"})
+        PrivacySafeProviderError.model_validate(
+            {**base, "transcript": "private-spoken-marker"}
+        )
 
     with pytest.raises(ValidationError):
         PrivacySafeProviderError.model_validate(
@@ -333,10 +401,7 @@ def test_privacy_safe_logging_projects_only_operational_error_fields() -> None:
 
 def test_no_speech_has_stable_cross_language_contract() -> None:
     assert SafeErrorCode.NO_SPEECH.value == "no_speech"
-    assert (
-        SAFE_ERROR_MESSAGES[SafeErrorCode.NO_SPEECH]
-        == "No speech was detected"
-    )
+    assert SAFE_ERROR_MESSAGES[SafeErrorCode.NO_SPEECH] == "No speech was detected"
     assert provider_pb2.SAFE_ERROR_CODE_NO_SPEECH == 8
 
     error = make_provider_error(

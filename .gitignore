@@ -47,6 +47,7 @@ coverage/
 /docs/planning/
 /docs/benchmarks/
 /repo-c4.json
+/.papercuts.jsonl
 
 # Local editor and operating-system state
 .idea/

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import builtins
-from concurrent.futures import ThreadPoolExecutor
+import json
 import os
-from pathlib import Path
-from threading import Event, Lock
+import subprocess
+import sys
 import traceback
 import weakref
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Event, Lock
 
 import numpy as np
 import pytest
+from fixtures.native_asr_load import transcribe_with_device_oracle
+from test_model_lease import model_source
 
 from translator_sidecar.local.asr import (
     AsrModelManager,
@@ -17,6 +22,26 @@ from translator_sidecar.local.asr import (
     AsrUnsupported,
 )
 from translator_sidecar.provider_contract import Language, TranslationMode
+
+
+def asr_sources(paths):
+    result = {}
+    for name, path in paths.items():
+        if path.is_absolute() and path.is_dir():
+            directory = path / f"fixture-{name}"
+            directory.mkdir(exist_ok=True)
+            result[name] = model_source(
+                directory, {"model.bin": name.encode(), "tokenizer.json": b"{}"}
+            )
+        else:
+            result[name] = path
+    return result
+
+
+def sealed_model_id(path: str) -> str:
+    directory = Path(path)
+    assert directory.is_dir()
+    return (directory / "model.bin").read_bytes().decode()
 
 
 class Segment:
@@ -117,6 +142,90 @@ def pcm() -> bytes:
     return np.array([0, 16384, -16384, 32767], dtype=np.int16).tobytes()
 
 
+_NATIVE_ASR_SKIP = "missing_external_prerequisite:gpu_model_cache"
+
+
+def _native_asr_available(device: str) -> bool:
+    return bool(
+        os.environ.get("TRANSLATOR_NATIVE_ASR_MANIFEST")
+        and os.environ.get("TRANSLATOR_NATIVE_ASR_CORPUS_ROOT")
+        and device in os.environ.get("TRANSLATOR_NATIVE_ASR_DEVICES", "cpu").split(",")
+    )
+
+
+def _assert_native_asr_boundary(device: str) -> None:
+    manifest = os.environ["TRANSLATOR_NATIVE_ASR_MANIFEST"]
+    corpus_root = os.environ["TRANSLATOR_NATIVE_ASR_CORPUS_ROOT"]
+    fixture = Path(__file__).parent / "fixtures/native_asr_load.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(fixture),
+            "--manifest",
+            manifest,
+            "--corpus-root",
+            corpus_root,
+            "--device",
+            device,
+            "--model-id",
+            "faster-whisper-small",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode == 0, result.stderr
+    transcription = json.loads(result.stdout)
+    assert transcription["actual_device"] == device
+    assert transcription["resident_model_id"] == "small"
+    assert transcription["device_checkpoints"] == {
+        "after_prepare": {"device": device, "resident_model_id": "small"},
+        "after_ru": {"device": device, "resident_model_id": "small"},
+        "after_en": {"device": device, "resident_model_id": "small"},
+    }
+    assert transcription["ru"]
+    assert transcription["en"]
+
+
+def test_native_asr_device_oracle_rejects_fallback_after_prepare() -> None:
+    class FallbackManager:
+        actual_device = "cuda"
+        resident_model_id = "small"
+        calls = 0
+
+        def prepare(self) -> None:
+            pass
+
+        def transcribe(self, *_args: object, **_kwargs: object) -> str:
+            self.calls += 1
+            self.actual_device = "cpu"
+            return "non-empty fallback transcript"
+
+    manager = FallbackManager()
+
+    with pytest.raises(RuntimeError, match=r"after_ru.*expected cuda.*got cpu"):
+        transcribe_with_device_oracle(
+            manager,  # type: ignore[arg-type]
+            ru_pcm=pcm(),
+            en_pcm=pcm(),
+            expected_device="cuda",
+        )
+
+    assert manager.calls == 1
+
+
+@pytest.mark.skipif(not _native_asr_available("cpu"), reason=_NATIVE_ASR_SKIP)
+def test_asr_verified_boundary_loads_native_model_in_subprocess_cpu() -> None:
+    _assert_native_asr_boundary("cpu")
+
+
+@pytest.mark.skipif(not _native_asr_available("cuda"), reason=_NATIVE_ASR_SKIP)
+def test_asr_verified_boundary_loads_native_model_in_subprocess_cuda() -> None:
+    _assert_native_asr_boundary("cuda")
+
+
 @pytest.mark.parametrize(
     ("mode", "beam_size"),
     [
@@ -131,7 +240,7 @@ def test_asr_converts_s16le_and_uses_mode_beam(
     model = FakeWhisper()
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=lambda _path, **_kwargs: model,
     )
@@ -165,7 +274,7 @@ def test_asr_loads_absolute_local_path_without_download(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device=device,
         model_factory=factory,
     )
@@ -173,7 +282,7 @@ def test_asr_loads_absolute_local_path_without_download(
 
     assert calls == [
         (
-            str(tmp_path),
+            calls[0][0],
             {
                 "device": device,
                 "compute_type": compute_type,
@@ -182,6 +291,8 @@ def test_asr_loads_absolute_local_path_without_download(
             },
         )
     ]
+    assert sealed_model_id(calls[0][0]) == "small"
+    assert not (Path(calls[0][0]) / "preprocessor_config.json").exists()
     assert manager.resident_model_id == "small"
     assert manager.residency_generation == 1
     if device == "cpu":
@@ -195,7 +306,7 @@ def test_asr_prepare_establishes_residency_without_running_inference(
     model = FakeWhisper()
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=lambda _path, **_kwargs: model,
     )
@@ -221,7 +332,7 @@ def test_asr_explicit_release_proves_native_model_is_gone(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
@@ -256,7 +367,7 @@ def test_asr_enables_offline_controls_before_model_load(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=factory,
     )
@@ -280,7 +391,7 @@ def test_asr_rejects_non_local_model_path_before_load(
         selected_path.write_bytes(b"not a model directory")
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": selected_path},
+        model_paths=asr_sources({"small": selected_path}),
         device="cpu",
         model_factory=lambda _path, **_kwargs: pytest.fail("must not load"),
     )
@@ -302,10 +413,12 @@ def test_asr_falls_back_to_small_cpu_when_cuda_is_unavailable(
 
     manager = AsrModelManager(
         selected_id="large-v3",
-        model_paths={
-            "large-v3": tmp_path / "large-v3",
-            "small": small_path,
-        },
+        model_paths=asr_sources(
+            {
+                "large-v3": tmp_path / "large-v3",
+                "small": small_path,
+            }
+        ),
         device="cuda",
         model_factory=factory,
         cuda_available=lambda: False,
@@ -317,7 +430,7 @@ def test_asr_falls_back_to_small_cpu_when_cuda_is_unavailable(
     )
     assert calls == [
         (
-            str(small_path),
+            calls[0][0],
             {
                 "device": "cpu",
                 "compute_type": "int8",
@@ -326,6 +439,7 @@ def test_asr_falls_back_to_small_cpu_when_cuda_is_unavailable(
             },
         )
     ]
+    assert sealed_model_id(calls[0][0]) == "small"
     assert manager.actual_device == "cpu"
     assert manager.resident_model_id == "small"
     assert manager.degraded
@@ -341,7 +455,7 @@ def test_cpu_rejects_large_candidate_before_model_load(tmp_path: Path) -> None:
 
     manager = AsrModelManager(
         selected_id="large-v3",
-        model_paths={"large-v3": tmp_path, "small": tmp_path},
+        model_paths=asr_sources({"large-v3": tmp_path, "small": tmp_path}),
         device="cpu",
         model_factory=factory,
     )
@@ -366,7 +480,7 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
     admission_lock = AdmissionProbeLock()
 
     def factory(path: str, **_kwargs: object) -> FakeWhisper:
-        model_id = Path(path).name
+        model_id = sealed_model_id(path)
         loads[model_id] += 1
         if model_id == "small":
             assert model_refs[0]() is None
@@ -388,10 +502,12 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
 
     manager = AsrModelManager(
         selected_id="large-v3",
-        model_paths={
-            "large-v3": tmp_path / "large-v3",
-            "small": tmp_path / "small",
-        },
+        model_paths=asr_sources(
+            {
+                "large-v3": tmp_path / "large-v3",
+                "small": tmp_path / "small",
+            }
+        ),
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
@@ -444,7 +560,7 @@ def test_cuda_oom_while_loading_large_falls_back_to_small(
     events: list[str] = []
 
     def factory(path: str, **_kwargs: object) -> FakeWhisper:
-        model_id = Path(path).name
+        model_id = sealed_model_id(path)
         events.append(f"load:{model_id}")
         if model_id == "large-v3":
             raise RuntimeError("CUDA out of memory: private load marker")
@@ -454,7 +570,7 @@ def test_cuda_oom_while_loading_large_falls_back_to_small(
 
     manager = AsrModelManager(
         selected_id="large-v3",
-        model_paths={"large-v3": large_path, "small": small_path},
+        model_paths=asr_sources({"large-v3": large_path, "small": small_path}),
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
@@ -485,7 +601,7 @@ def test_cuda_oom_while_loading_small_enters_terminal_unavailable(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
@@ -520,7 +636,7 @@ def test_cuda_fallback_fails_closed_if_old_wrapper_is_still_alive(
     retained_large.model = FakeNativeModel(events=events, name="large-v3")
 
     def factory(path: str, **_kwargs: object) -> FakeWhisper:
-        model_id = Path(path).name
+        model_id = sealed_model_id(path)
         events.append(f"load:{model_id}")
         if model_id == "large-v3":
             return retained_large
@@ -528,7 +644,7 @@ def test_cuda_fallback_fails_closed_if_old_wrapper_is_still_alive(
 
     manager = AsrModelManager(
         selected_id="large-v3",
-        model_paths={"large-v3": large_path, "small": small_path},
+        model_paths=asr_sources({"large-v3": large_path, "small": small_path}),
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
@@ -560,7 +676,7 @@ def test_cuda_oom_on_small_enters_unavailable_without_retry(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
@@ -604,7 +720,7 @@ def test_cpu_oom_on_small_enters_unavailable_without_retry(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=factory,
     )
@@ -640,7 +756,7 @@ def test_asr_cleanup_failure_is_sanitized_and_fail_closed(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cuda",
         model_factory=lambda _path, **_kwargs: model,
         release_cuda=release_cuda,
@@ -648,7 +764,8 @@ def test_asr_cleanup_failure_is_sanitized_and_fail_closed(
 
     with pytest.raises(AsrUnavailable, match="unavailable") as raised:
         manager.transcribe(pcm(), language=Language.EN, mode=TranslationMode.BALANCED)
-    assert manager.resident_model_id is None
+    assert manager.resident_model_id == ("small" if failure_at == "unload" else None)
+    assert (manager._model is not None) is (failure_at == "unload")
     assert manager.unavailable
     assert events[0] == "unload:small"
     cleanup_events = list(events)
@@ -681,7 +798,7 @@ def test_asr_serializes_native_inference_across_directions(
     )
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=lambda _path, **_kwargs: model,
         admission_lock=admission_lock,
@@ -725,7 +842,7 @@ def test_asr_cold_start_loads_exactly_one_resident_model(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=factory,
         admission_lock=admission_lock,
@@ -764,7 +881,7 @@ def test_asr_consumes_all_lazy_segments(tmp_path: Path) -> None:
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=lambda _path, **_kwargs: MultiSegmentWhisper(),
     )
@@ -792,7 +909,7 @@ def test_asr_does_not_return_partial_text_after_lazy_failure(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=lambda _path, **_kwargs: PartialThenFailureWhisper(),
     )
@@ -820,7 +937,7 @@ def test_asr_sanitizes_missing_dependency_traceback(
     monkeypatch.setattr(builtins, "__import__", blocked_import)
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
     )
 
@@ -847,7 +964,7 @@ def test_asr_sanitizes_non_oom_native_failure_traceback(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=factory,
     )
@@ -874,7 +991,7 @@ def test_asr_rejects_invalid_pcm_before_model_load(
 
     manager = AsrModelManager(
         selected_id="small",
-        model_paths={"small": tmp_path},
+        model_paths=asr_sources({"small": tmp_path}),
         device="cpu",
         model_factory=factory,
     )

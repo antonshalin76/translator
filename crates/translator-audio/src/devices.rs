@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CommandResult, CommandRunner, SystemCommandRunner};
+use crate::module_list::parse_module_list;
+use crate::{CommandResult, CommandRunError, CommandRunner, SystemCommandRunner};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
@@ -32,15 +34,6 @@ pub enum OutputMode {
     UnknownUnsafe,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AcousticWarning {
-    DeviceUnavailable,
-    AecNotValidated,
-    AecValidationFailed,
-    UnknownOutput,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhysicalDevice {
     pub id: u32,
@@ -60,20 +53,127 @@ pub struct DeviceSelectionState {
     pub pending_default: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcousticSafety {
-    pub mode: OutputMode,
-    pub aec_capability: AecCapability,
-    pub full_duplex_allowed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warning: Option<AcousticWarning>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceState {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceFacts {
     pub source: DeviceSelectionState,
     pub sink: DeviceSelectionState,
-    pub acoustic: AcousticSafety,
+    pub output_mode: OutputMode,
+    pub aec_capability: AecCapability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task7EndpointFacts {
+    pub input_monitor: String,
+    pub output: PhysicalDevice,
+    pub output_mode: OutputMode,
+}
+
+pub fn inspect_task7_endpoints_until(
+    runner: &impl CommandRunner,
+    input: &str,
+    output: &str,
+    deadline: Instant,
+) -> Result<Task7EndpointFacts, DeviceWatcherError> {
+    check_device_deadline(deadline)?;
+    if input != "translator_task7_ru_in.monitor" {
+        return Err(DeviceWatcherError::new(
+            DeviceWatcherErrorCode::InvalidPhysicalDevice,
+        ));
+    }
+    let sources: Vec<RawDevice> = read_device_json_until(runner, "sources", deadline)?;
+    let sinks: Vec<RawDevice> = read_device_json_until(runner, "sinks", deadline)?;
+    let result = run_device_command_until(runner, &["list", "short", "modules"], deadline)?;
+    let modules = parse_module_list(result.stdout())
+        .map_err(|_| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))?;
+    check_device_deadline(deadline)?;
+    validate_device_identities(&sources)?;
+    validate_device_identities(&sinks)?;
+    let invalid = || DeviceWatcherError::new(DeviceWatcherErrorCode::InvalidPhysicalDevice);
+    let source = sources
+        .iter()
+        .find(|source| source.name == input)
+        .ok_or_else(invalid)?;
+    let sink = sinks
+        .iter()
+        .find(|sink| sink.name == "translator_task7_ru_in")
+        .ok_or_else(invalid)?;
+    let module = sink
+        .owner_module
+        .and_then(|id| modules.get(&id))
+        .ok_or_else(invalid)?;
+    if source.monitor_source != sink.name
+        || sink.monitor_source != source.name
+        || source.owner_module != sink.owner_module
+        || module.name != "module-null-sink"
+        || sink
+            .properties
+            .get("translator.task7_e2e")
+            .map(String::as_str)
+            != Some("true")
+        || !device_available(source)
+        || !device_available(sink)
+    {
+        return Err(invalid());
+    }
+    let output = sinks
+        .into_iter()
+        .find(|sink| sink.name == output && is_physical_sink(sink) && device_available(sink))
+        .ok_or_else(invalid)?;
+    let output = PhysicalDevice::from(output);
+    let output_mode = classify_output_mode(&output);
+    check_device_deadline(deadline)?;
+    Ok(Task7EndpointFacts {
+        input_monitor: input.to_owned(),
+        output,
+        output_mode,
+    })
+}
+
+fn check_device_deadline(deadline: Instant) -> Result<(), DeviceWatcherError> {
+    if Instant::now() >= deadline {
+        Err(DeviceWatcherError::new(
+            DeviceWatcherErrorCode::DeadlineExpired,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn read_device_json_until<T: for<'de> Deserialize<'de>>(
+    runner: &impl CommandRunner,
+    kind: &str,
+    deadline: Instant,
+) -> Result<T, DeviceWatcherError> {
+    let result = run_device_command_until(runner, &["--format=json", "list", kind], deadline)?;
+    let value = serde_json::from_slice(result.stdout())
+        .map_err(|_| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))?;
+    check_device_deadline(deadline)?;
+    Ok(value)
+}
+
+fn run_device_command_until(
+    runner: &impl CommandRunner,
+    args: &[&str],
+    deadline: Instant,
+) -> Result<CommandResult, DeviceWatcherError> {
+    check_device_deadline(deadline)?;
+    let args: Vec<_> = args.iter().map(|value| (*value).to_owned()).collect();
+    let result = runner
+        .run_until("pactl", &args, deadline)
+        .map_err(|error| {
+            DeviceWatcherError::new(if error == CommandRunError::DeadlineExpired {
+                DeviceWatcherErrorCode::DeadlineExpired
+            } else {
+                DeviceWatcherErrorCode::DiscoveryFailed
+            })
+        })?;
+    check_device_deadline(deadline)?;
+    if !result.is_success() {
+        return Err(DeviceWatcherError::new(
+            DeviceWatcherErrorCode::DiscoveryFailed,
+        ));
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,6 +188,7 @@ pub enum DeviceWatcherErrorCode {
     DiscoveryFailed,
     InvalidPhysicalDevice,
     GraphValidationFailed,
+    DeadlineExpired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +212,9 @@ impl DeviceWatcherError {
             }
             DeviceWatcherErrorCode::GraphValidationFailed => {
                 ("Physical audio sink validation failed", true)
+            }
+            DeviceWatcherErrorCode::DeadlineExpired => {
+                ("Audio device inspection deadline expired", true)
             }
         };
         Self {
@@ -153,10 +257,22 @@ impl SinkGraphValidator for MetadataSinkGraphValidator {
 }
 
 pub trait DeviceWatcher {
+    fn read_facts_until(&self, deadline: Instant) -> Result<DeviceFacts, DeviceWatcherError>;
+    fn reconcile_until(
+        &mut self,
+        device_override: DeviceOverride,
+        deadline: Instant,
+    ) -> Result<DeviceFacts, DeviceWatcherError>;
+
+    fn read_facts(&self) -> Result<DeviceFacts, DeviceWatcherError> {
+        self.read_facts_until(Instant::now() + Duration::from_secs(2))
+    }
     fn reconcile(
         &mut self,
         device_override: DeviceOverride,
-    ) -> Result<DeviceState, DeviceWatcherError>;
+    ) -> Result<DeviceFacts, DeviceWatcherError> {
+        self.reconcile_until(device_override, Instant::now() + Duration::from_secs(8))
+    }
     fn selected_sink_name(&self) -> Option<&str>;
 }
 
@@ -164,7 +280,6 @@ pub struct PulseDeviceWatcher<R = SystemCommandRunner, V = MetadataSinkGraphVali
     runner: R,
     validator: V,
     aec_capability: AecCapability,
-    explicit_headphone_sink: Option<String>,
     pinned_source_name: Option<String>,
     pinned_sink_name: Option<String>,
     sink_validation_required: bool,
@@ -189,35 +304,42 @@ where
             runner,
             validator,
             aec_capability,
-            explicit_headphone_sink: None,
             pinned_source_name: None,
             pinned_sink_name: None,
             sink_validation_required: true,
         }
     }
 
-    pub fn with_explicit_headphone_sink(mut self, sink_name: impl Into<String>) -> Self {
-        self.explicit_headphone_sink = Some(sink_name.into());
-        self
-    }
-
-    fn inspect(&self) -> Result<DeviceSnapshot, DeviceWatcherError> {
-        let default_sink = self.run_text(&["get-default-sink"])?;
-        let default_source = self.run_text(&["get-default-source"])?;
-        let raw_sinks: Vec<RawDevice> = self.run_json(&["--format=json", "list", "sinks"])?;
-        let raw_sources: Vec<RawDevice> = self.run_json(&["--format=json", "list", "sources"])?;
-        let sinks = raw_sinks
+    fn inspect_until(&self, deadline: Instant) -> Result<DeviceSnapshot, DeviceWatcherError> {
+        let raw_sources: Vec<RawDevice> =
+            read_device_json_until(&self.runner, "sources", deadline)?;
+        let raw_sinks: Vec<RawDevice> = read_device_json_until(&self.runner, "sinks", deadline)?;
+        validate_device_identities(&raw_sinks)?;
+        validate_device_identities(&raw_sources)?;
+        let sinks: HashMap<_, _> = raw_sinks
             .into_iter()
             .filter(is_physical_sink)
             .map(PhysicalDevice::from)
             .map(|device| (device.name.clone(), device))
             .collect();
-        let sources = raw_sources
+        let sources: HashMap<_, _> = raw_sources
             .into_iter()
             .filter(is_physical_source)
             .map(PhysicalDevice::from)
             .map(|device| (device.name.clone(), device))
             .collect();
+        check_device_deadline(deadline)?;
+        let default_source = if sources.is_empty() {
+            None
+        } else {
+            Some(self.run_text_until(&["get-default-source"], deadline)?)
+        };
+        let default_sink = if sinks.is_empty() {
+            None
+        } else {
+            Some(self.run_text_until(&["get-default-sink"], deadline)?)
+        };
+        check_device_deadline(deadline)?;
         Ok(DeviceSnapshot {
             default_sink,
             default_source,
@@ -226,38 +348,20 @@ where
         })
     }
 
-    fn run_text(&self, args: &[&str]) -> Result<String, DeviceWatcherError> {
-        let result = self.run(args)?;
-        std::str::from_utf8(result.stdout())
+    fn run_text_until(
+        &self,
+        args: &[&str],
+        deadline: Instant,
+    ) -> Result<String, DeviceWatcherError> {
+        let result = run_device_command_until(&self.runner, args, deadline)?;
+        let value = std::str::from_utf8(result.stdout())
             .map(str::trim)
             .ok()
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
-            .ok_or_else(|| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))
-    }
-
-    fn run_json<T>(&self, args: &[&str]) -> Result<T, DeviceWatcherError>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let result = self.run(args)?;
-        serde_json::from_slice(result.stdout())
-            .map_err(|_| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))
-    }
-
-    fn run(&self, args: &[&str]) -> Result<CommandResult, DeviceWatcherError> {
-        let arguments: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
-        let result = self
-            .runner
-            .run("pactl", &arguments)
-            .map_err(|_| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))?;
-        if result.is_success() {
-            Ok(result)
-        } else {
-            Err(DeviceWatcherError::new(
-                DeviceWatcherErrorCode::DiscoveryFailed,
-            ))
-        }
+            .ok_or_else(|| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))?;
+        check_device_deadline(deadline)?;
+        Ok(value)
     }
 
     fn validate_source_override(
@@ -276,16 +380,28 @@ where
         &self,
         snapshot: &DeviceSnapshot,
         name: &str,
+        deadline: Instant,
     ) -> Result<(), DeviceWatcherError> {
         let device = snapshot.sinks.get(name).ok_or_else(|| {
             DeviceWatcherError::new(DeviceWatcherErrorCode::InvalidPhysicalDevice)
         })?;
+        self.validate_sink(device, deadline)
+    }
+
+    fn validate_sink(
+        &self,
+        device: &PhysicalDevice,
+        deadline: Instant,
+    ) -> Result<(), DeviceWatcherError> {
+        check_device_deadline(deadline)?;
         if !device.available {
             return Err(DeviceWatcherError::new(
                 DeviceWatcherErrorCode::InvalidPhysicalDevice,
             ));
         }
-        if !self.validator.validate(device) {
+        let accepted = self.validator.validate(device);
+        check_device_deadline(deadline)?;
+        if !accepted {
             return Err(DeviceWatcherError::new(
                 DeviceWatcherErrorCode::GraphValidationFailed,
             ));
@@ -295,7 +411,7 @@ where
 
     fn selection_state(
         pinned_name: &Option<String>,
-        current_default: &str,
+        current_default: &Option<String>,
         devices: &HashMap<String, PhysicalDevice>,
     ) -> DeviceSelectionState {
         let selected = pinned_name
@@ -307,67 +423,97 @@ where
         } else {
             DeviceHealth::DeviceUnavailable
         };
-        let default_is_physical = devices.contains_key(current_default);
+        let current_default = current_default
+            .as_ref()
+            .filter(|name| devices.contains_key(*name))
+            .cloned();
         let pending_default = pinned_name.as_ref().and_then(|pinned| {
-            (default_is_physical && current_default != pinned).then(|| current_default.to_owned())
+            current_default
+                .as_ref()
+                .filter(|name| *name != pinned)
+                .cloned()
         });
         DeviceSelectionState {
             health,
             selected,
             pinned_name: pinned_name.clone(),
-            current_default: default_is_physical.then(|| current_default.to_owned()),
+            current_default,
             pending_default,
         }
     }
 
-    fn acoustic_safety(
+    fn propose_selection(
         &self,
-        source: &DeviceSelectionState,
-        sink: &DeviceSelectionState,
-    ) -> AcousticSafety {
-        let mode = sink
+        snapshot: &DeviceSnapshot,
+        device_override: DeviceOverride,
+        force_validation: bool,
+        deadline: Instant,
+    ) -> Result<(DeviceFacts, bool), DeviceWatcherError> {
+        check_device_deadline(deadline)?;
+        let mut proposed_source_name = self.pinned_source_name.clone();
+        let mut proposed_sink_name = self.pinned_sink_name.clone();
+        let mut sink_validation_required = self.sink_validation_required || force_validation;
+
+        if let Some(source_name) = device_override.source_name.as_deref() {
+            Self::validate_source_override(snapshot, source_name)?;
+            proposed_source_name = Some(source_name.to_owned());
+        } else if proposed_source_name.is_none()
+            && snapshot
+                .default_source
+                .as_ref()
+                .and_then(|name| snapshot.sources.get(name))
+                .is_some_and(|device| device.available)
+        {
+            proposed_source_name = snapshot.default_source.clone();
+        }
+
+        if let Some(sink_name) = device_override.sink_name.as_deref() {
+            self.validate_sink_override(snapshot, sink_name, deadline)?;
+            proposed_sink_name = Some(sink_name.to_owned());
+            sink_validation_required = false;
+        } else if let Some(pinned_sink_name) = proposed_sink_name.as_deref() {
+            match snapshot.sinks.get(pinned_sink_name) {
+                Some(sink) if sink.available => {
+                    if sink_validation_required {
+                        self.validate_sink(sink, deadline)?;
+                        sink_validation_required = false;
+                    }
+                }
+                _ => sink_validation_required = true,
+            }
+        } else if let Some(default_sink) = snapshot
+            .default_sink
+            .as_ref()
+            .and_then(|name| snapshot.sinks.get(name))
+            && default_sink.available
+        {
+            self.validate_sink(default_sink, deadline)?;
+            proposed_sink_name = snapshot.default_sink.clone();
+            sink_validation_required = false;
+        }
+
+        let source = Self::selection_state(
+            &proposed_source_name,
+            &snapshot.default_source,
+            &snapshot.sources,
+        );
+        let sink =
+            Self::selection_state(&proposed_sink_name, &snapshot.default_sink, &snapshot.sinks);
+        let output_mode = sink
             .selected
             .as_ref()
-            .map(|device| {
-                if self.explicit_headphone_sink.as_deref() == Some(device.name.as_str()) {
-                    OutputMode::Headphones
-                } else {
-                    classify_output_mode(device)
-                }
-            })
+            .map(classify_output_mode)
             .unwrap_or(OutputMode::UnknownUnsafe);
-        if source.health != DeviceHealth::Available || sink.health != DeviceHealth::Available {
-            return AcousticSafety {
-                mode,
+        check_device_deadline(deadline)?;
+        Ok((
+            DeviceFacts {
+                source,
+                sink,
+                output_mode,
                 aec_capability: self.aec_capability.clone(),
-                full_duplex_allowed: false,
-                warning: Some(AcousticWarning::DeviceUnavailable),
-            };
-        }
-        let selected_source = source.selected.as_ref().expect("available source");
-        let selected_sink = sink.selected.as_ref().expect("available sink");
-        let (full_duplex_allowed, warning) = match mode {
-            OutputMode::Headphones => (true, None),
-            OutputMode::UnknownUnsafe => (false, Some(AcousticWarning::UnknownOutput)),
-            OutputMode::OpenSpeaker => match &self.aec_capability {
-                AecCapability::ValidatedFor {
-                    source_name,
-                    sink_name,
-                } if source_name == &selected_source.name && sink_name == &selected_sink.name => {
-                    (true, None)
-                }
-                AecCapability::ValidationFailed => {
-                    (false, Some(AcousticWarning::AecValidationFailed))
-                }
-                _ => (false, Some(AcousticWarning::AecNotValidated)),
             },
-        };
-        AcousticSafety {
-            mode,
-            aec_capability: self.aec_capability.clone(),
-            full_duplex_allowed,
-            warning,
-        }
+            sink_validation_required,
+        ))
     }
 }
 
@@ -376,77 +522,25 @@ where
     R: CommandRunner,
     V: SinkGraphValidator,
 {
-    fn reconcile(
+    fn read_facts_until(&self, deadline: Instant) -> Result<DeviceFacts, DeviceWatcherError> {
+        let snapshot = self.inspect_until(deadline)?;
+        self.propose_selection(&snapshot, DeviceOverride::default(), true, deadline)
+            .map(|(facts, _)| facts)
+    }
+
+    fn reconcile_until(
         &mut self,
         device_override: DeviceOverride,
-    ) -> Result<DeviceState, DeviceWatcherError> {
-        let snapshot = self.inspect()?;
-        let mut proposed_source_name = self.pinned_source_name.clone();
-        let mut proposed_sink_name = self.pinned_sink_name.clone();
-        let mut sink_validation_required = self.sink_validation_required;
-
-        if let Some(source_name) = device_override.source_name.as_deref() {
-            Self::validate_source_override(&snapshot, source_name)?;
-            proposed_source_name = Some(source_name.to_owned());
-        } else if proposed_source_name.is_none()
-            && snapshot
-                .sources
-                .get(&snapshot.default_source)
-                .is_some_and(|device| device.available)
-        {
-            proposed_source_name = Some(snapshot.default_source.clone());
-        }
-
-        if let Some(sink_name) = device_override.sink_name.as_deref() {
-            self.validate_sink_override(&snapshot, sink_name)?;
-            proposed_sink_name = Some(sink_name.to_owned());
-            sink_validation_required = false;
-        } else if let Some(pinned_sink_name) = proposed_sink_name.as_deref() {
-            match snapshot.sinks.get(pinned_sink_name) {
-                Some(sink) if sink.available => {
-                    if sink_validation_required {
-                        if !self.validator.validate(sink) {
-                            return Err(DeviceWatcherError::new(
-                                DeviceWatcherErrorCode::GraphValidationFailed,
-                            ));
-                        }
-                        sink_validation_required = false;
-                    }
-                }
-                _ => sink_validation_required = true,
-            }
-        } else if let Some(default_sink) = snapshot.sinks.get(&snapshot.default_sink)
-            && default_sink.available
-        {
-            if !self.validator.validate(default_sink) {
-                return Err(DeviceWatcherError::new(
-                    DeviceWatcherErrorCode::GraphValidationFailed,
-                ));
-            }
-            proposed_sink_name = Some(snapshot.default_sink.clone());
-            sink_validation_required = false;
-        }
-
-        self.pinned_source_name = proposed_source_name;
-        self.pinned_sink_name = proposed_sink_name;
+        deadline: Instant,
+    ) -> Result<DeviceFacts, DeviceWatcherError> {
+        let snapshot = self.inspect_until(deadline)?;
+        let (facts, sink_validation_required) =
+            self.propose_selection(&snapshot, device_override, false, deadline)?;
+        check_device_deadline(deadline)?;
+        self.pinned_source_name = facts.source.pinned_name.clone();
+        self.pinned_sink_name = facts.sink.pinned_name.clone();
         self.sink_validation_required = sink_validation_required;
-
-        let source = Self::selection_state(
-            &self.pinned_source_name,
-            &snapshot.default_source,
-            &snapshot.sources,
-        );
-        let sink = Self::selection_state(
-            &self.pinned_sink_name,
-            &snapshot.default_sink,
-            &snapshot.sinks,
-        );
-        let acoustic = self.acoustic_safety(&source, &sink);
-        Ok(DeviceState {
-            source,
-            sink,
-            acoustic,
-        })
+        Ok(facts)
     }
 
     fn selected_sink_name(&self) -> Option<&str> {
@@ -455,8 +549,8 @@ where
 }
 
 struct DeviceSnapshot {
-    default_sink: String,
-    default_source: String,
+    default_sink: Option<String>,
+    default_source: Option<String>,
     sinks: HashMap<String, PhysicalDevice>,
     sources: HashMap<String, PhysicalDevice>,
 }
@@ -475,6 +569,9 @@ struct RawDevice {
     ports: Vec<RawPort>,
     #[serde(default)]
     active_port: Option<String>,
+    monitor_source: String,
+    #[serde(default)]
+    owner_module: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,21 +606,50 @@ impl From<RawDevice> for PhysicalDevice {
 }
 
 fn is_physical_sink(device: &RawDevice) -> bool {
+    has_physical_provenance(device, "Audio/Sink")
+}
+
+fn is_physical_source(device: &RawDevice) -> bool {
+    has_physical_provenance(device, "Audio/Source") && device.monitor_source.is_empty()
+}
+
+fn has_physical_provenance(device: &RawDevice, media_class: &str) -> bool {
     !device.name.starts_with("translator_")
         && !device.name.ends_with(".monitor")
         && device
             .properties
             .get("device.class")
-            .is_none_or(|class| !class.eq_ignore_ascii_case("monitor"))
-}
-
-fn is_physical_source(device: &RawDevice) -> bool {
-    is_physical_sink(device)
-        && !device.name.ends_with(".monitor")
+            .is_some_and(|class| class.eq_ignore_ascii_case("sound"))
+        && device.properties.get("device.api").is_some_and(|api| {
+            ["alsa", "bluez", "bluez5"]
+                .iter()
+                .any(|expected| api.eq_ignore_ascii_case(expected))
+        })
+        && ["node.virtual", "node.network"].iter().all(|key| {
+            device
+                .properties
+                .get(*key)
+                .is_none_or(|value| value.parse::<bool>() == Ok(false))
+        })
         && device
             .properties
             .get("media.class")
-            .is_none_or(|class| class.eq_ignore_ascii_case("Audio/Source"))
+            .is_none_or(|class| class.eq_ignore_ascii_case(media_class))
+}
+
+fn validate_device_identities(devices: &[RawDevice]) -> Result<(), DeviceWatcherError> {
+    let mut names = HashSet::new();
+    let mut ids = HashSet::new();
+    if devices
+        .iter()
+        .any(|device| !names.insert(&device.name) || !ids.insert(device.index))
+    {
+        Err(DeviceWatcherError::new(
+            DeviceWatcherErrorCode::DiscoveryFailed,
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn device_available(device: &RawDevice) -> bool {

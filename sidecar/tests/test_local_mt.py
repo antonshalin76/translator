@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import builtins
+import json
 import os
-from pathlib import Path
+import subprocess
+import sys
 import traceback
+from pathlib import Path
 
 import pytest
+from test_model_lease import model_source
 
 from translator_sidecar.local.mt import (
     LocalTranslationError,
@@ -43,7 +47,8 @@ class LongSentencePiece(FakeSentencePiece):
 
 
 class FakeResult:
-    hypotheses = [["eng_Latn", "translated", "output"]]
+    def __init__(self) -> None:
+        self.hypotheses = [["eng_Latn", "translated", "output"]]
 
 
 class FakeCTranslate2:
@@ -55,6 +60,52 @@ class FakeCTranslate2:
     ) -> list[FakeResult]:
         self.calls.append((source, kwargs))
         return [FakeResult()]
+
+
+_NATIVE_NLLB_SKIP = "missing_external_prerequisite:gpu_model_cache"
+
+
+def _native_nllb_available(device: str) -> bool:
+    return bool(
+        os.environ.get("TRANSLATOR_NATIVE_NLLB_MANIFEST")
+        and device in os.environ.get("TRANSLATOR_NATIVE_NLLB_DEVICES", "cpu").split(",")
+    )
+
+
+def _assert_native_nllb_boundary(device: str) -> None:
+    manifest = os.environ["TRANSLATOR_NATIVE_NLLB_MANIFEST"]
+    fixture = Path(__file__).parent / "fixtures/native_nllb_load.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(fixture),
+            "--manifest",
+            manifest,
+            "--device",
+            device,
+            "--model-id",
+            "nllb-200-distilled-600m-ct2-int8",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    translations = json.loads(result.stdout)
+    assert translations["ru_en"]
+    assert translations["en_ru"]
+
+
+@pytest.mark.skipif(not _native_nllb_available("cpu"), reason=_NATIVE_NLLB_SKIP)
+def test_nllb_verified_boundary_loads_native_model_in_subprocess_cpu() -> None:
+    _assert_native_nllb_boundary("cpu")
+
+
+@pytest.mark.skipif(not _native_nllb_available("cuda"), reason=_NATIVE_NLLB_SKIP)
+def test_nllb_verified_boundary_loads_native_model_in_subprocess_cuda() -> None:
+    _assert_native_nllb_boundary("cuda")
 
 
 @pytest.mark.parametrize(
@@ -351,14 +402,16 @@ def test_nllb_factory_receives_offline_local_runtime_configuration(
         calls.append((path, kwargs))
         return FakeCTranslate2()
 
-    def tokenizer_factory(path: str) -> FakeSentencePiece:
-        calls.append((path, {}))
+    def tokenizer_factory(payload: bytes) -> FakeSentencePiece:
+        calls.append((payload, {}))
         return FakeSentencePiece()
 
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     translator = NllbTranslator.load(
-        tmp_path,
+        model_source(
+            tmp_path, {"model.bin": b"model", "sentencepiece.bpe.model": b"sp"}
+        ),
         device=device,
         translator_factory=translator_factory,
         tokenizer_factory=tokenizer_factory,
@@ -367,17 +420,24 @@ def test_nllb_factory_receives_offline_local_runtime_configuration(
     assert isinstance(translator, NllbTranslator)
     assert calls == [
         (
-            str(tmp_path),
+            str(translator.model_path),
             {
                 "device": device,
                 "compute_type": compute_type,
                 "inter_threads": 1,
+                "files": calls[0][1]["files"],
             },
         ),
-        (str(tmp_path / "sentencepiece.bpe.model"), {}),
+        (b"sp", {}),
     ]
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+    assert str(translator.model_path).startswith("/proc/self/fd/")
+    assert calls[0][1]["files"] == {
+        "model.bin": b"model",
+        "sentencepiece.bpe.model": b"sp",
+    }
+    translator.close()
 
 
 @pytest.mark.parametrize("missing_module", ["ctranslate2", "sentencepiece"])
@@ -411,7 +471,9 @@ def test_nllb_load_sanitizes_missing_dependency_traceback(
 
     with pytest.raises(LocalTranslationError, match="could not be loaded") as raised:
         NllbTranslator.load(
-            tmp_path,
+            model_source(
+                tmp_path, {"model.bin": b"model", "sentencepiece.bpe.model": b"sp"}
+            ),
             device="cpu",
             translator_factory=translator_factory,
             tokenizer_factory=tokenizer_factory,

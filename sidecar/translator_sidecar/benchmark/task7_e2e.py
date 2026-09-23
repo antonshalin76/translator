@@ -3,24 +3,29 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict, deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
+import shlex
 import signal
 import subprocess
 import threading
 import time
+import uuid
+from collections import defaultdict, deque
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from dataclasses import dataclass
+from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import psutil
 
+from translator_sidecar.benchmark.task6 import load_quality_corpus
 from translator_sidecar.benchmark.task7 import (
     BenchmarkClassification,
     BenchmarkConfig,
@@ -33,7 +38,7 @@ from translator_sidecar.benchmark.task7 import (
     RunContext,
     run_task7_benchmark,
 )
-from translator_sidecar.benchmark.task6 import load_quality_corpus
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.local.model_manifest import load_manifest
 from translator_sidecar.local.tts import PiperTts, PiperVoiceRegistry
 from translator_sidecar.provider_contract import (
@@ -43,7 +48,6 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
-
 
 _BRIDGE_SCHEMA = "translator.task7-bridge.v1"
 _REPORT_SCHEMA = "translator.task7-e2e.v1"
@@ -676,14 +680,17 @@ class TemporaryInputSink:
     ) -> None:
         self._runner = runner
         self.module_id: int | None = None
+        self._owner = uuid.uuid4().hex
+        self._load_pending = False
 
     @property
     def monitor_source(self) -> str:
         return f"{_TEMP_INPUT_SINK}.monitor"
 
     def start(self) -> None:
-        if self.module_id is not None:
+        if self._load_pending:
             raise Task7E2EError("temporary input sink is already active")
+        self._load_pending = True
         result = self._runner(
             [
                 "pactl",
@@ -694,8 +701,9 @@ class TemporaryInputSink:
                 "channels=1",
                 "channel_map=mono",
                 (
-                    "sink_properties=device.description=Translator_Task7_Input"
+                    "sink_properties='device.description=Translator_Task7_Input"
                     " translator.task7_e2e=true"
+                    f" translator.task7_owner={self._owner}'"
                 ),
             ],
             check=True,
@@ -709,17 +717,93 @@ class TemporaryInputSink:
             raise Task7E2EError("temporary sink module id is invalid") from error
 
     def stop(self) -> None:
-        if self.module_id is None:
+        if not self._load_pending:
             return
-        module_id = self.module_id
+        deadline = time.monotonic() + 8
+        result = self._cleanup_command(["pactl", "list", "short", "modules"], deadline)
+        module_id = self._owned_module_id(result.stdout)
+        if time.monotonic() >= deadline:
+            raise Task7E2EError("temporary sink cleanup deadline expired")
+        if module_id is not None:
+            self.module_id = module_id
+            self._cleanup_command(["pactl", "unload-module", str(module_id)], deadline)
         self.module_id = None
-        self._runner(
-            ["pactl", "unload-module", str(module_id)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
+        self._load_pending = False
+
+    def _cleanup_command(self, command: list[str], deadline: float) -> Any:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Task7E2EError("temporary sink cleanup deadline expired")
+        try:
+            result = self._runner(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=min(3, remaining),
+            )
+        except UnicodeDecodeError as error:
+            raise Task7E2EError("temporary sink cleanup output is invalid") from error
+        if time.monotonic() >= deadline:
+            raise Task7E2EError("temporary sink cleanup deadline expired")
+        return result
+
+    def _owned_module_id(self, payload: str) -> int | None:
+        try:
+            if payload and not payload.endswith("\t\n"):
+                raise ValueError
+            identities: set[int] = set()
+            owned = []
+            for record in payload.split("\t\n")[:-1]:
+                index_text, name, argument = record.split("\t", 2)
+                index = int(index_text)
+                if (
+                    index_text != str(index)
+                    or not 0 <= index < 2**32 - 1
+                    or index in identities
+                    or not name
+                    or "\n" in name
+                    or "\r" in name
+                ):
+                    raise ValueError
+                identities.add(index)
+                if f"translator.task7_owner={self._owner}" not in argument:
+                    continue
+                if "\n" in argument or "\r" in argument:
+                    raise ValueError
+                pairs = [token.split("=", 1) for token in shlex.split(argument)]
+                parameters = dict(pairs)
+                properties = [
+                    token.split("=", 1)
+                    for token in shlex.split(parameters.get("sink_properties", ""))
+                ]
+                properties_map = dict(properties)
+                if len(parameters) != len(pairs) or len(properties_map) != len(
+                    properties
+                ):
+                    raise ValueError
+                if properties_map.get("translator.task7_owner") != self._owner:
+                    raise ValueError
+                expected = {
+                    "sink_name": _TEMP_INPUT_SINK,
+                    "rate": "16000",
+                    "channels": "1",
+                    "channel_map": "mono",
+                }
+                if (
+                    name != "module-null-sink"
+                    or any(
+                        parameters.get(key) != value for key, value in expected.items()
+                    )
+                    or properties_map.get("translator.task7_e2e") != "true"
+                ):
+                    raise ValueError
+                owned.append(index)
+            if len(owned) > 1:
+                raise ValueError
+            return owned[0] if owned else None
+        except (KeyError, TypeError, ValueError) as error:
+            raise Task7E2EError("temporary sink ownership is uncertain") from error
 
 
 class BridgeProcess:
@@ -1094,64 +1178,61 @@ def build_local_fixtures(
         raise ValueError("measured fixture pool must be positive")
     manifest = load_manifest(manifest_path)
     corpus = load_quality_corpus(corpus_path)
-    voice_paths = {}
-    for language, model_id in _VOICE_IDS.items():
-        model = manifest.models[model_id]
-        for model_file in model.files:
-            manifest.resolve_runtime_file(model.id, model_file.path)
-        onnx = next(
-            model.cache_path / model_file.path
-            for model_file in model.files
-            if model_file.path.endswith(".onnx")
-        )
-        voice_paths[(language, VoiceGender.MALE)] = onnx
-    tts = PiperTts(PiperVoiceRegistry(voice_paths))
-    fixture_sets: dict[BenchmarkDirection, list[AudioFixture]] = {
-        direction: [] for direction in BenchmarkDirection
+    voice_paths = {
+        (language, VoiceGender.MALE): VerifiedModelSource(manifest, model_id)
+        for language, model_id in _VOICE_IDS.items()
     }
-    identities: list[FixtureIdentity] = []
-    source_rows = [
-        *((f"warmup-{index:03d}", value) for index, value in enumerate(corpus.warmups)),
-        *(
-            (f"measured-{index:03d}", value)
-            for index, value in enumerate(corpus.cases[:measured_pool_size])
-        ),
-    ]
-    for row_id, row in source_rows:
-        for direction, language, text in (
-            (BenchmarkDirection.RU_TO_EN, Language.RU, row.ru),
-            (BenchmarkDirection.EN_TO_RU, Language.EN, row.en),
-        ):
-            audio = bytearray(
-                b"".join(
-                    tts.synthesize_frames(
-                        text,
-                        target_language=language,
-                        voice_profile=VoiceProfile(
-                            language=language,
-                            gender=VoiceGender.MALE,
-                            engine=VoiceEngine.PIPER,
-                        ),
-                        mode=TranslationMode.QUALITY_FIRST,
-                        output_sample_rate_hz=16_000,
-                        output_channels=1,
-                        frame_duration_ms=100,
+    with closing(PiperVoiceRegistry(voice_paths)) as registry:
+        tts = PiperTts(registry)
+        fixture_sets: dict[BenchmarkDirection, list[AudioFixture]] = {
+            direction: [] for direction in BenchmarkDirection
+        }
+        identities: list[FixtureIdentity] = []
+        source_rows = [
+            *(
+                (f"warmup-{index:03d}", value)
+                for index, value in enumerate(corpus.warmups)
+            ),
+            *(
+                (f"measured-{index:03d}", value)
+                for index, value in enumerate(corpus.cases[:measured_pool_size])
+            ),
+        ]
+        for row_id, row in source_rows:
+            for direction, language, text in (
+                (BenchmarkDirection.RU_TO_EN, Language.RU, row.ru),
+                (BenchmarkDirection.EN_TO_RU, Language.EN, row.en),
+            ):
+                audio = bytearray(
+                    b"".join(
+                        tts.synthesize_frames(
+                            text,
+                            target_language=language,
+                            voice_profile=VoiceProfile(
+                                language=language,
+                                gender=VoiceGender.MALE,
+                                engine=VoiceEngine.PIPER,
+                            ),
+                            mode=TranslationMode.QUALITY_FIRST,
+                            output_sample_rate_hz=16_000,
+                            output_channels=1,
+                            frame_duration_ms=100,
+                        )
                     )
                 )
-            )
-            audio.extend(b"\0" * _TRAILING_SILENCE_BYTES)
-            identity = FixtureIdentity(
-                fixture_id=f"{row_id}-{direction.value}",
-                direction=direction,
-                pcm_sha256=hashlib.sha256(audio).hexdigest(),
-                duration_ms=len(audio) * 1_000 // (16_000 * 2),
-            )
-            fixture_sets[direction].append(AudioFixture(identity, audio))
-            identities.append(identity)
-    return (
-        {direction: tuple(values) for direction, values in fixture_sets.items()},
-        tuple(identities),
-    )
+                audio.extend(b"\0" * _TRAILING_SILENCE_BYTES)
+                identity = FixtureIdentity(
+                    fixture_id=f"{row_id}-{direction.value}",
+                    direction=direction,
+                    pcm_sha256=hashlib.sha256(audio).hexdigest(),
+                    duration_ms=len(audio) * 1_000 // (16_000 * 2),
+                )
+                fixture_sets[direction].append(AudioFixture(identity, audio))
+                identities.append(identity)
+        return (
+            {direction: tuple(values) for direction, values in fixture_sets.items()},
+            tuple(identities),
+        )
 
 
 def pulse_graph_summary(
@@ -1276,7 +1357,7 @@ def resource_payload(
         raise Task7E2EError("continuous resource evidence is empty")
     if any(
         current.monotonic_ns < previous.monotonic_ns
-        for previous, current in zip(samples, samples[1:], strict=False)
+        for previous, current in pairwise(samples)
     ):
         raise Task7E2EError("resource clock moved backwards")
     duration_seconds = (
@@ -1678,50 +1759,52 @@ def run_live_e2e(arguments: argparse.Namespace) -> dict[str, Any]:
         or arguments.utterance_timeout_seconds <= 0
     ):
         raise Task7E2EError("benchmark cardinality or timeout is invalid")
+    temporary_sink = TemporaryInputSink()
     fixtures, fixture_identities = build_local_fixtures(
         arguments.manifest,
         arguments.corpus,
         measured_pool_size=arguments.fixture_pool_size,
     )
-    quality_evidence = load_task6_quality_evidence(arguments.quality_evidence)
-    graph_before = pulse_graph_summary()
-    temporary_sink = TemporaryInputSink()
     bridge: BridgeProcess | None = None
     monitors: dict[BenchmarkDirection, PulseOnsetMonitor] = {}
     collector: ContinuousResourceCollector | None = None
     resource_samples: tuple[ResourceSample, ...] = ()
     benchmark_payload: dict[str, Any] | None = None
     startup_ready_ms = 0.0
-    runtime_parent = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
-    socket_path = (
-        runtime_parent / "translator" / f"task7-e2e-sidecar-{os.getpid()}.sock"
-    )
-    profile = BenchmarkProfile(arguments.profile)
-    pair_plan = profile_pair_plan(
-        profile,
-        measured_count=arguments.measured_count,
-    )
-    profile_spec = ProfileSpec(
-        profile,
-        duration_seconds=(
-            1_800.0 if profile is BenchmarkProfile.SOAK_30_MINUTES else None
-        ),
-    )
-    config = (
-        None
-        if arguments.smoke
-        else BenchmarkConfig(
-            profile=profile_spec,
-            measured_count_per_direction=arguments.measured_count,
-            resource_limits=_PRODUCTION_RESOURCE_LIMITS,
-        )
-    )
-    total_pairs = arguments.smoke_pairs if config is None else pair_plan.total_pairs
     smoke_observation_pairs: (
         tuple[dict[BenchmarkDirection, BoundaryObservation], ...] | None
     ) = None
     cold_probe_observations: dict[BenchmarkDirection, BoundaryObservation] | None = None
     try:
+        quality_evidence = load_task6_quality_evidence(arguments.quality_evidence)
+        graph_before = pulse_graph_summary()
+        runtime_parent = Path(
+            os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        )
+        socket_path = (
+            runtime_parent / "translator" / f"task7-e2e-sidecar-{os.getpid()}.sock"
+        )
+        profile = BenchmarkProfile(arguments.profile)
+        pair_plan = profile_pair_plan(
+            profile,
+            measured_count=arguments.measured_count,
+        )
+        profile_spec = ProfileSpec(
+            profile,
+            duration_seconds=(
+                1_800.0 if profile is BenchmarkProfile.SOAK_30_MINUTES else None
+            ),
+        )
+        config = (
+            None
+            if arguments.smoke
+            else BenchmarkConfig(
+                profile=profile_spec,
+                measured_count_per_direction=arguments.measured_count,
+                resource_limits=_PRODUCTION_RESOURCE_LIMITS,
+            )
+        )
+        total_pairs = arguments.smoke_pairs if config is None else pair_plan.total_pairs
         temporary_sink.start()
         bridge_command = (
             str(arguments.bridge.resolve()),
@@ -1791,6 +1874,9 @@ def run_live_e2e(arguments: argparse.Namespace) -> dict[str, Any]:
             ) from error
     finally:
         cleanup_errors: list[BaseException] = []
+        for values in fixtures.values():
+            for fixture in values:
+                fixture.zeroize()
         if collector is not None:
             try:
                 resource_samples = collector.stop()
@@ -1805,15 +1891,19 @@ def run_live_e2e(arguments: argparse.Namespace) -> dict[str, Any]:
             try:
                 bridge.stop()
             except BaseException as error:
-                bridge.kill()
                 cleanup_errors.append(error)
-        try:
-            temporary_sink.stop()
-        except BaseException as error:
-            cleanup_errors.append(error)
-        for values in fixtures.values():
-            for fixture in values:
-                fixture.zeroize()
+                try:
+                    bridge.kill()
+                except BaseException as kill_error:
+                    cleanup_errors.append(kill_error)
+        while True:
+            try:
+                temporary_sink.stop()
+                break
+            except (Task7E2EError, OSError, subprocess.SubprocessError) as error:
+                if not cleanup_errors:
+                    cleanup_errors.append(error)
+                time.sleep(1)
         if cleanup_errors:
             raise Task7E2EError("E2E cleanup failed") from cleanup_errors[0]
     graph_after = pulse_graph_summary()

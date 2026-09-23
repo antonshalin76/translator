@@ -25,7 +25,7 @@ pub enum AudioMixTarget {
 }
 
 impl AudioMixTarget {
-    const fn percent_from(self, volumes: AudioMixVolumes) -> u8 {
+    pub const fn percent_from(self, volumes: AudioMixVolumes) -> u8 {
         match self {
             Self::MicrophoneOriginal => volumes.microphone_original_percent,
             Self::MicrophoneTranslation => volumes.microphone_translation_percent,
@@ -35,15 +35,47 @@ impl AudioMixTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AudioMixApplyReport {
-    pub updated_targets: Vec<AudioMixTarget>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MixPercent(u8);
+
+impl TryFrom<u8> for MixPercent {
+    type Error = AudioMixError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if value > 100 {
+            return Err(AudioMixError::new(AudioMixErrorCode::InvalidVolume));
+        }
+        Ok(Self(value))
+    }
+}
+
+#[derive(Debug)]
+pub struct PulseMixPlan(Vec<PulseMixEntry>);
+
+impl PulseMixPlan {
+    pub fn entries(&self) -> &[PulseMixEntry] {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+pub struct PulseMixEntry {
+    index: u32,
+    target: AudioMixTarget,
+    prior: Vec<u32>,
+}
+
+impl PulseMixEntry {
+    pub const fn target(&self) -> AudioMixTarget {
+        self.target
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioMixErrorCode {
     DiscoveryFailed,
     VolumeApplyFailed,
+    InvalidVolume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +98,7 @@ impl fmt::Display for AudioMixError {
         formatter.write_str(match self.code {
             AudioMixErrorCode::DiscoveryFailed => "Audio mix stream discovery failed",
             AudioMixErrorCode::VolumeApplyFailed => "Audio mix stream volume update failed",
+            AudioMixErrorCode::InvalidVolume => "Audio mix volume is invalid",
         })
     }
 }
@@ -84,31 +117,67 @@ where
         Self { runner }
     }
 
-    pub fn apply(&self, volumes: AudioMixVolumes) -> Result<AudioMixApplyReport, AudioMixError> {
+    pub fn discover(&self) -> Result<PulseMixPlan, AudioMixError> {
         let sink_inputs: Vec<RawSinkInput> =
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
         let source_outputs: Vec<RawSourceOutput> =
             self.run_json(&["--format=json", "list", "source-outputs"])?;
         let remote_loopback_modules = remote_loopback_modules(&source_outputs);
-        let mut updated_targets = Vec::new();
+        let mut entries = Vec::new();
 
         for input in sink_inputs {
             let Some(target) = classify_sink_input(&input, &remote_loopback_modules) else {
                 continue;
             };
-            self.set_sink_input_volume(input.index, target.percent_from(volumes))?;
-            updated_targets.push(target);
+            let channels: Vec<_> = input.channel_map.split(',').collect();
+            let unique: HashSet<_> = channels.iter().copied().collect();
+            if channels.is_empty()
+                || channels.iter().any(|channel| channel.is_empty())
+                || unique.len() != channels.len()
+                || channels.len() != input.volume.len()
+            {
+                return Err(AudioMixError::new(AudioMixErrorCode::DiscoveryFailed));
+            }
+            let prior = channels
+                .into_iter()
+                .map(|channel| {
+                    input
+                        .volume
+                        .get(channel)
+                        .filter(|volume| volume.value <= i32::MAX as u32)
+                        .map(|volume| volume.value)
+                        .ok_or_else(|| AudioMixError::new(AudioMixErrorCode::DiscoveryFailed))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.push(PulseMixEntry {
+                index: input.index,
+                target,
+                prior,
+            });
         }
 
-        Ok(AudioMixApplyReport { updated_targets })
+        Ok(PulseMixPlan(entries))
     }
 
-    fn set_sink_input_volume(&self, index: u32, percent: u8) -> Result<(), AudioMixError> {
-        let args = [
-            "set-sink-input-volume".to_owned(),
-            index.to_string(),
-            format!("{percent}%"),
-        ];
+    pub fn set_percent(
+        &self,
+        entry: &PulseMixEntry,
+        percent: MixPercent,
+    ) -> Result<(), AudioMixError> {
+        self.set_volume(entry.index, [format!("{}%", percent.0)])
+    }
+
+    pub fn restore_raw(&self, entry: &PulseMixEntry) -> Result<(), AudioMixError> {
+        self.set_volume(entry.index, entry.prior.iter().map(u32::to_string))
+    }
+
+    fn set_volume(
+        &self,
+        index: u32,
+        values: impl IntoIterator<Item = String>,
+    ) -> Result<(), AudioMixError> {
+        let mut args = vec!["set-sink-input-volume".to_owned(), index.to_string()];
+        args.extend(values);
         let result = self.runner.run("pactl", &args).map_err(map_apply_error)?;
         if result.is_success() {
             Ok(())
@@ -136,7 +205,10 @@ where
 
 fn map_apply_error(error: CommandRunError) -> AudioMixError {
     match error {
-        CommandRunError::NotFound | CommandRunError::SpawnFailed | CommandRunError::TimedOut => {
+        CommandRunError::NotFound
+        | CommandRunError::SpawnFailed
+        | CommandRunError::TimedOut
+        | CommandRunError::DeadlineExpired => {
             AudioMixError::new(AudioMixErrorCode::VolumeApplyFailed)
         }
     }
@@ -188,7 +260,16 @@ fn property<'a>(properties: &'a HashMap<String, String>, key: &str) -> Option<&'
 struct RawSinkInput {
     index: u32,
     #[serde(default)]
+    channel_map: String,
+    #[serde(default)]
+    volume: HashMap<String, RawVolume>,
+    #[serde(default)]
     properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawVolume {
+    value: u32,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
-from pathlib import Path
-import re
 import subprocess
-from threading import Barrier, Lock, current_thread
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Barrier, Event, Lock, Thread, current_thread
+from types import SimpleNamespace
 from uuid import UUID
 
-from jiwer import wer
 import pytest
+from jiwer import wer
 from sacrebleu.metrics import CHRF
 
+from translator_sidecar.benchmark import task6_live
 from translator_sidecar.benchmark.task6 import (
     AsrBenchmarkConfig,
     CorpusError,
     DuplexBenchmarkConfig,
+    _resource_peaks,
     benchmark_asr_candidate,
     benchmark_simultaneous_duplex,
     evaluate_quality,
@@ -24,18 +31,611 @@ from translator_sidecar.benchmark.task6 import (
     run_quality_benchmark,
     within_vram_budget,
 )
-from translator_sidecar.benchmark import task6_live
 from translator_sidecar.benchmark.task6_live import (
     _build_payload,
     _run_voice_smokes,
 )
+from translator_sidecar.benchmark.task7_e2e import load_task6_quality_evidence
 from translator_sidecar.provider_contract import (
     Language,
     TranslationMode,
 )
 
-
 CORPUS_PATH = Path(__file__).parent / "quality_corpus" / "task6-v4.json"
+
+
+@pytest.mark.parametrize("phase", ["provider", "loop", "thread", "start", "started"])
+def test_duplex_transfer_and_bridge_constructor_failure_keep_exact_owner(
+    monkeypatch, phase
+):
+    closes, fatal_calls, loops, threads = [], [], [], []
+    error = RuntimeError("synthetic constructor failure")
+    real_loop, real_thread = asyncio.new_event_loop, Thread
+
+    class Model:
+        def close(self):
+            closes.append(self)
+
+    models = [Model() for _ in range(3)]
+
+    def fatal(failure):
+        fatal_calls.append((failure, list(closes)))
+        raise _WorkerFatal()
+
+    def provider(**kwargs):
+        assert (kwargs["asr"], kwargs["translator"], kwargs["tts"]) == tuple(models)
+        if phase == "provider":
+            raise error
+        return object()
+
+    def loop():
+        if phase == "loop":
+            raise error
+        created = real_loop()
+        loops.append(created)
+        return created
+
+    def thread(**kwargs):
+        if phase == "thread":
+            raise error
+        created = real_thread(**kwargs)
+        threads.append(created)
+        start = created.start
+
+        def observed_start():
+            if phase == "start":
+                raise error
+            start()
+            raise error
+
+        created.start = observed_start
+        return created
+
+    monkeypatch.setattr(task6_live, "LocalProvider", provider)
+    monkeypatch.setattr(task6_live, "InferenceScheduler", lambda: object())
+    monkeypatch.setattr(task6_live.asyncio, "new_event_loop", loop)
+    monkeypatch.setattr(task6_live, "Thread", thread)
+    monkeypatch.setattr(
+        task6_live,
+        "benchmark_simultaneous_duplex",
+        lambda *_args, **kwargs: pytest.fail("benchmark after constructor failure"),
+    )
+    try:
+        with pytest.raises(
+            RuntimeError if phase == "provider" else _WorkerFatal
+        ) as caught:
+            with ExitStack() as resources:
+                for model in models:
+                    resources.callback(model.close)
+                task6_live._benchmark_provider_duplex(
+                    asr=models[0],
+                    translator=models[1],
+                    tts=models[2],
+                    model_id=task6_live._LARGE_ID,
+                    source_pcm={},
+                    device="cpu",
+                    resources=resources,
+                    fatal_cleanup=fatal,
+                )
+        if phase == "provider":
+            assert caught.value is error
+            assert closes == list(reversed(models)) and not fatal_calls
+        else:
+            assert fatal_calls == [(error, [])]
+            assert closes == []
+            if phase == "started":
+                assert threads[0].is_alive() and not loops[0].is_closed()
+    finally:
+        for item in loops:
+            if not item.is_closed():
+                item.call_soon_threadsafe(item.stop)
+        for item in threads:
+            if item.ident is not None:
+                item.join(1)
+                assert not item.is_alive()
+        for item in loops:
+            if not item.is_closed():
+                item.close()
+
+
+def test_task6_public_run_only_delegates_empty_request(monkeypatch, tmp_path):
+    from translator_sidecar.benchmark import process_run
+
+    expected, calls = {"synthetic": "parent-return"}, []
+    limits = process_run.RunLimits(model_run_seconds=17, terminate_grace_seconds=2)
+
+    def run(kind, request, output, *, limits):
+        calls.append((kind, request, output, limits))
+        return expected
+
+    monkeypatch.setattr(process_run, "run_benchmark", run)
+    monkeypatch.setattr(
+        task6_live,
+        "_run_owned",
+        lambda **kwargs: pytest.fail("parent constructed benchmark models"),
+    )
+    output = tmp_path / "existing.json"
+    output.write_text("previous")
+    assert task6_live.run(output, limits=limits) is expected
+    assert calls == [("task6", {}, output, limits)]
+    assert output.read_text() == "previous"
+
+
+class _WorkerFatal(BaseException):
+    pass
+
+
+def test_bridge_close_cannot_overtake_entered_submission(monkeypatch):
+    fixture = _BridgeFixture(monkeypatch, hold_submit=True)
+    direction_errors, close_errors = [], []
+
+    def direction():
+        try:
+            fixture.bridge.run_direction(Language.RU, UUID(int=10))
+        except BaseException as error:
+            direction_errors.append(error)
+
+    def close():
+        try:
+            fixture.bridge.close()
+        except BaseException as error:
+            close_errors.append(error)
+
+    submitter, closer = (
+        Thread(target=direction),
+        Thread(target=close, name="fixture-close"),
+    )
+    try:
+        submitter.start()
+        assert fixture.submit_entered.wait(1) and fixture.entered.wait(1)
+        closer.start()
+        attempted = fixture.close_lock_attempted.wait(1)
+        before_release = (
+            fixture.shutdown_entered.is_set(),
+            list(fixture.close_attempts),
+            fixture.submissions[0].done(),
+        )
+        fixture.submit_release.set()
+        submitter.join(1)
+        fixture.release.set()
+        closer.join(1)
+        assert attempted and before_release == (False, [], False)
+        assert not submitter.is_alive() and not closer.is_alive()
+        assert len(direction_errors) == 1 and isinstance(
+            direction_errors[0], TimeoutError
+        )
+        assert not close_errors and not fixture.fatal_calls
+        assert fixture.finalized.is_set() and fixture.submissions[0].done()
+        assert fixture.close_attempts == [True]
+    finally:
+        fixture.submit_release.set()
+        fixture.release.set()
+        for thread in (submitter, closer):
+            if thread.ident is not None:
+                thread.join(1)
+        fixture.repair()
+
+
+def test_bridge_joins_submissions_with_remaining_original_deadline(monkeypatch):
+    fixture = _BridgeFixture(monkeypatch, elapsed_after_shutdown=29)
+    try:
+        with pytest.raises(TimeoutError, match="direction wait expired"):
+            fixture.bridge.run_direction(Language.RU, UUID(int=9))
+        fixture.bridge.close()
+        assert fixture.waits == [("direction", 120), ("shutdown", 30), ("direction", 1)]
+        assert fixture.join_waits == [1]
+        assert fixture.finalized.is_set()
+        assert not fixture.bridge._thread.is_alive() and not fixture.fatal_calls
+        assert fixture.close_attempts == [True]
+    finally:
+        fixture.repair()
+
+
+def test_bridge_thread_join_timeout_is_fatal_before_loop_close(monkeypatch):
+    fixture = _BridgeFixture(
+        monkeypatch, elapsed_after_shutdown=29, hold_thread_exit=True
+    )
+    try:
+        with pytest.raises(_WorkerFatal):
+            fixture.bridge.close()
+        before_release = (
+            fixture.thread_exit_entered.is_set(),
+            fixture.bridge._thread.is_alive(),
+            fixture.bridge._loop.is_running(),
+            list(fixture.close_attempts),
+        )
+        assert before_release == (True, True, False, [])
+        assert fixture.join_waits == [1]
+        assert len(fixture.fatal_calls) == 1
+        assert isinstance(fixture.fatal_calls[0], (RuntimeError, TimeoutError))
+        assert fixture.waits == [("shutdown", 30)]
+    finally:
+        fixture.repair()
+
+
+class _BridgeFixture:
+    """Real loop, thread and submitted coroutine; repair is never the oracle."""
+
+    def __init__(
+        self,
+        monkeypatch,
+        *,
+        shutdown_fails=False,
+        elapsed_after_shutdown=None,
+        hold_submit=False,
+        hold_thread_exit=False,
+    ):
+        self.entered, self.release, self.finalized = Event(), Event(), Event()
+        self.shutdown_entered = Event()
+        self.failure = RuntimeError("synthetic shutdown failure")
+        self.fatal_calls, self.close_attempts, self.submissions = [], [], []
+        self.waits, self.elapsed = [], 0
+        self.join_waits = []
+        self.thread_exit_entered, self.thread_exit_release = Event(), Event()
+        self.submit_entered, self.submit_release, self.close_lock_attempted = (
+            Event(),
+            Event(),
+            Event(),
+        )
+        if hold_submit:
+
+            class ObservedLock:
+                def __init__(lock):
+                    lock.actual = Lock()
+
+                def __enter__(lock):
+                    if current_thread().name == "fixture-close":
+                        self.close_lock_attempted.set()
+                    return lock.actual.__enter__()
+
+                def __exit__(lock, *args):
+                    return lock.actual.__exit__(*args)
+
+            monkeypatch.setattr(task6_live, "Lock", ObservedLock, raising=False)
+        if elapsed_after_shutdown is not None:
+            monkeypatch.setattr(
+                task6_live,
+                "time",
+                SimpleNamespace(
+                    monotonic=lambda: self.elapsed,
+                    monotonic_ns=lambda: self.elapsed * 1_000_000_000,
+                ),
+            )
+        fixture = self
+
+        class Provider:
+            async def shutdown(self):
+                fixture.shutdown_entered.set()
+                if shutdown_fails:
+                    raise fixture.failure
+
+        if hold_thread_exit:
+            original_run_loop = task6_live._ProviderDuplexBridge._run_loop
+
+            def run_loop(bridge):
+                original_run_loop(bridge)
+                self.thread_exit_entered.set()
+                assert self.thread_exit_release.wait(2)
+
+            monkeypatch.setattr(task6_live._ProviderDuplexBridge, "_run_loop", run_loop)
+
+        self.bridge = task6_live._ProviderDuplexBridge(
+            Provider(), {}, fatal_cleanup=self.fatal
+        )
+        self.original_close = self.bridge._loop.close
+        self.original_join = self.bridge._thread.join
+
+        def join(timeout=None):
+            self.join_waits.append(timeout)
+            if hold_thread_exit:
+                assert self.thread_exit_entered.wait(1)
+                self.original_join(timeout=0.01)
+                assert self.bridge._thread.is_alive()
+                self.elapsed = 30
+            else:
+                self.original_join(timeout=timeout)
+
+        monkeypatch.setattr(self.bridge._thread, "join", join)
+        monkeypatch.setattr(
+            self.bridge._loop, "close", lambda: self.close_attempts.append(True)
+        )
+
+        async def session(*_args):
+            self.entered.set()
+            try:
+                while not self.release.is_set():
+                    await asyncio.sleep(0.001)
+                return 7.0
+            finally:
+                self.finalized.set()
+
+        monkeypatch.setattr(self.bridge, "_run_session", session)
+        original_submit = asyncio.run_coroutine_threadsafe
+
+        def submit(coroutine, loop):
+            future = original_submit(coroutine, loop)
+            self.submissions.append(future)
+            if coroutine.cr_code is session.__code__:
+                original_result = future.result
+                first = True
+
+                def result(timeout=None):
+                    nonlocal first
+                    self.waits.append(("direction", timeout))
+                    if first:
+                        first = False
+                        assert timeout == 120
+                        assert self.entered.wait(1)
+                        raise TimeoutError("synthetic direction wait expired")
+                    if elapsed_after_shutdown is not None:
+                        self.release.set()
+                    return original_result(timeout=timeout)
+
+                future.result = result
+                future.cancel = lambda: pytest.fail("private submission cancelled")
+                if hold_submit:
+                    self.submit_entered.set()
+                    assert self.submit_release.wait(2)
+            elif elapsed_after_shutdown is not None:
+                original_result = future.result
+
+                def result(timeout=None):
+                    self.waits.append(("shutdown", timeout))
+                    value = original_result(timeout=timeout)
+                    self.elapsed = elapsed_after_shutdown
+                    return value
+
+                future.result = result
+            return future
+
+        monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", submit)
+
+    def fatal(self, error):
+        self.fatal_calls.append(error)
+        raise _WorkerFatal()
+
+    def repair(self):
+        self.submit_release.set()
+        self.release.set()
+        self.thread_exit_release.set()
+        loop, thread = self.bridge._loop, self.bridge._thread
+        if thread.is_alive():
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(asyncio.sleep(0.02), loop).result(1)
+                loop.call_soon_threadsafe(loop.stop)
+            self.original_join(1)
+        assert not thread.is_alive()
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        self.original_close()
+
+
+def test_bridge_failed_shutdown_keeps_loop_for_worker_fatal(monkeypatch):
+    fixture = _BridgeFixture(monkeypatch, shutdown_fails=True)
+    try:
+        try:
+            fixture.bridge.close()
+        except BaseException as error:
+            outcome = error
+        else:
+            outcome = None
+        before_repair = (
+            list(fixture.close_attempts),
+            fixture.bridge._thread.is_alive(),
+            fixture.bridge._loop.is_closed(),
+        )
+        assert fixture.shutdown_entered.is_set()
+        assert before_repair == ([], True, False)
+        assert isinstance(outcome, _WorkerFatal)
+        assert fixture.fatal_calls == [fixture.failure]
+    finally:
+        fixture.repair()
+
+
+def test_bridge_direction_timeout_retains_finalizer_before_loop_close(monkeypatch):
+    fixture = _BridgeFixture(monkeypatch)
+    finished, errors = Event(), []
+
+    def close():
+        try:
+            fixture.bridge.close()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    closer = Thread(target=close)
+    try:
+        with pytest.raises(TimeoutError, match="direction wait expired"):
+            fixture.bridge.run_direction(Language.RU, UUID(int=7))
+        direction = fixture.submissions[0]
+        assert not direction.done() and fixture.entered.is_set()
+        closer.start()
+        assert fixture.shutdown_entered.wait(1)
+        admitted = len(fixture.submissions)
+        with pytest.raises(RuntimeError):
+            fixture.bridge.run_direction(Language.EN, UUID(int=8))
+        assert len(fixture.submissions) == admitted
+        finished.wait(0.05)
+        before_release = (
+            finished.is_set(),
+            list(fixture.close_attempts),
+            fixture.bridge._thread.is_alive(),
+            fixture.finalized.is_set(),
+            direction.done(),
+        )
+        fixture.release.set()
+        closer.join(1)
+        assert not closer.is_alive()
+        assert before_release == (False, [], True, False, False)
+        assert fixture.finalized.is_set() and direction.done()
+        assert direction.result(1) == 7.0
+        assert not errors and not fixture.fatal_calls
+        assert fixture.close_attempts == [True]
+    finally:
+        fixture.release.set()
+        if closer.ident is not None:
+            closer.join(1)
+        fixture.repair()
+
+
+def _owned_run_fixture(tmp_path, monkeypatch, failure=None):
+    created = []
+    duplex_calls = []
+    published_before_cleanup = []
+    events, fatal_calls = [], []
+    terminal_error = RuntimeError("terminal provider failure")
+
+    def fatal(error):
+        fatal_calls.append(error)
+        raise _WorkerFatal()
+
+    models = {
+        model_id: SimpleNamespace(
+            id=model_id,
+            cache_path=tmp_path / model_id,
+            files=[SimpleNamespace(path="voice.onnx")],
+        )
+        for model_id in (
+            task6_live._SMALL_ID,
+            task6_live._LARGE_ID,
+            task6_live._MT_ID,
+            *task6_live._VOICE_IDS.values(),
+        )
+    }
+    manifest = SimpleNamespace(models=models, resolve_runtime_file=lambda *_args: None)
+
+    class Adapter:
+        actual_device = "cpu"
+        degraded = False
+
+        def __init__(self, *_args, selected_id=None, **kwargs):
+            self.closed = False
+            self.close_count = 0
+            self.resident_model_id = selected_id
+            created.append(self)
+            events.append(("create", selected_id, self))
+
+        def check(self):
+            assert not self.closed, "benchmark reused a closed model"
+
+        def close(self):
+            self.close_count += 1
+            if (tmp_path / "out.json").exists():
+                published_before_cleanup.append(self)
+            self.closed = True
+            self.resident_model_id = None
+
+        def release(self):
+            self.close()
+            return True
+
+    class Translator(Adapter):
+        loads = 0
+
+        @classmethod
+        def load(cls, *_args, **kwargs):
+            cls.loads += 1
+            if failure == "second-mt" and cls.loads == 2:
+                raise RuntimeError("second-mt")
+            return cls()
+
+    @dataclass
+    class Report:
+        model_id: str
+
+    def candidate(config, *, adapter_factory, **kwargs):
+        adapter_factory()
+        return Report(config.model_id)
+
+    def synthesize(tts, *_args):
+        tts.check()
+        return b"\0\0" * 160
+
+    def quality(*_args, translator, **kwargs):
+        translator.check()
+        if failure == "quality":
+            raise RuntimeError("quality")
+        return "quality-report"
+
+    def duplex(
+        *,
+        asr,
+        translator,
+        tts,
+        model_id,
+        resources,
+        fatal_cleanup,
+        on_complete=None,
+        **kwargs,
+    ):
+        resources.pop_all()
+        for adapter in (asr, translator, tts):
+            adapter.check()
+        duplex_calls.append((translator, tts))
+        try:
+            if failure == "duplex":
+                raise RuntimeError("duplex")
+            if on_complete is not None:
+                on_complete()
+            return Report(model_id)
+        finally:
+            if failure == "terminal":
+                fatal_cleanup(terminal_error)
+            for adapter in (asr, translator, tts):
+                adapter.close()
+            events.append(("terminal", model_id))
+
+    monkeypatch.setattr(task6_live, "load_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(task6_live, "_cuda_available", lambda: False)
+    monkeypatch.setattr(task6_live, "PiperVoiceRegistry", lambda *_args: object())
+    monkeypatch.setattr(task6_live, "PiperTts", Adapter)
+    monkeypatch.setattr(task6_live, "_run_voice_smokes", lambda *_args: [])
+    monkeypatch.setattr(task6_live, "_synthesize_pcm", synthesize)
+    monkeypatch.setattr(task6_live, "_asr_manager", Adapter)
+    monkeypatch.setattr(task6_live, "benchmark_asr_candidate", candidate)
+    monkeypatch.setattr(task6_live, "NllbTranslator", Translator)
+    monkeypatch.setattr(task6_live, "load_quality_corpus", lambda *_args: object())
+    monkeypatch.setattr(task6_live, "run_quality_benchmark", quality)
+    monkeypatch.setattr(task6_live, "_benchmark_provider_duplex", duplex)
+    monkeypatch.setattr(task6_live, "_resource_sample", lambda: (0, 0, 0, 0))
+    monkeypatch.setattr(
+        task6_live,
+        "_build_payload",
+        lambda **kwargs: {"normal_runtime": kwargs["normal_runtime"]},
+    )
+    return SimpleNamespace(
+        run=lambda: task6_live._run_owned(fatal_cleanup=fatal),
+        created=created,
+        duplex_calls=duplex_calls,
+        events=events,
+        published_before_cleanup=published_before_cleanup,
+        fatal_calls=fatal_calls,
+        terminal_error=terminal_error,
+    )
+
+
+@pytest.mark.parametrize("failure", [None, "quality", "second-mt", "duplex"])
+def test_live_run_owns_model_lifetimes_and_never_reuses_closed_adapters(
+    tmp_path, monkeypatch, failure
+):
+    fixture = _owned_run_fixture(tmp_path, monkeypatch, failure)
+    if failure is not None:
+        with pytest.raises(RuntimeError, match=failure):
+            fixture.run()
+    else:
+        payload = fixture.run()
+        assert payload["normal_runtime"]["resident_model_id"] == task6_live._SMALL_ID
+        assert len(fixture.duplex_calls) == 2
+        assert fixture.duplex_calls[0][0] is not fixture.duplex_calls[1][0]
+        assert fixture.duplex_calls[0][1] is not fixture.duplex_calls[1][1]
+    assert fixture.created and all(adapter.closed for adapter in fixture.created)
+    assert [adapter.close_count for adapter in fixture.created] == [1] * len(
+        fixture.created
+    )
+    assert not fixture.published_before_cleanup and not (tmp_path / "out.json").exists()
+    assert not fixture.fatal_calls
 
 
 def test_versioned_corpus_expands_to_ten_warmups_and_one_hundred_cases() -> None:
@@ -325,9 +925,7 @@ def test_critical_oracle_accepts_format_and_cross_script_equivalents() -> None:
             "There are twelve participants in the room."
         ),
         (Language.EN, "scheduled:13:15"): ("My meeting is scheduled for 1:15 p.m."),
-        (Language.RU, "do-not-mute:10:00"): (
-            "Не заглушай микрофон до 10:00."
-        ),
+        (Language.RU, "do-not-mute:10:00"): ("Не заглушай микрофон до 10:00."),
     }
     for (language, case_id), value in replacements.items():
         index = next(
@@ -794,10 +1392,7 @@ def test_duplex_resource_sampler_observes_peak_during_active_pair() -> None:
     def resource_sample() -> tuple[float, int, float, int]:
         with lock:
             is_active = active > 0
-        if (
-            current_thread().name == "translator-resource-sampler"
-            and is_active
-        ):
+        if current_thread().name == "translator-resource-sampler" and is_active:
             return (200.0, 200_000_000, 90.0, 4_000)
         return (1.0, 100_000_000, 1.0, 1_000)
 
@@ -874,127 +1469,124 @@ def test_live_report_persists_computed_acceptance_verdicts() -> None:
     assert serialized["quality"]["quality"]["passes_thresholds"] is False
     assert serialized["quality"]["ru_to_en"]["passes_drop_threshold"] is False
     assert serialized["quality"]["en_to_ru"]["passes_drop_threshold"] is True
-    assert serialized["duplex_candidates"][0]["model_id"] == (
-        "faster-whisper-small"
-    )
+    assert serialized["duplex_candidates"][0]["model_id"] == ("faster-whisper-small")
     assert serialized["duplex_candidates"][0]["vram_within_budget"] is True
-    assert serialized["duplex_candidates"][1]["model_id"] == (
-        "faster-whisper-large-v3"
-    )
+    assert serialized["duplex_candidates"][1]["model_id"] == ("faster-whisper-large-v3")
     assert serialized["duplex_candidates"][1]["vram_within_budget"] is False
 
 
-def test_committed_task6_evidence_is_complete_and_privacy_safe() -> None:
-    root = Path(__file__).parents[2]
-    corpus = load_quality_corpus(CORPUS_PATH)
-    results = json.loads(
-        (root / "docs/benchmarks/task6-results.json").read_text(encoding="utf-8")
-    )
-    review = json.loads(
-        (root / "docs/benchmarks/task6-critical-review.json").read_text(
-            encoding="utf-8"
-        )
-    )
+def test_task6_parser_publishes_only_hash_bound_synthetic_summary(
+    tmp_path: Path,
+) -> None:
+    private_marker = "synthetic-private-human-review-text"
+    payload = {
+        "schema_version": "translator.task6-benchmark.v2",
+        "quality": {
+            "quality": {
+                "corpus_id": "synthetic-task6-corpus",
+                "passes_thresholds": True,
+            },
+            "review_rows": [{"source_text": private_marker}],
+        },
+    }
+    path = tmp_path / "synthetic-task6-results.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert results["schema_version"] == "translator.task6-benchmark.v2"
-    assert review["schema_version"] == "translator.task6-critical-review.v2"
-    assert {
-        candidate["model_id"] for candidate in results["duplex_candidates"]
-    } == {"faster-whisper-small", "faster-whisper-large-v3"}
-    for candidate in results["duplex_candidates"]:
-        assert candidate["excluded_warmups"] == 10
-        assert candidate["measured_per_direction"] == 100
-        assert len(candidate["ru_to_en_latency_ms"]) == 100
-        assert len(candidate["en_to_ru_latency_ms"]) == 100
-    assert review["reviewed_rows"] == 200
-    assert review["corpus_id"] == results["quality"]["quality"]["corpus_id"]
-    assert review["meaning_changing_failures"] == 0
-    assert review["ambiguities"] == 0
-    assert review["reviewer"] == {
-        "agent_id": "019faa32-26ba-7a23-a482-d7aecd537733",
-        "kind": "independent_critic",
+    public_summary = load_task6_quality_evidence(path).to_report_dict()
+    expected_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    assert public_summary == {
+        "schema_version": "translator.task6-benchmark.v2",
+        "sha256": expected_sha256,
+        "corpus_id": "synthetic-task6-corpus",
+        "passes_thresholds": True,
     }
-    assert re.fullmatch(r"[0-9a-f]{64}", review["review_input_sha256"])
-    assert re.fullmatch(r"[0-9a-f]{64}", review["review_content_sha256"])
-    assert review["review_content_sha256"] == (
-        results["quality"]["critical_review_content_sha256"]
-    )
-    assert review["critical_judgments"] == sum(
-        len(row["critical"]) for row in review["rows"]
-    )
-    assert len(review["rows"]) == 200
-    assert {
-        (row["direction"], row["case_id"]) for row in review["rows"]
-    } == {
-        (direction, case.case_id)
-        for direction in ("ru_to_en", "en_to_ru")
-        for case in corpus.cases
+    assert set(public_summary) == {
+        "schema_version",
+        "sha256",
+        "corpus_id",
+        "passes_thresholds",
     }
-    expected_critical = {case.case_id: list(case.critical) for case in corpus.cases}
-    assert all(
-        row["critical"] == expected_critical[row["case_id"]]
-        and row["verdict"] == "pass"
-        for row in review["rows"]
-    )
-    assert review["verdict"] == "pass"
-    assert all(
-        {"case_id", "direction", "critical", "verdict"} == set(row)
-        for row in review["rows"]
-    )
+    assert private_marker not in json.dumps(public_summary)
 
 
 def test_live_releases_quality_asr_before_creating_normal_residency(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    events: list[str] = []
+    monkeypatch, tmp_path
+):
+    fixture = _owned_run_fixture(tmp_path, monkeypatch)
+    fixture.run()
+    terminal = fixture.events.index(("terminal", task6_live._LARGE_ID))
+    small_creations = [
+        index
+        for index, event in enumerate(fixture.events)
+        if event[:2] == ("create", task6_live._SMALL_ID)
+    ]
+    assert len(small_creations) == 2
+    assert small_creations[0] < terminal < small_creations[1]
+    assert all(adapter.close_count == 1 for adapter in fixture.created)
 
-    class QualityAsr:
-        def release(self) -> bool:
-            events.append("release-large")
-            return True
 
-    normal_asr = object()
+def test_live_duplex_captures_residency_before_provider_shutdown(monkeypatch):
+    events = []
 
-    def create_normal(**kwargs):
-        assert events == ["release-large"]
-        events.append("create-small")
-        return normal_asr
+    class Bridge:
+        def __init__(self, *_args, fatal_cleanup):
+            pass
 
-    monkeypatch.setattr(task6_live, "_asr_manager", create_normal)
+        def run_direction(self, *_args):
+            return 0
 
-    created = task6_live._release_quality_asr_then_create_normal(
-        QualityAsr(),
-        small_path=tmp_path / "small",
-        large_path=tmp_path / "large",
-        device="cuda",
+        def close(self):
+            events.append("shutdown")
+
+    def benchmark(*_args, **kwargs):
+        events.append("measured")
+        return "report"
+
+    monkeypatch.setattr(task6_live, "LocalProvider", lambda **kwargs: object())
+    monkeypatch.setattr(task6_live, "InferenceScheduler", lambda: object())
+    monkeypatch.setattr(task6_live, "_ProviderDuplexBridge", Bridge)
+    monkeypatch.setattr(task6_live, "benchmark_simultaneous_duplex", benchmark)
+    result = task6_live._benchmark_provider_duplex(
+        asr=object(),
+        model_id=task6_live._SMALL_ID,
+        translator=object(),
+        tts=object(),
+        source_pcm={},
+        device="cpu",
+        resources=ExitStack(),
+        fatal_cleanup=lambda error: pytest.fail("unexpected fatal cleanup"),
+        on_complete=lambda: events.append("snapshot"),
     )
-
-    assert created is normal_asr
-    assert events == ["release-large", "create-small"]
+    assert result == "report"
+    assert events == ["measured", "snapshot", "shutdown"]
 
 
 def test_live_never_creates_normal_asr_when_quality_release_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class QualityAsr:
-        def release(self) -> bool:
-            return False
-
-    monkeypatch.setattr(
-        task6_live,
-        "_asr_manager",
-        lambda **kwargs: pytest.fail("small ASR created before proven release"),
-    )
-
-    with pytest.raises(RuntimeError, match="quality oracle release failed"):
-        task6_live._release_quality_asr_then_create_normal(
-            QualityAsr(),
-            small_path=tmp_path / "small",
-            large_path=tmp_path / "large",
-            device="cuda",
+    monkeypatch, tmp_path
+):
+    fixture = _owned_run_fixture(tmp_path, monkeypatch, "terminal")
+    with pytest.raises(_WorkerFatal):
+        fixture.run()
+    assert fixture.fatal_calls == [fixture.terminal_error]
+    assert (
+        len(
+            [
+                event
+                for event in fixture.events
+                if event[:2] == ("create", task6_live._SMALL_ID)
+            ]
         )
+        == 1
+    )
+    assert not any(event[0] == "terminal" for event in fixture.events)
+    transferred = [adapter for adapter in fixture.created if not adapter.closed]
+    assert len(transferred) == 3
+    assert all(adapter.close_count == 0 for adapter in transferred)
+    assert all(
+        adapter.close_count == 1 for adapter in fixture.created if adapter.closed
+    )
+    assert not (tmp_path / "out.json").exists()
 
 
 def test_live_voice_smoke_requires_nonempty_pcm_for_all_four_profiles() -> None:
@@ -1027,22 +1619,68 @@ def test_live_voice_smoke_requires_nonempty_pcm_for_all_four_profiles() -> None:
     )
 
 
-def test_live_resource_telemetry_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        task6_live.subprocess,
-        "run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            subprocess.CalledProcessError(1, "nvidia-smi")
+def _telemetry_vendor(monkeypatch, *, fault=None, count=1, used=2_048 * 2**20):
+    events = []
+
+    class VendorError(Exception):
+        pass
+
+    def invoke(name, value=None):
+        events.append(name)
+        if name == fault:
+            raise VendorError("synthetic-private-vendor-detail")
+        return value
+
+    handle = object()
+
+    def get_handle(index):
+        assert index == 0
+        return invoke("handle", handle)
+
+    def read(name, actual_handle, value):
+        assert actual_handle is handle
+        return invoke(name, value)
+
+    vendor = SimpleNamespace(
+        NVMLError=VendorError,
+        nvmlInit=lambda: invoke("init"),
+        nvmlShutdown=lambda: invoke("shutdown"),
+        nvmlDeviceGetCount=lambda: invoke("count", count),
+        nvmlDeviceGetHandleByIndex=get_handle,
+        nvmlDeviceGetUtilizationRates=lambda device: read(
+            "utilization", device, SimpleNamespace(gpu=42)
+        ),
+        nvmlDeviceGetMemoryInfo=lambda device: read(
+            "memory", device, SimpleNamespace(used=used)
         ),
     )
+    monkeypatch.setattr(task6_live, "pynvml", vendor, raising=False)
+
+    def legacy_cli(*args, **kwargs):
+        events.append("subprocess")
+        return SimpleNamespace(stdout="42, 2048\n")
+
+    monkeypatch.setattr(subprocess, "run", legacy_cli)
+    return vendor, events
+
+
+@pytest.mark.parametrize(
+    "fault", ["init", "count", "handle", "utilization", "memory", "shutdown"]
+)
+def test_live_resource_telemetry_fails_closed(monkeypatch, fault) -> None:
+    _vendor, events = _telemetry_vendor(monkeypatch, fault=fault)
 
     with pytest.raises(
         task6_live.ResourceTelemetryError,
         match="GPU telemetry is unavailable",
-    ):
+    ) as error:
         task6_live._resource_sample()
+    assert "synthetic-private" not in str(error.value)
+    calls = ["init", "count", "handle", "utilization", "memory", "shutdown"]
+    expected = calls[: calls.index(fault) + 1]
+    if fault not in {"init", "shutdown"}:
+        expected.append("shutdown")
+    assert events == expected
 
 
 def test_live_resource_telemetry_reuses_primed_process(
@@ -1059,19 +1697,148 @@ def test_live_resource_telemetry_reuses_primed_process(
         def memory_info(self):
             return FakeMemory()
 
-    class FakeResult:
-        stdout = "42, 2048\n"
+    monkeypatch.setattr(task6_live, "_PROCESS", FakeProcess())
+    _vendor, events = _telemetry_vendor(monkeypatch)
+
+    for _ in range(2):
+        assert task6_live._resource_sample() == (37.5, 123_456, 42.0, 2_048)
+    assert (
+        events == ["init", "count", "handle", "utilization", "memory", "shutdown"] * 2
+    )
+
+
+def test_live_resource_telemetry_preserves_memory_when_utilization_is_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMemory:
+        rss = 123_456
+
+    class FakeProcess:
+        def cpu_percent(self, *, interval):
+            assert interval is None
+            return 37.5
+
+        def memory_info(self):
+            return FakeMemory()
 
     monkeypatch.setattr(task6_live, "_PROCESS", FakeProcess())
-    monkeypatch.setattr(
-        task6_live.subprocess,
-        "run",
-        lambda *args, **kwargs: FakeResult(),
+    vendor, events = _telemetry_vendor(monkeypatch)
+
+    class UtilizationNotSupported(vendor.NVMLError):
+        pass
+
+    vendor.NVMLError_NotSupported = UtilizationNotSupported
+
+    def unsupported(_device):
+        events.append("utilization")
+        raise UtilizationNotSupported()
+
+    monkeypatch.setattr(vendor, "nvmlDeviceGetUtilizationRates", unsupported)
+
+    assert task6_live._resource_sample() == (37.5, 123_456, None, 2_048)
+    assert events == ["init", "count", "handle", "utilization", "memory", "shutdown"]
+
+
+def test_resource_peaks_retains_unknown_gpu_utilization() -> None:
+    assert _resource_peaks(((10.0, 100, None, 1_000), (20.0, 200, None, 2_000))) == (
+        20.0,
+        200,
+        None,
+        2_000,
     )
 
-    assert task6_live._resource_sample() == (
-        37.5,
-        123_456,
+
+def test_resource_peaks_uses_available_gpu_utilization_samples() -> None:
+    assert _resource_peaks(((10.0, 100, None, 1_000), (20.0, 200, 42.0, 2_000))) == (
+        20.0,
+        200,
         42.0,
-        2_048,
+        2_000,
     )
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_live_resource_telemetry_requires_one_device(monkeypatch, count):
+    _vendor, events = _telemetry_vendor(monkeypatch, count=count)
+    with pytest.raises(task6_live.ResourceTelemetryError, match="unavailable"):
+        task6_live._resource_sample()
+    assert events == ["init", "count", "shutdown"]
+
+
+@pytest.mark.parametrize("field", ["gpu", "used"])
+@pytest.mark.parametrize("value", [None, "not-a-number", "missing-attribute"])
+def test_live_resource_telemetry_rejects_unavailable_values(monkeypatch, field, value):
+    vendor, events = _telemetry_vendor(monkeypatch)
+    result = (
+        SimpleNamespace()
+        if value == "missing-attribute"
+        else SimpleNamespace(**{field: value})
+    )
+    method = (
+        "nvmlDeviceGetUtilizationRates" if field == "gpu" else "nvmlDeviceGetMemoryInfo"
+    )
+    original = getattr(vendor, method)
+
+    def unavailable(handle):
+        original(handle)
+        return result
+
+    monkeypatch.setattr(vendor, method, unavailable)
+    with pytest.raises(task6_live.ResourceTelemetryError, match="unavailable"):
+        task6_live._resource_sample()
+    assert events[0] == "init" and events[-1] == "shutdown"
+    assert events.count("shutdown") == 1 and "subprocess" not in events
+
+
+@pytest.mark.parametrize("remainder", [0, 1, 2**20 - 1])
+def test_live_resource_telemetry_converts_binary_mib(monkeypatch, remainder):
+    _vendor, events = _telemetry_vendor(monkeypatch, used=2_048 * 2**20 + remainder)
+    assert task6_live._resource_sample()[3] == 2_048
+    assert events == ["init", "count", "handle", "utilization", "memory", "shutdown"]
+
+
+def test_live_resource_telemetry_retains_held_vendor_call(monkeypatch):
+    vendor, events = _telemetry_vendor(monkeypatch)
+    entered, release, second_lock_attempted = Event(), Event(), Event()
+    original = vendor.nvmlDeviceGetUtilizationRates
+    original_lock = task6_live._RESOURCE_SAMPLE_LOCK
+
+    class ObservedLock:
+        def __enter__(self):
+            if entered.is_set():
+                second_lock_attempted.set()
+            return original_lock.__enter__()
+
+        def __exit__(self, *args):
+            return original_lock.__exit__(*args)
+
+    def held(handle):
+        result = original(handle)
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(task6_live, "_RESOURCE_SAMPLE_LOCK", ObservedLock())
+    monkeypatch.setattr(vendor, "nvmlDeviceGetUtilizationRates", held)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(task6_live._resource_sample)
+        second = None
+        try:
+            assert entered.wait(timeout=1)
+            second = executor.submit(task6_live._resource_sample)
+            assert second_lock_attempted.wait(timeout=1)
+            assert not first.done() and not second.done()
+            assert events == ["init", "count", "handle", "utilization"]
+            release.set()
+            assert first.result(timeout=1)[2:] == (42.0, 2_048)
+            assert second.result(timeout=1)[2:] == (42.0, 2_048)
+            assert (
+                events
+                == ["init", "count", "handle", "utilization", "memory", "shutdown"] * 2
+            )
+        finally:
+            release.set()
+            first.result(timeout=2)
+            if second is not None:
+                second.result(timeout=2)

@@ -172,6 +172,11 @@ impl DirectionSession {
         &self.contract
     }
 
+    /// Returns the current watchdog phase deadline, not an end-to-end audio deadline.
+    pub fn next_watchdog_deadline_ns(&self) -> Option<u64> {
+        self.coordinator.next_phase_deadline_ns()
+    }
+
     pub fn open_request(&self) -> ProviderRequest {
         ProviderRequest {
             request: Some(provider_request::Request::OpenSession(

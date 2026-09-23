@@ -5,12 +5,14 @@ use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    CommandResult, CommandRunner, REMOTE_IN_SINK, SystemCommandRunner, VIRTUAL_MIC_SOURCE,
+    CommandResult, CommandRunError, CommandRunner, REMOTE_IN_SINK, SystemCommandRunner,
+    VIRTUAL_MIC_SOURCE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +138,7 @@ pub struct RoutingState {
 #[serde(rename_all = "snake_case")]
 pub enum RoutingErrorCode {
     DiscoveryFailed,
+    DeadlineExpired,
     InvalidManualOverride,
     MoveFailed,
     RestoreFailed,
@@ -157,6 +160,7 @@ impl RoutingError {
     fn new(code: RoutingErrorCode) -> Self {
         let (safe_message, retryable) = match code {
             RoutingErrorCode::DiscoveryFailed => ("Audio route discovery failed", true),
+            RoutingErrorCode::DeadlineExpired => ("Audio route inspection deadline expired", true),
             RoutingErrorCode::InvalidManualOverride => {
                 ("Selected audio route is unavailable", false)
             }
@@ -190,7 +194,10 @@ impl fmt::Display for RoutingError {
 impl std::error::Error for RoutingError {}
 
 pub trait RoutingWatcher {
-    fn inspect(&self) -> Result<RoutingState, RoutingError>;
+    fn inspect_until(&self, deadline: Instant) -> Result<RoutingState, RoutingError>;
+    fn inspect(&self) -> Result<RoutingState, RoutingError> {
+        self.inspect_until(Instant::now() + Duration::from_secs(2))
+    }
     fn reconcile(&mut self, manual_stream_id: Option<u32>) -> Result<RoutingState, RoutingError>;
     fn restore_active(&mut self) -> Result<RoutingState, RoutingError>;
     fn active_route(&self) -> Option<&IncomingRoute>;
@@ -312,12 +319,19 @@ where
     }
 
     fn discover(&self) -> Result<RoutingSnapshot, RoutingError> {
+        self.discover_until(Instant::now() + Duration::from_secs(2))
+    }
+
+    fn discover_until(&self, deadline: Instant) -> Result<RoutingSnapshot, RoutingError> {
+        check_routing_deadline(deadline)?;
         let sink_inputs: Vec<RawSinkInput> =
-            self.run_json(&["--format=json", "list", "sink-inputs"])?;
+            self.run_json_until(&["--format=json", "list", "sink-inputs"], deadline)?;
         let source_outputs: Vec<RawSourceOutput> =
-            self.run_json(&["--format=json", "list", "source-outputs"])?;
-        let sources: Vec<RawNode> = self.run_json(&["--format=json", "list", "sources"])?;
-        let sinks: Vec<RawNode> = self.run_json(&["--format=json", "list", "sinks"])?;
+            self.run_json_until(&["--format=json", "list", "source-outputs"], deadline)?;
+        let sources: Vec<RawNode> =
+            self.run_json_until(&["--format=json", "list", "sources"], deadline)?;
+        let sinks: Vec<RawNode> =
+            self.run_json_until(&["--format=json", "list", "sinks"], deadline)?;
         let fallback_restore_source_name = preferred_restore_source(&sources);
         let fallback_restore_sink_name = preferred_restore_sink(&sinks);
         let source_names: HashMap<_, _> = sources
@@ -380,6 +394,7 @@ where
                 }
             })
             .collect();
+        check_routing_deadline(deadline)?;
         Ok(RoutingSnapshot {
             candidates,
             source_outputs,
@@ -809,16 +824,26 @@ where
         }
     }
 
-    fn run_json<T>(&self, args: &[&str]) -> Result<T, RoutingError>
+    fn run_json_until<T>(&self, args: &[&str], deadline: Instant) -> Result<T, RoutingError>
     where
         T: for<'de> Deserialize<'de>,
     {
+        check_routing_deadline(deadline)?;
         let arguments: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
         let result = self
             .runner
-            .run("pactl", &arguments)
-            .map_err(|_| RoutingError::new(RoutingErrorCode::DiscoveryFailed))?;
-        parse_json(result)
+            .run_until("pactl", &arguments, deadline)
+            .map_err(|error| {
+                RoutingError::new(if error == CommandRunError::DeadlineExpired {
+                    RoutingErrorCode::DeadlineExpired
+                } else {
+                    RoutingErrorCode::DiscoveryFailed
+                })
+            })?;
+        check_routing_deadline(deadline)?;
+        let value = parse_json(result)?;
+        check_routing_deadline(deadline)?;
+        Ok(value)
     }
 
     fn state(
@@ -906,13 +931,13 @@ impl<R> RoutingWatcher for PulseRoutingWatcher<R>
 where
     R: CommandRunner,
 {
-    fn inspect(&self) -> Result<RoutingState, RoutingError> {
+    fn inspect_until(&self, deadline: Instant) -> Result<RoutingState, RoutingError> {
         let RoutingSnapshot {
             candidates,
             source_outputs,
             conflicting_stream_ids,
             ..
-        } = self.discover()?;
+        } = self.discover_until(deadline)?;
         let resolution = if !conflicting_stream_ids.is_empty() {
             RouteResolution::RouteConflict
         } else if self.active_route.is_some() {
@@ -924,12 +949,14 @@ where
         } else {
             RouteResolution::AwaitingSelection
         };
-        Ok(self.state(
+        let state = self.state(
             candidates,
             source_outputs,
             conflicting_stream_ids,
             resolution,
-        ))
+        );
+        check_routing_deadline(deadline)?;
+        Ok(state)
     }
 
     fn reconcile(&mut self, manual_stream_id: Option<u32>) -> Result<RoutingState, RoutingError> {
@@ -1232,6 +1259,14 @@ struct RawNode {
     name: String,
     #[serde(default)]
     state: Option<String>,
+}
+
+fn check_routing_deadline(deadline: Instant) -> Result<(), RoutingError> {
+    if Instant::now() >= deadline {
+        Err(RoutingError::new(RoutingErrorCode::DeadlineExpired))
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_json<T>(result: CommandResult) -> Result<T, RoutingError>

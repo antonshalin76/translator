@@ -27,6 +27,51 @@ fn config() -> DirectionRuntimeConfig {
     }
 }
 
+#[test]
+fn voice_override_builtin_session_wire_preserves_gender_engine_and_no_overrides() {
+    for (provider, engine, expected_engine) in [
+        (
+            ProviderId::Local,
+            VoiceEngine::Piper,
+            translator_ipc::provider::VoiceEngine::Piper,
+        ),
+        (
+            ProviderId::Openai,
+            VoiceEngine::Openai,
+            translator_ipc::provider::VoiceEngine::Openai,
+        ),
+    ] {
+        for (gender, expected_gender) in [
+            (
+                VoiceGender::Male,
+                translator_ipc::provider::VoiceGender::Male,
+            ),
+            (
+                VoiceGender::Female,
+                translator_ipc::provider::VoiceGender::Female,
+            ),
+        ] {
+            let mut config = config();
+            config.provider_id = provider;
+            config.voice_engine = engine;
+            config.voice_gender = gender;
+            let open = DirectionSession::new(config).open_request();
+            let Some(provider_request::Request::OpenSession(open)) = open.request else {
+                panic!("expected real Open request");
+            };
+            let profile = open.voice_profile.unwrap();
+            assert_eq!(
+                profile.language,
+                translator_ipc::provider::Language::En as i32
+            );
+            assert_eq!(profile.gender, expected_gender as i32);
+            assert_eq!(profile.engine, expected_engine as i32);
+            assert!(profile.model_path.is_none());
+            assert!(profile.provider_voice_id.is_none());
+        }
+    }
+}
+
 fn frame(sequence: u64) -> PcmFrame {
     PcmFrame::try_new(
         sequence,
@@ -57,6 +102,53 @@ fn opened(session: &DirectionSession) -> ProviderEvent {
             },
         )),
     }
+}
+
+#[test]
+fn direction_next_watchdog_deadline_projects_current_phase_without_advancing_it() {
+    let mut session = DirectionSession::new(config());
+    let stream_id = session.stream_id();
+    let utterance_id = Uuid::new_v4();
+    assert_eq!(session.next_watchdog_deadline_ns(), None);
+    session.handle_provider_event(&opened(&session), 0).unwrap();
+    session
+        .handle_capture(CaptureEvent::SpeechStarted {
+            stream_id,
+            utterance_id,
+            capture_monotonic_ns: 1_000_000_000,
+        })
+        .unwrap();
+    assert_eq!(session.next_watchdog_deadline_ns(), Some(13_000_000_000));
+    session
+        .handle_capture(CaptureEvent::Frame {
+            stream_id,
+            utterance_id,
+            frame: frame(150),
+            end_of_utterance: true,
+        })
+        .unwrap();
+    for _ in 0..3 {
+        assert_eq!(session.next_watchdog_deadline_ns(), Some(10_000_000_000));
+    }
+    assert!(session.poll(10_000_000_000).unwrap().is_empty());
+    assert!(matches!(
+        session.poll(10_000_000_001).unwrap().as_slice(),
+        [DirectionWatchdogEffect::PurgeAndSend(_)]
+    ));
+    let cancel_deadline = 10_250_000_001;
+    assert_eq!(session.next_watchdog_deadline_ns(), Some(cancel_deadline));
+    assert!(matches!(
+        session.poll(cancel_deadline + 1).unwrap().as_slice(),
+        [DirectionWatchdogEffect::PurgeAndSend(_)]
+    ));
+    let close_deadline =
+        cancel_deadline + 1 + translator_daemon::CLOSE_ACK_TIMEOUT.as_nanos() as u64;
+    assert_eq!(session.next_watchdog_deadline_ns(), Some(close_deadline));
+    assert_eq!(
+        session.poll(close_deadline).unwrap(),
+        vec![DirectionWatchdogEffect::RestartSidecar]
+    );
+    assert_eq!(session.next_watchdog_deadline_ns(), None);
 }
 
 #[test]

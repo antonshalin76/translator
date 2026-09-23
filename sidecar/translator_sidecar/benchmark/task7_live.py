@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import selectors
 import subprocess
 import sys
-from threading import Lock
 import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Lock
 from typing import Any, Protocol
 
 import numpy as np
@@ -31,7 +31,6 @@ from translator_sidecar.benchmark.task7 import (
     RunContext,
     run_task7_benchmark,
 )
-
 
 _ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_TASK6_EVIDENCE = _ROOT / "docs" / "benchmarks" / "task6-results.json"
@@ -100,18 +99,11 @@ class AudioTransportMeasurement:
             or self.sample_rate_hz != _SAMPLE_RATE_HZ
             or self.channels != _CHANNELS
         ):
-            raise LiveBenchmarkError(
-                "audio transport format must be s16le/16000/mono"
-            )
+            raise LiveBenchmarkError("audio transport format must be s16le/16000/mono")
         if not (
-            0
-            <= self.playback_write_ns
-            <= self.first_audible_ns
-            <= self.last_audible_ns
+            0 <= self.playback_write_ns <= self.first_audible_ns <= self.last_audible_ns
         ):
-            raise LiveBenchmarkError(
-                "audio transport timestamps must be monotonic"
-            )
+            raise LiveBenchmarkError("audio transport timestamps must be monotonic")
         if not math.isfinite(self.queue_lag_ms) or self.queue_lag_ms < 0:
             raise LiveBenchmarkError(
                 "audio transport queue lag must be finite and nonnegative"
@@ -191,9 +183,7 @@ def load_task6_provider_evidence(
 
     duplex = _find_model_record(payload, "duplex_candidates", _SELECTED_MODEL)
     if duplex.get("simultaneous") is not True:
-        raise LiveBenchmarkError(
-            "Task 6 provider evidence is not simultaneous duplex"
-        )
+        raise LiveBenchmarkError("Task 6 provider evidence is not simultaneous duplex")
     excluded_warmups = _record_int(duplex, "excluded_warmups")
     measured_count = _record_int(duplex, "measured_per_direction")
     if excluded_warmups != 10 or measured_count < 100:
@@ -245,11 +235,7 @@ def correlate_marker(
 ) -> int:
     if len(captured_pcm) % _BYTES_PER_SAMPLE:
         raise LiveBenchmarkError("captured audio is not valid s16le PCM")
-    if (
-        marker.dtype != np.int16
-        or marker.ndim != 1
-        or marker.size == 0
-    ):
+    if marker.dtype != np.int16 or marker.ndim != 1 or marker.size == 0:
         raise LiveBenchmarkError("correlation marker format is invalid")
     captured = np.frombuffer(captured_pcm, dtype="<i2").astype(np.float64)
     reference = marker.astype(np.float64)
@@ -373,8 +359,7 @@ class PulseGraphProbe:
                 properties = stream.get("properties")
                 if (
                     isinstance(properties, dict)
-                    and str(properties.get(_TASK7_PROPERTY, "")).lower()
-                    == "true"
+                    and str(properties.get(_TASK7_PROPERTY, "")).lower() == "true"
                 ):
                     leaked.append((kind, stream.get("index")))
         if leaked:
@@ -474,9 +459,7 @@ class SubprocessAudioTransport:
                     continue
                 chunk = os.read(capture.stdout.fileno(), 4_096)
                 if not chunk:
-                    raise LiveBenchmarkError(
-                        "capture process ended before correlation"
-                    )
+                    raise LiveBenchmarkError("capture process ended before correlation")
                 captured.extend(chunk)
                 try:
                     onset = correlate_marker(bytes(captured), marker)
@@ -487,23 +470,15 @@ class SubprocessAudioTransport:
             if onset is None or detected_ns is None:
                 raise LiveBenchmarkError("correlation timeout")
 
-            trailing_samples = (
-                len(captured) // _BYTES_PER_SAMPLE - onset
-            )
+            trailing_samples = len(captured) // _BYTES_PER_SAMPLE - onset
             inferred_onset_ns = detected_ns - int(
                 trailing_samples * 1_000_000_000 / _SAMPLE_RATE_HZ
             )
-            marker_duration_ns = int(
-                marker.size * 1_000_000_000 / _SAMPLE_RATE_HZ
-            )
+            marker_duration_ns = int(marker.size * 1_000_000_000 / _SAMPLE_RATE_HZ)
             if inferred_onset_ns < playback_write_ns:
-                raise LiveBenchmarkError(
-                    "correlated audio timestamp is non-monotonic"
-                )
+                raise LiveBenchmarkError("correlated audio timestamp is non-monotonic")
             _wait_success(playback, timeout_s=1.0)
-            graph_latency_ms = (
-                inferred_onset_ns - playback_write_ns
-            ) / 1_000_000
+            graph_latency_ms = (inferred_onset_ns - playback_write_ns) / 1_000_000
             return AudioTransportMeasurement(
                 playback_write_ns=playback_write_ns,
                 first_audible_ns=inferred_onset_ns,
@@ -517,11 +492,7 @@ class SubprocessAudioTransport:
 
     def assert_no_processes(self) -> None:
         with self._lock:
-            active = [
-                process
-                for process in self._active
-                if process.poll() is None
-            ]
+            active = [process for process in self._active if process.poll() is None]
         if active:
             raise LiveBenchmarkError("Task 7 audio process leak detected")
 
@@ -577,9 +548,7 @@ class ResourceSampler:
         with self._lock:
             monotonic_ns = self._clock_ns()
             if self._last_ns is not None and monotonic_ns <= self._last_ns:
-                raise LiveBenchmarkError(
-                    "resource monotonic clock did not advance"
-                )
+                raise LiveBenchmarkError("resource monotonic clock did not advance")
             self._last_ns = monotonic_ns
             cpu_percent = float(self._process.cpu_percent(interval=None))
             rss_bytes = int(self._process.memory_info().rss)
@@ -655,10 +624,7 @@ class LiveBoundaryAdapter:
             duration = config.profile.duration_seconds
             if duration is None or duration < 1_800:
                 raise LiveBenchmarkError("30-minute soak duration is invalid")
-            total_pairs = (
-                config.excluded_warmups
-                + config.measured_count_per_direction
-            )
+            total_pairs = config.excluded_warmups + config.measured_count_per_direction
             self._pair_interval_s = duration / total_pairs
 
     def measure_direction(self, context: RunContext) -> BoundaryObservation:
@@ -689,9 +655,7 @@ class LiveBoundaryAdapter:
             provider_latency_ms * 1_000_000
         )
         if speech_onset_ns < 0:
-            raise LiveBenchmarkError(
-                "combined boundary timestamp is non-monotonic"
-            )
+            raise LiveBenchmarkError("combined boundary timestamp is non-monotonic")
         self._pace_soak(context.pair_index)
         return BoundaryObservation(
             speech_onset_ns=speech_onset_ns,
@@ -745,9 +709,7 @@ def build_live_report_payload(
     payload["evidence_scope"] = "hybrid_component_estimate"
     payload["release_eligible"] = False
     payload["release_classification"] = None
-    payload["component_estimate_classification"] = payload.pop(
-        "classification"
-    )
+    payload["component_estimate_classification"] = payload.pop("classification")
     payload["resources"]["scope"] = "benchmark_process_and_total_gpu"
     payload["workstation_evidence"] = {
         "task6": {
@@ -755,9 +717,7 @@ def build_live_report_payload(
             "sha256": adapter.evidence.sha256,
             "generated_at_unix_ns": adapter.evidence.generated_at_unix_ns,
             "model_id": adapter.evidence.model_id,
-            "measured_per_direction": (
-                adapter.evidence.measured_per_direction
-            ),
+            "measured_per_direction": (adapter.evidence.measured_per_direction),
         },
         "graph": {
             "outgoing": {

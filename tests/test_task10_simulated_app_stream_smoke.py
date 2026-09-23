@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -24,7 +23,7 @@ def read_json(path: str) -> dict[str, Any]:
 def requires_local_artifacts(*paths: str):
     return unittest.skipUnless(
         all((ROOT / path).exists() for path in paths),
-        "local planning/run evidence is not published",
+        "missing_external_prerequisite:private_human_evidence",
     )
 
 
@@ -44,7 +43,9 @@ def walk_keys(value: Any) -> list[str]:
 
 def load_module() -> Any:
     script = ROOT / "scripts/translator-simulated-app-stream-smoke"
-    loader = importlib.machinery.SourceFileLoader("simulated_app_stream_smoke", str(script))
+    loader = importlib.machinery.SourceFileLoader(
+        "simulated_app_stream_smoke", str(script)
+    )
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -55,7 +56,9 @@ def load_module() -> Any:
 class SimulatedAppStreamSmokeTests(unittest.TestCase):
     def test_script_is_executable_and_does_not_claim_live_task10(self) -> None:
         script_path = ROOT / "scripts/translator-simulated-app-stream-smoke"
-        self.assertTrue(script_path.exists(), "simulated stream smoke script is missing")
+        self.assertTrue(
+            script_path.exists(), "simulated stream smoke script is missing"
+        )
         self.assertTrue(script_path.stat().st_mode & stat.S_IXUSR)
         script = script_path.read_text()
 
@@ -73,11 +76,15 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", script)
         self.assertNotIn("pgrep -a", script)
 
-    @requires_local_artifacts("docs/benchmarks/task10-simulated-app-streams-report.json")
+    @requires_local_artifacts(
+        "docs/benchmarks/task10-simulated-app-streams-report.json"
+    )
     def test_report_shape_keeps_synthetic_evidence_separate(self) -> None:
         report = read_json("docs/benchmarks/task10-simulated-app-streams-report.json")
 
-        self.assertEqual(report["schema_version"], "translator.task10-simulated-app-streams.v1")
+        self.assertEqual(
+            report["schema_version"], "translator.task10-simulated-app-streams.v1"
+        )
         self.assertTrue(report["simulated_only"])
         self.assertTrue(report["does_not_satisfy_task10_live_second_endpoint"])
         self.assertFalse(report["task10_completed"])
@@ -90,15 +97,23 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
             ["google_meet_browser", "telegram_desktop", "zoom_desktop"],
         )
 
-        zoom = next(case for case in report["cases"] if case["app_key"] == "zoom_desktop")
+        zoom = next(
+            case for case in report["cases"] if case["app_key"] == "zoom_desktop"
+        )
         self.assertEqual(zoom["task_scope"], "task12_diagnostic")
         self.assertFalse(zoom["counts_toward_task10_mvp_a"])
         self.assertIn(zoom["route_attempt"]["status"], {"blocked", "failed", "passed"})
 
-    @requires_local_artifacts("docs/benchmarks/task10-simulated-app-streams-report.json")
-    def test_browser_move_without_call_like_candidate_is_not_task10_route_pass(self) -> None:
+    @requires_local_artifacts(
+        "docs/benchmarks/task10-simulated-app-streams-report.json"
+    )
+    def test_browser_move_without_call_like_candidate_is_not_task10_route_pass(
+        self,
+    ) -> None:
         report = read_json("docs/benchmarks/task10-simulated-app-streams-report.json")
-        meet = next(case for case in report["cases"] if case["app_key"] == "google_meet_browser")
+        meet = next(
+            case for case in report["cases"] if case["app_key"] == "google_meet_browser"
+        )
 
         if meet["task10_candidate"] and meet["task10_candidate"]["call_like"] is False:
             self.assertEqual(
@@ -115,15 +130,21 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
             {"on_translator_remote_in": True},
             {"call_like": False},
         )
-        self.assertEqual(result, "browser_stream_move_passed_without_call_like_candidate")
+        self.assertEqual(
+            result, "browser_stream_move_passed_without_call_like_candidate"
+        )
 
-    @requires_local_artifacts("docs/benchmarks/task10-simulated-app-streams-report.json")
+    @requires_local_artifacts(
+        "docs/benchmarks/task10-simulated-app-streams-report.json"
+    )
     def test_report_carries_task7_debt_and_no_sensitive_payload(self) -> None:
         report = read_json("docs/benchmarks/task10-simulated-app-streams-report.json")
         debt = report["task7_debt_carried"]
 
         self.assertFalse(debt["task7_complete"])
-        self.assertEqual(debt["local_provider_latency_classification"], "fails_usable_limit")
+        self.assertEqual(
+            debt["local_provider_latency_classification"], "fails_usable_limit"
+        )
         self.assertTrue(debt["requires_mvp_b_provider_comparison"])
 
         forbidden_keys = {
@@ -156,7 +177,9 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")
 
-        prompt_section = prompts.split("## Task 10 Prompt", 1)[1].split("## Task 11 Prompt", 1)[0]
+        prompt_section = prompts.split("## Task 10 Prompt", 1)[1].split(
+            "## Task 11 Prompt", 1
+        )[0]
         task_section = tasks.split("## Task 10.", 1)[1].split("## Task 11.", 1)[0]
 
         self.assertIn("task10-simulated-app-streams-report.json", prompt_section)
@@ -164,7 +187,9 @@ class SimulatedAppStreamSmokeTests(unittest.TestCase):
         self.assertNotIn("- [x] Completed", prompt_section)
         self.assertNotIn("- [x] Completed", task_section)
 
-    def test_case_definitions_keep_meet_browser_and_zoom_diagnostic_distinct(self) -> None:
+    def test_case_definitions_keep_meet_browser_and_zoom_diagnostic_distinct(
+        self,
+    ) -> None:
         smoke = load_module()
         cases = {case.app_key: case for case in smoke.CASES}
 

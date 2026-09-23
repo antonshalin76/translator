@@ -6,22 +6,21 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use axum::http::StatusCode;
 use clap::Parser;
 use serde::Deserialize;
 use translator_audio::{
-    AecCapability, AecPhysicalPair, AudioGraph, AudioGraphState,
-    AudioMixVolumes as PulseAudioMixVolumes, CommandResult, CommandRunner, DeviceOverride,
-    DeviceWatcher, GraphHealth, MIC_OUT_SINK, OutputMode, PulseAecGraph, PulseAudioGraph,
-    PulseAudioMix, PulseDeviceWatcher, PulseRoutingWatcher, REMOTE_IN_SINK, RoutingProfile,
-    RoutingWatcher, SystemCommandRunner, default_journal_path, default_route_journal_path,
+    AecCapability, AudioGraph, AudioGraphState, CommandResult, CommandRunner, DeviceOverride,
+    DeviceWatcher, GraphHealth, MIC_OUT_SINK, PulseAudioGraph, PulseDeviceWatcher,
+    PulseRoutingWatcher, REMOTE_IN_SINK, RoutingProfile, RoutingWatcher, SystemCommandRunner,
+    default_journal_path, default_route_journal_path,
 };
 use translator_daemon::{
-    ApiControllers, ApiLimits, AudioMixController, AudioMixState, AudioOperationGate,
-    AudioOperationState, ControlToken, DebugCaptureLimits, DebugCaptureStore, DuplexRuntimeHandle,
-    ManualRouteController, ProcessDuplexConfig, ProcessDuplexRunner, RoundTripController,
-    RoundTripProcessRunner, RoundTripRuntimeHandle, RuntimeLatencyObserver, RuntimeLease,
-    RuntimeSnapshot, RuntimeStore, TranslationController, build_router_with_controllers,
+    ApiControllers, ApiLimits, AudioMixApplication, AudioMixController, AudioOperationGate,
+    AudioOperationState, ControlApplication, ControlCommand, ControlToken, DebugCaptureLimits,
+    DebugCaptureStore, FactsError, ManualRouteController, ProcessDuplexConfig, ProcessDuplexRunner,
+    RoundTripController, RoundTripOwnerShutdownError, RoundTripProcessRunner,
+    RoundTripRuntimeHandle, RuntimeFacts, RuntimeFactsSource, RuntimeLatencyObserver, RuntimeLease,
+    RuntimeMaintenance, RuntimeSnapshot, RuntimeStore, build_router_with_controllers,
     validate_listen_address,
 };
 
@@ -69,15 +68,14 @@ impl<T> LifecycleProtected<T> {
     }
 }
 
-struct PulseResources {
-    routing: PulseRoutingWatcher<SystemCommandRunner>,
-    devices: PulseDeviceWatcher<SystemCommandRunner>,
-    original_loopbacks: PulseOriginalLoopbacks<SystemCommandRunner>,
-    graph: Option<PulseAudioGraph<SystemCommandRunner>>,
-    aec_graph: Option<PulseAecGraph<SystemCommandRunner>>,
+struct PulseResources<R = SystemCommandRunner> {
+    routing: PulseRoutingWatcher<R>,
+    devices: PulseDeviceWatcher<R>,
+    original_loopbacks: PulseOriginalLoopbacks<R>,
+    graph: Option<PulseAudioGraph<R>>,
 }
 
-impl PulseResources {
+impl<R: CommandRunner> PulseResources<R> {
     fn initialize(&mut self, store: &RuntimeStore) {
         if let Some(graph) = self.graph.as_mut() {
             match graph.ensure_endpoints() {
@@ -123,7 +121,7 @@ impl PulseResources {
 
     fn refresh_devices(&mut self, store: &RuntimeStore) {
         match self.devices.reconcile(DeviceOverride::default()) {
-            Ok(state) => store.set_devices(state),
+            Ok(state) => store.set_devices(state.into()),
             Err(error) => {
                 tracing::warn!(event = "device_reconciliation_failed", code = ?error.code());
                 store.clear_devices("device_reconciliation_failed");
@@ -148,11 +146,6 @@ impl PulseResources {
             && let Err(error) = graph.cleanup_owned()
         {
             tracing::error!(event = "audio_graph_cleanup_failed", code = ?error.code());
-        }
-        if let Some(aec_graph) = self.aec_graph.as_mut()
-            && let Err(error) = aec_graph.cleanup_owned()
-        {
-            tracing::error!(event = "aec_graph_cleanup_failed", code = ?error.code());
         }
     }
 }
@@ -189,50 +182,102 @@ fn maintain_audio_graph(graph: &mut impl AudioGraph, store: &RuntimeStore) {
     }
 }
 
-struct PulseManualRoutes {
-    resources: LifecycleProtected<PulseResources>,
+struct PulseManualRoutes<R = SystemCommandRunner> {
+    resources: LifecycleProtected<PulseResources<R>>,
     operation_gate: AudioOperationGate,
 }
 
-struct PulseAudioMixController {
-    mix: PulseAudioMix<SystemCommandRunner>,
-}
-
-impl PulseAudioMixController {
-    const fn new() -> Self {
-        Self {
-            mix: PulseAudioMix::new(SystemCommandRunner),
-        }
+impl<R: CommandRunner + Send> RuntimeMaintenance for PulseManualRoutes<R> {
+    fn refresh(&self, store: &RuntimeStore) -> Result<(), translator_daemon::ControlFailure> {
+        self.refresh_audio_state(store);
+        Ok(())
     }
 }
 
-impl AudioMixController for PulseAudioMixController {
-    fn apply(&self, volumes: AudioMixState) -> Result<(), translator_daemon::ControlFailure> {
-        match self.mix.apply(PulseAudioMixVolumes {
-            microphone_original_percent: volumes.microphone_original_percent,
-            microphone_translation_percent: volumes.microphone_translation_percent,
-            speaker_original_percent: volumes.speaker_original_percent,
-            speaker_translation_percent: volumes.speaker_translation_percent,
-        }) {
-            Ok(report) => {
-                tracing::debug!(
-                    event = "audio_mix_applied",
-                    updated_target_count = report.updated_targets.len()
-                );
-                Ok(())
-            }
-            Err(error) => {
-                tracing::warn!(event = "audio_mix_apply_failed", code = ?error.code());
-                Err(translator_daemon::ControlFailure {
-                    status: StatusCode::CONFLICT,
-                    code: "audio_mix_apply_failed",
-                })
-            }
+impl<R: CommandRunner + Send> RuntimeFactsSource for PulseManualRoutes<R> {
+    fn inspect(&self, deadline: std::time::Instant) -> Result<RuntimeFacts, FactsError> {
+        if std::time::Instant::now() >= deadline {
+            return Err(FactsError::Expired);
         }
+        if self.resources.is_stopping() {
+            return Err(FactsError::DiscoveryFailed);
+        }
+        let resources = self
+            .resources
+            .inner
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => FactsError::Busy,
+                std::sync::TryLockError::Poisoned(_) => FactsError::DiscoveryFailed,
+            })?;
+        if self.resources.is_stopping() {
+            return Err(FactsError::DiscoveryFailed);
+        }
+        inspect_runtime_facts(
+            &resources.devices,
+            resources
+                .graph
+                .as_ref()
+                .ok_or(FactsError::DiscoveryFailed)?,
+            &resources.routing,
+            deadline,
+        )
     }
 }
 
-impl PulseManualRoutes {
+fn inspect_runtime_facts(
+    devices: &impl DeviceWatcher,
+    graph: &impl AudioGraph,
+    routing: &impl RoutingWatcher,
+    deadline: std::time::Instant,
+) -> Result<RuntimeFacts, FactsError> {
+    if std::time::Instant::now() >= deadline {
+        return Err(FactsError::Expired);
+    }
+    let devices = devices
+        .read_facts_until(deadline)
+        .map_err(|error| match error.code() {
+            translator_audio::DeviceWatcherErrorCode::DiscoveryFailed => {
+                FactsError::DiscoveryFailed
+            }
+            translator_audio::DeviceWatcherErrorCode::InvalidPhysicalDevice => {
+                FactsError::InvalidPhysicalDevice
+            }
+            translator_audio::DeviceWatcherErrorCode::GraphValidationFailed => {
+                FactsError::SinkValidationFailed
+            }
+            translator_audio::DeviceWatcherErrorCode::DeadlineExpired => FactsError::Expired,
+        })?;
+    if std::time::Instant::now() >= deadline {
+        return Err(FactsError::Expired);
+    }
+    let audio_graph = graph
+        .inspect_until(deadline)
+        .map_err(|error| match error.code() {
+            translator_audio::AudioGraphErrorCode::OwnershipJournalBusy => FactsError::Busy,
+            translator_audio::AudioGraphErrorCode::DeadlineExpired => FactsError::Expired,
+            _ => FactsError::DiscoveryFailed,
+        })?;
+    if std::time::Instant::now() >= deadline {
+        return Err(FactsError::Expired);
+    }
+    let routes = routing
+        .inspect_until(deadline)
+        .map_err(|error| match error.code() {
+            translator_audio::RoutingErrorCode::DeadlineExpired => FactsError::Expired,
+            _ => FactsError::DiscoveryFailed,
+        })?;
+    if std::time::Instant::now() >= deadline {
+        return Err(FactsError::Expired);
+    }
+    Ok(RuntimeFacts {
+        devices,
+        audio_graph,
+        routes,
+    })
+}
+
+impl<R: CommandRunner + Send> PulseManualRoutes<R> {
     fn initialize(&self, store: &RuntimeStore) {
         let initialized = self
             .resources
@@ -259,7 +304,7 @@ impl PulseManualRoutes {
     }
 }
 
-impl ManualRouteController for PulseManualRoutes {
+impl<R: CommandRunner + Send> ManualRouteController for PulseManualRoutes<R> {
     fn refresh_audio_state(&self, store: &RuntimeStore) {
         self.refresh(store);
     }
@@ -315,7 +360,7 @@ fn manual_route_admission(
     match state {
         AudioOperationState::Idle => Ok(ManualRouteAdmission::AcquireExclusive),
         AudioOperationState::Production => Ok(ManualRouteAdmission::ShareProduction),
-        AudioOperationState::HumanRoundTrip { .. } => {
+        AudioOperationState::HumanRoundTrip { .. } | AudioOperationState::Calibration { .. } => {
             Err(invalid_manual_route("Audio operation is busy"))
         }
         AudioOperationState::Stopping => {
@@ -522,19 +567,6 @@ const fn original_bypass_required(snapshot: &RuntimeSnapshot, configured_percent
     !snapshot.translation_running || configured_percent > 0
 }
 
-fn effective_audio_mix_for_service(snapshot: &RuntimeSnapshot) -> AudioMixState {
-    if snapshot.translation_running {
-        return snapshot.audio_mix;
-    }
-
-    AudioMixState {
-        microphone_original_percent: 100,
-        microphone_translation_percent: 0,
-        speaker_original_percent: 100,
-        speaker_translation_percent: 0,
-    }
-}
-
 fn original_loopback_load_args(request: &OriginalLoopbackRequest) -> Vec<String> {
     vec![
         "load-module".to_owned(),
@@ -652,8 +684,23 @@ struct Arguments {
     listen: SocketAddr,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    translator_daemon::install_private_panic_hook();
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(async_main()),
+        Err(_) => {
+            use std::io::Write;
+            let _ = std::io::stderr()
+                .write_all(b"{\"event\":\"runtime_start_failed\",\"code\":\"internal_error\"}\n");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn async_main() -> ExitCode {
     let arguments = Arguments::parse();
     if arguments.audio_graph_smoke {
         return run_audio_graph_smoke();
@@ -734,8 +781,7 @@ async fn main() -> ExitCode {
     let audio_graph = default_journal_path()
         .ok()
         .map(|journal| PulseAudioGraph::new(SystemCommandRunner, journal));
-    let (aec_capability, aec_graph) = initialize_headphone_aec();
-    let device_watcher = build_device_watcher(aec_capability);
+    let device_watcher = build_device_watcher(AecCapability::Unavailable);
     let operation_gate = AudioOperationGate::new();
     let manual_routes = Arc::new(PulseManualRoutes {
         resources: LifecycleProtected::new(PulseResources {
@@ -743,28 +789,42 @@ async fn main() -> ExitCode {
             devices: device_watcher,
             original_loopbacks: PulseOriginalLoopbacks::new(SystemCommandRunner),
             graph: audio_graph,
-            aec_graph,
         }),
         operation_gate: operation_gate.clone(),
     });
     manual_routes.initialize(&store);
-    let audio_mix: Arc<dyn AudioMixController> = Arc::new(PulseAudioMixController::new());
+    let audio_mix: Arc<dyn AudioMixController> =
+        Arc::new(AudioMixApplication::new(SystemCommandRunner));
     let duplex_config = build_duplex_config(lease.token_path());
     let translation = duplex_config.clone().map(|config| {
-        Arc::new(DuplexRuntimeHandle::with_runner_and_gate(
+        ControlApplication::spawn(
+            store.clone(),
             Arc::new(ProcessDuplexRunner::with_observer(
                 config,
                 Arc::new(RuntimeLatencyObserver::new(store.clone())),
             )),
             operation_gate.clone(),
-        ))
+            manual_routes.clone(),
+            manual_routes.clone(),
+            Some(audio_mix.clone()),
+        )
     });
-    let round_trip = duplex_config.map(|config| {
-        Arc::new(RoundTripRuntimeHandle::new(
+    let round_trip = duplex_config.and_then(|config| {
+        match RoundTripRuntimeHandle::try_new(
             store.clone(),
             Arc::new(RoundTripProcessRunner::new(config)),
             operation_gate.clone(),
-        ))
+            manual_routes.clone(),
+        ) {
+            Ok(controller) => Some(Arc::new(controller)),
+            Err(_) => {
+                tracing::error!(
+                    event = "round_trip_initialization_failed",
+                    code = "owner_unavailable"
+                );
+                None
+            }
+        }
     });
     let router = build_router_with_controllers(
         store.clone(),
@@ -772,10 +832,8 @@ async fn main() -> ExitCode {
         ApiLimits::default(),
         ApiControllers {
             manual_routes: Some(manual_routes.clone()),
-            audio_mix: Some(audio_mix.clone()),
-            translation: translation
-                .as_ref()
-                .map(|controller| controller.clone() as Arc<dyn TranslationController>),
+            translation: translation.clone(),
+            aec_calibration: None,
             round_trip: round_trip
                 .as_ref()
                 .map(|controller| controller.clone() as Arc<dyn RoundTripController>),
@@ -794,71 +852,36 @@ async fn main() -> ExitCode {
         provider_schema_bytes = translator_ipc::PROVIDER_PROTO.len(),
         "translator daemon control plane is ready"
     );
-    let watcher_task = tokio::spawn(watcher_loop(
-        manual_routes.clone(),
-        audio_mix.clone(),
-        store.clone(),
-    ));
+    let watcher_task = tokio::spawn(watcher_loop(translation.clone(), store.clone()));
     let debug_capture_watchdog = tokio::spawn(store.clone().run_debug_capture_watchdog());
     let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
-    let mut server_task = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_receiver.await;
-            })
-            .await
+    let server_task = tokio::spawn(async move {
+        translator_daemon::serve_control(listener, router, async {
+            let _ = shutdown_receiver.await;
+        })
+        .await
     });
 
     shutdown_signal().await;
-    operation_gate.begin_stopping();
-    watcher_task.abort();
-    let _ = watcher_task.await;
-    debug_capture_watchdog.abort();
-    let _ = debug_capture_watchdog.await;
-    if matches!(
-        store.snapshot().self_test.status.checkpoint,
-        Some(
-            translator_daemon::RoundTripCheckpoint::WaitingForSpeech
-                | translator_daemon::RoundTripCheckpoint::OutgoingVad
-                | translator_daemon::RoundTripCheckpoint::OutgoingAsrFinal
-                | translator_daemon::RoundTripCheckpoint::OutgoingTranslationFinal
-                | translator_daemon::RoundTripCheckpoint::EnglishFirstAudio
-                | translator_daemon::RoundTripCheckpoint::VirtualPeerReinjecting
-                | translator_daemon::RoundTripCheckpoint::IncomingAsrFinal
-                | translator_daemon::RoundTripCheckpoint::IncomingTranslationFinal
-                | translator_daemon::RoundTripCheckpoint::RussianFirstAudio
-        )
-    ) && let Some(controller) = round_trip.as_ref()
-        && let Err(error) = controller.stop()
-    {
-        tracing::error!(event = "round_trip_shutdown_failed", code = error.code);
+    let (result, round_trip_result) = drain_control_owners(
+        &operation_gate,
+        (shutdown_sender, server_task),
+        [watcher_task, debug_capture_watchdog],
+        round_trip.as_ref(),
+        translation.as_deref(),
+        &store,
+    )
+    .await;
+    if round_trip_result.is_err() {
+        tracing::error!(
+            event = "daemon_shutdown_failed",
+            code = "round_trip_owner_failed"
+        );
+        return fail_stop((round_trip, manual_routes, lease)).await;
     }
-    if store.snapshot().translation_running
-        && let Some(controller) = translation.as_ref()
-        && let Err(error) = controller.stop()
-    {
-        tracing::error!(event = "translation_shutdown_failed", code = error.code);
-    }
-    store.set_translation_running(false);
-    let _ = store.set_debug_capture_enabled(false);
     if let Err(error) = manual_routes.restore() {
         tracing::error!(event = "route_restore_failed", code = ?error.code);
     }
-    store.shutdown_events();
-    let _ = shutdown_sender.send(());
-    let result =
-        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server_task).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(std::io::Error::other("server task failed")),
-            Err(_) => {
-                server_task.abort();
-                let _ = server_task.await;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "server drain timed out",
-                ))
-            }
-        };
     manual_routes.cleanup_graph();
     drop(lease);
     if result.is_err() {
@@ -867,6 +890,106 @@ async fn main() -> ExitCode {
     } else {
         tracing::info!(event = "daemon_stopped", code = "graceful_shutdown");
         ExitCode::SUCCESS
+    }
+}
+
+async fn drain_control_owners(
+    gate: &AudioOperationGate,
+    http: (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ),
+    background: [tokio::task::JoinHandle<()>; 2],
+    round_trip: Option<&Arc<RoundTripRuntimeHandle>>,
+    translation: Option<&ControlApplication>,
+    store: &RuntimeStore,
+) -> (std::io::Result<()>, Result<(), RoundTripOwnerShutdownError>) {
+    gate.begin_stopping();
+    let (shutdown, mut server) = http;
+    let _ = shutdown.send(());
+    for task in &background {
+        task.abort();
+    }
+    for task in background {
+        let _ = task.await;
+    }
+    let server_result =
+        match tokio::time::timeout(std::time::Duration::from_secs(7), &mut server).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(std::io::Error::other("server task failed")),
+            Err(_) => {
+                server.abort();
+                let _ = server.await;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "server drain timed out",
+                ))
+            }
+        };
+    let round_trip_result = match round_trip {
+        Some(controller) => drain_round_trip(controller).await,
+        None => Ok(()),
+    };
+    if let Some(controller) = translation {
+        drain_translation(controller).await;
+    }
+    let _ = store.set_debug_capture_enabled(false);
+    store.shutdown_events();
+    (server_result, round_trip_result)
+}
+
+async fn fail_stop<T>(owners: T) -> ExitCode {
+    let _owners = owners;
+    std::future::pending().await
+}
+
+async fn drain_translation(controller: &ControlApplication) {
+    loop {
+        match controller.shutdown().await {
+            Ok(()) => return,
+            Err(error) => tracing::error!(event = "translation_shutdown_failed", code = error.code),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+async fn drain_round_trip(
+    controller: &Arc<RoundTripRuntimeHandle>,
+) -> Result<(), RoundTripOwnerShutdownError> {
+    drain_round_trip_attempts(|| {
+        let owner = Arc::clone(controller);
+        join_round_trip_shutdown(move || owner.shutdown())
+    })
+    .await
+}
+
+async fn join_round_trip_shutdown(
+    attempt: impl FnOnce() -> Result<(), RoundTripOwnerShutdownError> + Send + 'static,
+) -> Result<(), RoundTripOwnerShutdownError> {
+    tokio::task::spawn_blocking(attempt)
+        .await
+        .map_err(|_| RoundTripOwnerShutdownError::OwnerFailed)?
+}
+
+async fn drain_round_trip_attempts<F, R>(mut attempt: F) -> Result<(), RoundTripOwnerShutdownError>
+where
+    F: FnMut() -> R,
+    R: std::future::Future<Output = Result<(), RoundTripOwnerShutdownError>>,
+{
+    loop {
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(RoundTripOwnerShutdownError::OwnerFailed) => {
+                return Err(RoundTripOwnerShutdownError::OwnerFailed);
+            }
+            Err(RoundTripOwnerShutdownError::CleanupPending) => {
+                tracing::error!(
+                    event = "round_trip_shutdown_failed",
+                    code = "cleanup_pending"
+                );
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -893,11 +1016,7 @@ fn build_duplex_config(token_path: &std::path::Path) -> Option<ProcessDuplexConf
 }
 
 fn build_device_watcher(aec_capability: AecCapability) -> PulseDeviceWatcher<SystemCommandRunner> {
-    let mut device_watcher = PulseDeviceWatcher::new(SystemCommandRunner, aec_capability);
-    if let Some(sink_name) = std::env::var_os("TRANSLATOR_HEADPHONE_SINK") {
-        device_watcher = device_watcher.with_explicit_headphone_sink(sink_name.to_string_lossy());
-    }
-    device_watcher
+    PulseDeviceWatcher::new(SystemCommandRunner, aec_capability)
 }
 
 fn build_routing_watcher() -> PulseRoutingWatcher<SystemCommandRunner> {
@@ -914,74 +1033,6 @@ fn build_routing_watcher() -> PulseRoutingWatcher<SystemCommandRunner> {
     }
 }
 
-fn initialize_headphone_aec() -> (AecCapability, Option<PulseAecGraph<SystemCommandRunner>>) {
-    if std::env::var_os("TRANSLATOR_ENABLE_HEADPHONE_AEC").is_none() {
-        tracing::info!(event = "headphone_aec_disabled", reason = "not_enabled");
-        return (AecCapability::Unavailable, None);
-    }
-    if std::env::var_os("TRANSLATOR_DISABLE_HEADPHONE_AEC").is_some() {
-        tracing::info!(event = "headphone_aec_disabled", reason = "disabled");
-        return (AecCapability::Unavailable, None);
-    }
-    let mut probe = build_device_watcher(AecCapability::Unavailable);
-    let state = match probe.reconcile(DeviceOverride::default()) {
-        Ok(state) => state,
-        Err(error) => {
-            tracing::warn!(
-                event = "headphone_aec_probe_failed",
-                code = ?error.code()
-            );
-            return (AecCapability::Unavailable, None);
-        }
-    };
-    if state.acoustic.mode != OutputMode::Headphones {
-        return (AecCapability::Unavailable, None);
-    }
-    let Some(source) = state
-        .source
-        .selected
-        .as_ref()
-        .map(|source| source.name.clone())
-    else {
-        return (AecCapability::Unavailable, None);
-    };
-    let Some(sink) = state.sink.selected.as_ref().map(|sink| sink.name.clone()) else {
-        return (AecCapability::Unavailable, None);
-    };
-    let generation = format!("translator-headphone-aec-{}", uuid::Uuid::new_v4());
-    let mut graph = match PulseAecGraph::new(
-        SystemCommandRunner,
-        AecPhysicalPair::new(source.clone(), sink.clone()),
-        generation,
-    ) {
-        Ok(graph) => graph,
-        Err(error) => {
-            tracing::warn!(event = "headphone_aec_configuration_failed", code = ?error.code());
-            return (AecCapability::Unavailable, None);
-        }
-    };
-    match graph.load_owned() {
-        Ok(_) => {
-            tracing::info!(
-                event = "headphone_aec_ready",
-                source_name = %source,
-                sink_name = %sink
-            );
-            (
-                AecCapability::ValidatedFor {
-                    source_name: source,
-                    sink_name: sink,
-                },
-                Some(graph),
-            )
-        }
-        Err(error) => {
-            tracing::warn!(event = "headphone_aec_load_failed", code = ?error.code());
-            (AecCapability::Unavailable, None)
-        }
-    }
-}
-
 async fn shutdown_signal() {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler installation failed");
@@ -991,31 +1042,16 @@ async fn shutdown_signal() {
     }
 }
 
-async fn watcher_loop(
-    controller: Arc<PulseManualRoutes>,
-    audio_mix: Arc<dyn AudioMixController>,
-    store: RuntimeStore,
-) {
+async fn watcher_loop(controller: Option<Arc<ControlApplication>>, store: RuntimeStore) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_latency_epoch = 0;
     loop {
         interval.tick().await;
-        let controller = controller.clone();
-        let audio_mix = audio_mix.clone();
-        let refresh_store = store.clone();
-        let snapshot = store.snapshot();
-        let volumes = effective_audio_mix_for_service(&snapshot);
-        if tokio::task::spawn_blocking(move || {
-            controller.refresh(&refresh_store);
-            if let Err(error) = audio_mix.apply(volumes) {
-                tracing::warn!(event = "audio_mix_watchdog_apply_failed", code = error.code);
-            }
-        })
-        .await
-        .is_err()
+        if let Some(controller) = controller.as_ref()
+            && let Err(error) = controller.execute(ControlCommand::ReconcileAudio).await
         {
-            tracing::error!(event = "watcher_task_failed", code = "join_failed");
+            tracing::warn!(event = "audio_reconciliation_failed", code = error.code);
         }
         let now_ms = store.monotonic_ms();
         let epoch_end = (now_ms / 60_000) * 60_000;
@@ -1076,7 +1112,7 @@ fn run_watcher_state_smoke() -> ExitCode {
     };
     print_json(&serde_json::json!({
         "routing": routing,
-        "devices": devices,
+        "devices": translator_daemon::DeviceState::from(devices),
     }))
 }
 
@@ -1101,26 +1137,391 @@ fn print_json<T: serde::Serialize>(value: &T) -> ExitCode {
 }
 
 #[cfg(test)]
+mod admission_adapter_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
+    use translator_audio::{CommandRunError, RouteResolution};
+    use translator_daemon::{AdmittedDuplex, DuplexRunner, DuplexStartResult};
+
+    #[derive(Default)]
+    struct Reads {
+        calls: Mutex<Vec<(Vec<String>, Instant)>>,
+        second_default: AtomicBool,
+        fail_at: Option<usize>,
+        expire_at: Option<usize>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ReadRunner(Arc<Reads>);
+
+    impl CommandRunner for ReadRunner {
+        fn run_until(
+            &self,
+            program: &str,
+            args: &[String],
+            deadline: Instant,
+        ) -> Result<CommandResult, CommandRunError> {
+            assert_eq!(program, "pactl");
+            let index = {
+                let mut calls = self.0.calls.lock().unwrap();
+                let index = calls.len();
+                calls.push((args.to_vec(), deadline));
+                index
+            };
+            if self.0.fail_at == Some(index) {
+                return Err(CommandRunError::SpawnFailed);
+            }
+            if self.0.expire_at == Some(index) {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            }
+            let args: Vec<_> = args.iter().map(String::as_str).collect();
+            let text = match args.as_slice() {
+                ["get-default-source"] => "alsa_input.microphone".to_owned(),
+                ["get-default-sink"] => if self.0.second_default.load(Ordering::SeqCst) { "alsa_output.other-headphones" } else { "alsa_output.headphones" }.to_owned(),
+                ["--format=json", "list", "sources"] => serde_json::json!([{"index":1,"name":"alsa_input.microphone","owner_module":80,"monitor_source":"","properties":{"device.api":"alsa","device.class":"sound","media.class":"Audio/Source"},"active_port":null}]).to_string(),
+                ["--format=json", "list", "sinks"] => serde_json::json!([
+                    {"index":2,"name":"alsa_output.headphones","owner_module":80,"monitor_source":"alsa_output.headphones.monitor","properties":{"device.api":"alsa","device.class":"sound","media.class":"Audio/Sink"},"active_port":"analog-output-headphones","ports":[{"name":"analog-output-headphones","type":"Headphones"}]},
+                    {"index":3,"name":"alsa_output.other-headphones","owner_module":81,"monitor_source":"alsa_output.other-headphones.monitor","properties":{"device.api":"alsa","device.class":"sound","media.class":"Audio/Sink"},"active_port":"analog-output-headphones","ports":[{"name":"analog-output-headphones","type":"Headphones"}]}
+                ]).to_string(),
+                ["--format=json", "list", "sink-inputs" | "source-outputs"] => "[]".to_owned(),
+                _ => panic!("facts inspection attempted an unexpected command: {args:?}"),
+            };
+            Ok(CommandResult::success(text.into_bytes()))
+        }
+    }
+
+    fn adapter(runner: ReadRunner, journal: std::path::PathBuf) -> PulseManualRoutes<ReadRunner> {
+        PulseManualRoutes {
+            resources: LifecycleProtected::new(PulseResources {
+                routing: PulseRoutingWatcher::new(runner.clone(), RoutingProfile::Production),
+                devices: PulseDeviceWatcher::new(runner.clone(), AecCapability::Unavailable),
+                original_loopbacks: PulseOriginalLoopbacks::new(runner.clone()),
+                graph: Some(PulseAudioGraph::new(runner, journal)),
+            }),
+            operation_gate: AudioOperationGate::new(),
+        }
+    }
+
+    fn journal_entries(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+        let mut entries = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    #[test]
+    fn facts_adapter_reads_all_ports_without_committing_pins_or_ownership() {
+        let temp = tempdir().unwrap();
+        let lock = temp.path().join(".modules.json.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let before_entries = journal_entries(temp.path());
+        let runner = ReadRunner::default();
+        let adapter = adapter(runner.clone(), temp.path().join("modules.json"));
+        let original_deadline = Instant::now() + Duration::from_secs(1);
+        let first = adapter.inspect(original_deadline).unwrap();
+        assert_ne!(first.audio_graph.health, GraphHealth::Ready);
+        assert_eq!(first.routes.resolution, RouteResolution::NoCandidate);
+        assert_eq!(
+            first.devices.sink.selected.unwrap().name,
+            "alsa_output.headphones"
+        );
+        assert!(
+            adapter
+                .resources
+                .inner
+                .lock()
+                .unwrap()
+                .devices
+                .selected_sink_name()
+                .is_none()
+        );
+        runner.0.second_default.store(true, Ordering::SeqCst);
+        let second = adapter.inspect(original_deadline).unwrap();
+        assert_eq!(
+            second.devices.sink.selected.unwrap().name,
+            "alsa_output.other-headphones"
+        );
+        assert!(
+            adapter
+                .resources
+                .inner
+                .lock()
+                .unwrap()
+                .devices
+                .selected_sink_name()
+                .is_none()
+        );
+        assert_eq!(journal_entries(temp.path()), before_entries);
+        assert_eq!(std::fs::read(lock).unwrap(), b"");
+        let calls = runner.0.calls.lock().unwrap();
+        assert_eq!(calls.len(), 20);
+        let expected_device_commands = [
+            "--format=json list sinks",
+            "--format=json list sources",
+            "get-default-sink",
+            "get-default-source",
+        ];
+        let expected_graph_and_route_commands = [
+            "--format=json list sinks",
+            "--format=json list sources",
+            "--format=json list sink-inputs",
+            "--format=json list source-outputs",
+            "--format=json list sources",
+            "--format=json list sinks",
+        ];
+        for pass in calls.chunks_exact(10) {
+            let mut device_commands = pass[..4]
+                .iter()
+                .map(|(args, _)| args.join(" "))
+                .collect::<Vec<_>>();
+            device_commands.sort();
+            assert_eq!(device_commands, expected_device_commands);
+            assert_eq!(
+                pass[4..]
+                    .iter()
+                    .map(|(args, _)| args.join(" "))
+                    .collect::<Vec<_>>(),
+                expected_graph_and_route_commands,
+            );
+        }
+        assert!(
+            calls
+                .iter()
+                .all(|(_, deadline)| *deadline == original_deadline)
+        );
+    }
+
+    #[test]
+    fn facts_adapter_absent_ownership_never_initializes_graph() {
+        let temp = tempdir().unwrap();
+        let absent = temp.path().join("absent");
+        let runner = ReadRunner::default();
+        let adapter = adapter(runner.clone(), absent.join("modules.json"));
+        assert!(matches!(
+            adapter.inspect(Instant::now() + Duration::from_secs(1)),
+            Err(FactsError::DiscoveryFailed)
+        ));
+        assert!(!absent.exists());
+        assert_eq!(runner.0.calls.lock().unwrap().len(), 4);
+        assert!(
+            adapter
+                .resources
+                .inner
+                .lock()
+                .unwrap()
+                .devices
+                .selected_sink_name()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn facts_adapter_failed_or_late_port_never_enters_the_next_port() {
+        for index in [0, 4, 6] {
+            for expire in [false, true] {
+                let temp = tempdir().unwrap();
+                std::fs::write(temp.path().join(".modules.json.lock"), b"").unwrap();
+                let before = journal_entries(temp.path());
+                let runner = ReadRunner(Arc::new(Reads {
+                    fail_at: (!expire).then_some(index),
+                    expire_at: expire.then_some(index),
+                    ..Reads::default()
+                }));
+                let adapter = adapter(runner.clone(), temp.path().join("modules.json"));
+                let deadline = Instant::now() + Duration::from_millis(30);
+                let result = adapter.inspect(deadline);
+                assert!(matches!(
+                    (result, expire),
+                    (Err(FactsError::Expired), true) | (Err(FactsError::DiscoveryFailed), false)
+                ));
+                let calls = runner.0.calls.lock().unwrap();
+                assert_eq!(calls.len(), index + 1);
+                assert!(calls.iter().all(|(_, observed)| *observed == deadline));
+                assert_eq!(journal_entries(temp.path()), before);
+                assert!(
+                    adapter
+                        .resources
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .devices
+                        .selected_sink_name()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn facts_adapter_busy_stopping_and_expired_entry_issue_no_commands() {
+        let temp = tempdir().unwrap();
+        let runner = ReadRunner::default();
+        let adapter = adapter(runner.clone(), temp.path().join("modules.json"));
+        let guard = adapter.resources.inner.lock().unwrap();
+        let busy = adapter.inspect(Instant::now() + Duration::from_secs(1));
+        drop(guard);
+        assert!(matches!(busy, Err(FactsError::Busy)));
+        assert!(matches!(
+            adapter.inspect(Instant::now()),
+            Err(FactsError::Expired)
+        ));
+        adapter.resources.stopping.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            adapter.inspect(Instant::now() + Duration::from_secs(1)),
+            Err(FactsError::DiscoveryFailed)
+        ));
+        assert!(runner.0.calls.lock().unwrap().is_empty());
+        assert!(journal_entries(temp.path()).is_empty());
+    }
+
+    struct NeverNative(AtomicUsize);
+
+    impl DuplexRunner for NeverNative {
+        fn start(&self, _: AdmittedDuplex, _: tokio::time::Instant) -> DuplexStartResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(translator_daemon::DuplexStartFailure::rejected(
+                translator_daemon::DuplexRuntimeError::StartFailed,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_start_using_real_facts_adapter_has_no_state_event_or_audio_effect() {
+        use axum::{
+            body::Body,
+            http::{Method, Request},
+        };
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join(".modules.json.lock"), b"").unwrap();
+        let before_entries = journal_entries(temp.path());
+        let runner = ReadRunner::default();
+        let adapter = Arc::new(adapter(runner.clone(), temp.path().join("modules.json")));
+        let store = RuntimeStore::default();
+        let before = serde_json::to_value(store.snapshot()).unwrap();
+        let native = Arc::new(NeverNative(AtomicUsize::new(0)));
+        let controller = ControlApplication::spawn(
+            store.clone(),
+            native.clone(),
+            adapter.operation_gate.clone(),
+            adapter.clone(),
+            adapter.clone(),
+            None,
+        );
+        let token = "4242424242424242424242424242424242424242424242424242424242424242";
+        let router = build_router_with_controllers(
+            store.clone(),
+            ControlToken::parse(token).unwrap(),
+            ApiLimits::default(),
+            ApiControllers {
+                translation: Some(controller.clone()),
+                ..ApiControllers::default()
+            },
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/events/stream")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut events = response.into_body();
+        events.frame().await.unwrap().unwrap();
+        let result = controller.execute(ControlCommand::Start).await;
+        let after = serde_json::to_value(store.snapshot()).unwrap();
+        let unexpected_event =
+            tokio::time::timeout(Duration::from_millis(20), events.frame()).await;
+        let gate = adapter.operation_gate.state();
+        drop(events);
+        controller.shutdown().await.unwrap();
+
+        assert_eq!(result.unwrap_err().code, "translation_precondition_failed");
+        assert_eq!(after, before);
+        assert!(unexpected_event.is_err());
+        assert_eq!(native.0.load(Ordering::SeqCst), 0);
+        assert_eq!(gate, AudioOperationState::Idle);
+        assert_eq!(runner.0.calls.lock().unwrap().len(), 10);
+        assert!(
+            adapter
+                .resources
+                .inner
+                .lock()
+                .unwrap()
+                .devices
+                .selected_sink_name()
+                .is_none()
+        );
+        assert_eq!(journal_entries(temp.path()), before_entries);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
-    use std::sync::{Arc, mpsc};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    };
     use std::time::{Duration, Instant};
 
     use super::{
         DiscoveredOriginalLoopback, LifecycleProtected, MICROPHONE_ORIGINAL_LOOPBACK,
         ManualRouteAdmission, OriginalLoopbackRequest, RawPulseStream, SPEAKER_ORIGINAL_LOOPBACK,
-        discover_original_loopbacks, effective_audio_mix_for_service, maintain_audio_graph,
-        manual_route_admission, matching_original_loopbacks, original_loopback_load_args,
-        original_loopback_requests,
+        discover_original_loopbacks, maintain_audio_graph, manual_route_admission,
+        matching_original_loopbacks, original_loopback_load_args, original_loopback_requests,
     };
     use translator_audio::{
-        AcousticSafety, AecCapability, AudioEndpointState, AudioGraph, AudioGraphError,
-        AudioGraphState, DeviceHealth, DeviceSelectionState, DeviceState, EndpointRole,
-        GraphHealth, MIC_OUT_SINK, OutputMode, PhysicalDevice, REMOTE_IN_SINK,
+        AecCapability, AudioEndpointState, AudioGraph, AudioGraphError, AudioGraphState,
+        DeviceHealth, DeviceSelectionState, EndpointRole, GraphHealth, MIC_OUT_SINK, OutputMode,
+        PhysicalDevice, REMOTE_IN_SINK,
     };
-    use translator_daemon::{AudioMixState, AudioOperationState, RuntimeSnapshot};
+    use translator_daemon::{
+        AcousticSafety, AdmittedDuplex, AudioMixState, AudioOperationState, DeviceState,
+        RuntimeSnapshot,
+    };
     use uuid::Uuid;
+
+    struct TestFacts;
+    impl translator_daemon::RuntimeFactsSource for TestFacts {
+        fn inspect(
+            &self,
+            _: Instant,
+        ) -> Result<translator_daemon::RuntimeFacts, translator_daemon::FactsError> {
+            let devices = selected_devices();
+            Ok(translator_daemon::RuntimeFacts {
+                devices: translator_audio::DeviceFacts {
+                    source: devices.source,
+                    sink: devices.sink,
+                    output_mode: devices.acoustic.mode,
+                    aec_capability: devices.acoustic.aec_capability,
+                },
+                audio_graph: AudioGraphState {
+                    health: GraphHealth::Ready,
+                    endpoints: Vec::new(),
+                    owned_module_ids: Vec::new(),
+                    safe_error: None,
+                },
+                routes: translator_audio::RoutingState {
+                    candidates: Vec::new(),
+                    source_outputs: Vec::new(),
+                    conflicting_stream_ids: Vec::new(),
+                    active_route: None,
+                    resolution: translator_audio::RouteResolution::NoCandidate,
+                },
+            })
+        }
+    }
 
     #[test]
     fn shutdown_waits_for_active_refresh_and_rejects_late_refresh() {
@@ -1262,38 +1663,6 @@ mod tests {
     }
 
     #[test]
-    fn stopped_translation_uses_audible_bypass_mix_without_mutating_snapshot() {
-        let snapshot = RuntimeSnapshot {
-            translation_running: false,
-            audio_mix: AudioMixState {
-                microphone_original_percent: 0,
-                microphone_translation_percent: 100,
-                speaker_original_percent: 0,
-                speaker_translation_percent: 100,
-            },
-            ..RuntimeSnapshot::default()
-        };
-
-        assert_eq!(
-            effective_audio_mix_for_service(&snapshot),
-            AudioMixState {
-                microphone_original_percent: 100,
-                microphone_translation_percent: 0,
-                speaker_original_percent: 100,
-                speaker_translation_percent: 0,
-            }
-        );
-        assert_eq!(snapshot.audio_mix.microphone_original_percent, 0);
-        assert_eq!(snapshot.audio_mix.speaker_original_percent, 0);
-
-        let running = RuntimeSnapshot {
-            translation_running: true,
-            ..snapshot
-        };
-        assert_eq!(effective_audio_mix_for_service(&running), running.audio_mix);
-    }
-
-    #[test]
     fn original_loopback_load_args_are_discoverable_by_audio_mix() {
         let request = OriginalLoopbackRequest {
             media_name: SPEAKER_ORIGINAL_LOOPBACK,
@@ -1375,17 +1744,23 @@ mod tests {
     }
 
     impl AudioGraph for FakeGraph {
-        fn ensure_endpoints(&mut self) -> Result<AudioGraphState, AudioGraphError> {
+        fn ensure_endpoints_until(
+            &mut self,
+            _: std::time::Instant,
+        ) -> Result<AudioGraphState, AudioGraphError> {
             self.ensure_calls += 1;
             Ok(graph_state(GraphHealth::Ready))
         }
 
-        fn inspect(&self) -> Result<AudioGraphState, AudioGraphError> {
+        fn inspect_until(&self, _: std::time::Instant) -> Result<AudioGraphState, AudioGraphError> {
             self.inspect_calls.set(self.inspect_calls.get() + 1);
             Ok(graph_state(self.inspect_health))
         }
 
-        fn cleanup_owned(&mut self) -> Result<Vec<u32>, AudioGraphError> {
+        fn cleanup_owned_until(
+            &mut self,
+            _: std::time::Instant,
+        ) -> Result<Vec<u32>, AudioGraphError> {
             unreachable!("graph maintenance does not cleanup endpoints")
         }
     }
@@ -1423,14 +1798,14 @@ mod tests {
             source: DeviceSelectionState {
                 health: DeviceHealth::Available,
                 selected: Some(physical_device(1, "alsa_input.microphone")),
-                pinned_name: None,
+                pinned_name: Some("alsa_input.microphone".to_owned()),
                 current_default: Some("alsa_input.microphone".to_owned()),
                 pending_default: None,
             },
             sink: DeviceSelectionState {
                 health: DeviceHealth::Available,
                 selected: Some(physical_device(2, "alsa_output.headphones")),
-                pinned_name: None,
+                pinned_name: Some("alsa_output.headphones".to_owned()),
                 current_default: Some("alsa_output.headphones".to_owned()),
                 pending_default: None,
             },
@@ -1462,5 +1837,563 @@ mod tests {
                 ("target.object".to_owned(), target.to_owned()),
             ]),
         }
+    }
+
+    #[derive(Default)]
+    struct DrainState {
+        stop_failures: AtomicUsize,
+        recovery_failures: AtomicUsize,
+        unknown: AtomicBool,
+        failed: tokio::sync::Notify,
+        attempts: Mutex<Vec<Instant>>,
+    }
+
+    #[derive(Clone)]
+    struct DrainRuntime(Arc<DrainState>);
+
+    impl DrainRuntime {
+        fn attempt(&self, failures: &AtomicUsize) -> Result<(), translator_daemon::ControlFailure> {
+            self.0.attempts.lock().unwrap().push(Instant::now());
+            if failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                self.0.failed.notify_one();
+                Err(translator_daemon::ControlFailure {
+                    status: axum::http::StatusCode::CONFLICT,
+                    code: "audio_mix_state_unknown",
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl translator_daemon::DuplexRunner for DrainRuntime {
+        fn start(
+            &self,
+            _: AdmittedDuplex,
+            _: tokio::time::Instant,
+        ) -> translator_daemon::DuplexStartResult {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    impl translator_daemon::ActiveDuplexRuntime for DrainRuntime {
+        fn stop(
+            &mut self,
+            _: tokio::time::Instant,
+        ) -> Result<(), translator_daemon::DuplexRuntimeError> {
+            if self.0.unknown.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.attempt(&self.0.stop_failures)
+                .map_err(|_| translator_daemon::DuplexRuntimeError::StopFailed)
+        }
+    }
+
+    impl translator_daemon::RuntimeMaintenance for DrainRuntime {
+        fn refresh(
+            &self,
+            _: &translator_daemon::RuntimeStore,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            Ok(())
+        }
+    }
+
+    impl translator_daemon::AudioMixController for DrainRuntime {
+        fn apply_desired(
+            &self,
+            _: AudioMixState,
+            _: translator_daemon::TranslationMixMode,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            Ok(())
+        }
+        fn reconcile_committed(
+            &self,
+            _: translator_daemon::TranslationMixMode,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            if self.0.unknown.load(Ordering::SeqCst) {
+                Err(translator_daemon::ControlFailure {
+                    status: axum::http::StatusCode::CONFLICT,
+                    code: "audio_mix_state_unknown",
+                })
+            } else {
+                Ok(())
+            }
+        }
+        fn recover_committed(
+            &self,
+            _: translator_daemon::TranslationMixMode,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            self.attempt(&self.0.recovery_failures)?;
+            self.0.unknown.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    async fn assert_drain_retries(stop_failures: usize, recovery_failures: usize) {
+        use translator_daemon::{
+            AudioOperationGate, ControlApplication, ControlCommand, RuntimeStore,
+        };
+        let state = Arc::new(DrainState::default());
+        let native = Arc::new(DrainRuntime(state.clone()));
+        let gate = AudioOperationGate::new();
+        let control = ControlApplication::spawn(
+            RuntimeStore::default(),
+            native.clone(),
+            gate.clone(),
+            Arc::new(TestFacts),
+            native.clone(),
+            Some(native),
+        );
+        control.execute(ControlCommand::Start).await.unwrap();
+        state.stop_failures.store(stop_failures, Ordering::SeqCst);
+        state
+            .recovery_failures
+            .store(recovery_failures, Ordering::SeqCst);
+        state.unknown.store(recovery_failures > 0, Ordering::SeqCst);
+        let route_observed = Arc::new(AtomicBool::new(false));
+        let owner = control.clone();
+        let observer = route_observed.clone();
+        let mut drain = tokio::spawn(async move {
+            super::drain_translation(&owner).await;
+            observer.store(true, Ordering::SeqCst);
+        });
+        tokio::time::timeout(Duration::from_secs(2), state.failed.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pending = !drain.is_finished();
+        let held_state = gate.state();
+        let cleanup_before_success = route_observed.load(Ordering::SeqCst);
+        let rejects_normal_work = control.execute(ControlCommand::Start).await.is_err();
+        let completed = match tokio::time::timeout(Duration::from_secs(5), &mut drain).await {
+            Ok(result) => result.is_ok(),
+            Err(_) => {
+                drain.abort();
+                let _ = drain.await;
+                false
+            }
+        };
+        if !pending || !completed {
+            for _ in 0..3 {
+                if control.shutdown().await.is_ok() {
+                    break;
+                }
+            }
+        }
+        assert!(
+            completed,
+            "bounded drain fixture must complete without detaching tasks"
+        );
+        assert!(
+            pending,
+            "main must retain and retry a failed controller drain"
+        );
+        assert!(
+            !cleanup_before_success,
+            "route cleanup must wait for successful drain"
+        );
+        assert!(rejects_normal_work);
+        if stop_failures > 0 {
+            assert_eq!(held_state, AudioOperationState::Production);
+        }
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        assert!(route_observed.load(Ordering::SeqCst));
+        let attempts = state.attempts.lock().unwrap();
+        assert_eq!(attempts.len(), stop_failures + recovery_failures + 1);
+        assert!(
+            attempts
+                .windows(2)
+                .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_secs(1)),
+            "completed failures must be separated by a full second before retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_native_shutdown_is_retried_before_route_cleanup() {
+        assert_drain_retries(1, 0).await;
+    }
+
+    #[tokio::test]
+    async fn twice_failed_native_shutdown_remains_owned_with_paced_retries() {
+        assert_drain_retries(2, 0).await;
+    }
+
+    #[tokio::test]
+    async fn failed_mix_recovery_uses_the_same_owned_shutdown_retry() {
+        assert_drain_retries(0, 1).await;
+    }
+
+    struct RoundTripDrain(Arc<Mutex<Vec<Instant>>>);
+
+    #[derive(Default)]
+    struct PanickingOwnerDrop {
+        admission: Option<(Arc<AtomicBool>, Arc<AtomicBool>)>,
+    }
+
+    impl Drop for PanickingOwnerDrop {
+        fn drop(&mut self) {
+            if let Some((closed, observed)) = &self.admission {
+                observed.store(closed.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            panic!("injected resource-free owner failure");
+        }
+    }
+
+    impl translator_daemon::RoundTripRunner for PanickingOwnerDrop {
+        fn start(
+            &self,
+            _: AdmittedDuplex,
+            _: Uuid,
+            _: translator_daemon::RoundTripProgress,
+            _: Instant,
+        ) -> Result<
+            Box<dyn translator_daemon::ActiveRoundTripRuntime>,
+            translator_daemon::RoundTripRuntimeError,
+        > {
+            Err(translator_daemon::RoundTripRuntimeError::StartFailed)
+        }
+    }
+
+    #[tokio::test]
+    async fn permanently_failed_round_trip_owner_does_not_repeat_shutdown_forever() {
+        let owner = Arc::new(
+            translator_daemon::RoundTripRuntimeHandle::try_new(
+                translator_daemon::RuntimeStore::default(),
+                Arc::new(PanickingOwnerDrop::default()),
+                translator_daemon::AudioOperationGate::new(),
+                Arc::new(TestFacts),
+            )
+            .unwrap(),
+        );
+        let attempted_owner = Arc::clone(&owner);
+        let mut driver =
+            tokio::spawn(async move { super::drain_round_trip(&attempted_owner).await });
+        let completed = match tokio::time::timeout(Duration::from_millis(500), &mut driver).await {
+            Ok(result) => {
+                assert_eq!(
+                    result.unwrap(),
+                    Err(super::RoundTripOwnerShutdownError::OwnerFailed)
+                );
+                true
+            }
+            Err(_) => {
+                driver.abort();
+                let _ = driver.await;
+                false
+            }
+        };
+        assert_eq!(
+            owner.shutdown(),
+            Err(super::RoundTripOwnerShutdownError::OwnerFailed)
+        );
+        assert!(
+            completed,
+            "a dead owner must return terminal failure rather than retry forever"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn typed_pending_cleanup_retries_sequentially_after_one_second() {
+        let mut attempts = Vec::new();
+        let result = super::drain_round_trip_attempts(|| {
+            attempts.push(tokio::time::Instant::now());
+            std::future::ready(if attempts.len() < 3 {
+                Err(super::RoundTripOwnerShutdownError::CleanupPending)
+            } else {
+                Ok(())
+            })
+        })
+        .await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts.len(), 3);
+        assert!(
+            attempts
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] == Duration::from_secs(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn fatal_shutdown_and_joined_blocking_panic_each_end_after_one_attempt() {
+        for panic in [false, true] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = attempts.clone();
+            let mut driver = tokio::spawn(async move {
+                super::drain_round_trip_attempts(|| {
+                    let observed = observed.clone();
+                    super::join_round_trip_shutdown(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        assert!(!panic, "injected blocking shutdown panic");
+                        Err(super::RoundTripOwnerShutdownError::OwnerFailed)
+                    })
+                })
+                .await
+            });
+            let result = match tokio::time::timeout(Duration::from_millis(500), &mut driver).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => {
+                    driver.abort();
+                    let _ = driver.await;
+                    panic!("terminal failure must not enter the retry sleep");
+                }
+            };
+            assert_eq!(result, Err(super::RoundTripOwnerShutdownError::OwnerFailed));
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    struct DropSpy(Arc<AtomicUsize>);
+
+    impl Drop for DropSpy {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn fatal_retention_holds_every_dependent_owner_until_fixture_is_cancelled() {
+        let counters = [0; 3].map(|_| Arc::new(AtomicUsize::new(0)));
+        let owners = (
+            DropSpy(counters[0].clone()),
+            DropSpy(counters[1].clone()),
+            DropSpy(counters[2].clone()),
+        );
+        let mut driver = tokio::spawn(super::fail_stop(owners));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut driver)
+                .await
+                .is_err()
+        );
+        assert!(
+            counters
+                .iter()
+                .all(|count| count.load(Ordering::SeqCst) == 0)
+        );
+        driver.abort();
+        assert!(driver.await.unwrap_err().is_cancelled());
+        assert!(
+            counters
+                .iter()
+                .all(|count| count.load(Ordering::SeqCst) == 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn fatal_round_trip_still_drains_independent_owners_after_closing_admission() {
+        use tower::ServiceExt;
+        let store = translator_daemon::RuntimeStore::default();
+        let capture = tempfile::tempdir().unwrap();
+        store.configure_debug_capture(
+            super::DebugCaptureStore::open(capture.path(), super::DebugCaptureLimits::default())
+                .unwrap(),
+        );
+        store.set_debug_capture_enabled(true).unwrap();
+        let gate = super::AudioOperationGate::new();
+        let state = Arc::new(DrainState::default());
+        let runtime = Arc::new(DrainRuntime(state.clone()));
+        let control = super::ControlApplication::spawn(
+            store.clone(),
+            runtime.clone(),
+            gate.clone(),
+            Arc::new(TestFacts),
+            runtime,
+            None,
+        );
+        control.execute(super::ControlCommand::Start).await.unwrap();
+        let http_closed = Arc::new(AtomicBool::new(false));
+        let admission_before_attempt = Arc::new(AtomicBool::new(false));
+        let owner = Arc::new(
+            super::RoundTripRuntimeHandle::try_new(
+                store.clone(),
+                Arc::new(PanickingOwnerDrop {
+                    admission: Some((http_closed.clone(), admission_before_attempt.clone())),
+                }),
+                gate.clone(),
+                Arc::new(TestFacts),
+            )
+            .unwrap(),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let observed_gate = gate.clone();
+        let server = tokio::spawn(async move {
+            stopped.await.unwrap();
+            assert_eq!(observed_gate.state(), AudioOperationState::Stopping);
+            http_closed.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let background_drops = Arc::new(AtomicUsize::new(0));
+        let background = [0; 2].map(|_| {
+            let owned = DropSpy(background_drops.clone());
+            tokio::spawn(async move {
+                let _owned = owned;
+                std::future::pending::<()>().await;
+            })
+        });
+        let driver_store = store.clone();
+        let mut driver = tokio::spawn(async move {
+            let results = super::drain_control_owners(
+                &gate,
+                (stop, server),
+                background,
+                Some(&owner),
+                Some(&control),
+                &driver_store,
+            )
+            .await;
+            let command_after_shutdown = control.execute(super::ControlCommand::Start).await;
+            (results, command_after_shutdown)
+        });
+        let ((server_result, owner_result), command_after_shutdown) =
+            match tokio::time::timeout(Duration::from_secs(3), &mut driver).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => {
+                    driver.abort();
+                    let _ = driver.await;
+                    panic!("fatal owner fixture did not drain");
+                }
+            };
+        assert!(server_result.is_ok());
+        assert_eq!(
+            owner_result,
+            Err(super::RoundTripOwnerShutdownError::OwnerFailed)
+        );
+        assert!(admission_before_attempt.load(Ordering::SeqCst));
+        assert_eq!(background_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(state.attempts.lock().unwrap().len(), 1);
+        assert!(command_after_shutdown.is_err());
+        assert!(!store.snapshot().debug_capture_enabled);
+        let token = "a".repeat(64);
+        let router = translator_daemon::build_router(
+            store,
+            super::ControlToken::parse(&token).unwrap(),
+            super::ApiLimits::default(),
+        );
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/events/stream")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    impl translator_daemon::RoundTripRunner for RoundTripDrain {
+        fn start(
+            &self,
+            _: AdmittedDuplex,
+            session_id: Uuid,
+            progress: translator_daemon::RoundTripProgress,
+            _: Instant,
+        ) -> Result<
+            Box<dyn translator_daemon::ActiveRoundTripRuntime>,
+            translator_daemon::RoundTripRuntimeError,
+        > {
+            progress.fail(
+                session_id,
+                translator_daemon::RoundTripErrorCode::RuntimeFailed,
+            );
+            Ok(Box::new(Self(Arc::clone(&self.0))))
+        }
+    }
+
+    impl translator_daemon::ActiveRoundTripRuntime for RoundTripDrain {
+        fn stop(
+            &mut self,
+            _: Instant,
+            _: Instant,
+        ) -> Result<translator_daemon::RoundTripTerminal, translator_daemon::RoundTripRuntimeError>
+        {
+            let mut attempts = self.0.lock().unwrap();
+            attempts.push(Instant::now());
+            if attempts.len() < 3 {
+                Err(translator_daemon::RoundTripRuntimeError::StopFailed)
+            } else {
+                Ok(translator_daemon::RoundTripTerminal::Failed(
+                    translator_daemon::RoundTripErrorCode::RuntimeFailed,
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_round_trip_is_drained_and_owner_joined_before_route_cleanup() {
+        use translator_daemon::RoundTripController;
+        let store = translator_daemon::RuntimeStore::default();
+        store.set_devices(selected_devices());
+        store.set_audio_graph(AudioGraphState {
+            health: GraphHealth::Ready,
+            endpoints: Vec::new(),
+            owned_module_ids: Vec::new(),
+            safe_error: None,
+        });
+        store.set_routes(translator_audio::RoutingState {
+            candidates: Vec::new(),
+            source_outputs: Vec::new(),
+            conflicting_stream_ids: Vec::new(),
+            active_route: None,
+            resolution: translator_audio::RouteResolution::NoCandidate,
+        });
+        let gate = translator_daemon::AudioOperationGate::new();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let owner = Arc::new(
+            translator_daemon::RoundTripRuntimeHandle::try_new(
+                store.clone(),
+                Arc::new(RoundTripDrain(Arc::clone(&attempts))),
+                gate.clone(),
+                Arc::new(TestFacts),
+            )
+            .unwrap(),
+        );
+        owner.start().unwrap();
+        assert!(owner.stop().is_err());
+        assert_eq!(
+            store.snapshot().self_test.status.checkpoint,
+            Some(translator_daemon::RoundTripCheckpoint::Failed)
+        );
+        assert!(store.snapshot().self_test.status.cleanup_pending);
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&cleaned);
+        let driver_owner = Arc::clone(&owner);
+        let mut driver = tokio::spawn(async move {
+            super::drain_round_trip(&driver_owner).await.unwrap();
+            observed.store(true, Ordering::SeqCst);
+        });
+        let early_return = tokio::time::timeout(Duration::from_millis(100), &mut driver)
+            .await
+            .is_ok();
+        let retained = gate.state();
+        let early_cleanup = cleaned.load(Ordering::SeqCst);
+        if !early_return {
+            match tokio::time::timeout(Duration::from_secs(3), &mut driver).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => {
+                    driver.abort();
+                    let _ = driver.await;
+                    panic!("round-trip drain timed out");
+                }
+            }
+        }
+        assert!(!early_return && !early_cleanup);
+        assert!(matches!(
+            retained,
+            AudioOperationState::HumanRoundTrip { .. }
+        ));
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        assert!(!store.snapshot().self_test.status.cleanup_pending);
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts[2].duration_since(attempts[1]) >= Duration::from_secs(1));
     }
 }

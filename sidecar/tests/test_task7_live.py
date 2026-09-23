@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import Counter
 import json
+from collections import Counter
 from pathlib import Path
 from threading import Barrier, Lock
 
@@ -21,8 +21,8 @@ from translator_sidecar.benchmark.task7_live import (
     LiveBoundaryAdapter,
     PulseGraphProbe,
     ResourceSampler,
-    build_live_report_payload,
     build_capture_command,
+    build_live_report_payload,
     build_playback_command,
     correlate_marker,
     deterministic_marker,
@@ -30,10 +30,7 @@ from translator_sidecar.benchmark.task7_live import (
     run_task7_live,
 )
 
-
-PHYSICAL_SINK = (
-    "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo"
-)
+PHYSICAL_SINK = "alsa_output.usb-Jieli_Technology_UACDemoV1.0-00.analog-stereo"
 NOW_NS = 2_000_000_000_000
 
 
@@ -103,18 +100,14 @@ def test_task6_evidence_selects_fresh_measured_small_model(
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda payload: payload.update(
-            generated_at_unix_ns=NOW_NS - 61_000_000_000
-        ),
+        lambda payload: payload.update(generated_at_unix_ns=NOW_NS - 61_000_000_000),
         lambda payload: payload["normal_runtime"].update(
             selected_asr="faster-whisper-large-v3"
         ),
         lambda payload: payload["duplex_candidates"][0].update(
             measured_per_direction=99
         ),
-        lambda payload: payload["duplex_candidates"][0].update(
-            simultaneous=False
-        ),
+        lambda payload: payload["duplex_candidates"][0].update(simultaneous=False),
     ],
 )
 def test_task6_evidence_fails_closed_when_not_reusable(
@@ -347,9 +340,7 @@ def test_live_adapter_combines_provider_latency_with_detected_graph_transport(
     assert (
         observation.first_audible_ns - observation.speech_onset_ns
     ) / 1_000_000 == pytest.approx(423.0)
-    assert audio.calls == [
-        ("translator_mic_out", "translator_virtual_mic")
-    ]
+    assert audio.calls == [("translator_mic_out", "translator_virtual_mic")]
 
 
 def test_live_run_executes_exact_warmup_and_measured_counts_and_tears_down(
@@ -448,8 +439,7 @@ def test_live_run_fails_closed_on_audio_process_leak(tmp_path: Path) -> None:
         )
 
 
-def test_resource_sampler_uses_psutil_and_nvidia_smi_and_rejects_clock_rewind(
-) -> None:
+def test_resource_sampler_uses_psutil_and_nvidia_smi_and_rejects_clock_rewind() -> None:
     class Process:
         def cpu_percent(self, interval=None):
             return 12.5

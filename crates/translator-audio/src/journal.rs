@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use fs4::FileExt;
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat, renameat, unlinkat};
@@ -98,13 +99,69 @@ impl JournalStore {
         Self { path }
     }
 
-    pub fn lock(&self) -> Result<JournalSession, AudioGraphError> {
+    pub fn read_only_until(&self, deadline: Instant) -> Result<JournalSession, AudioGraphError> {
+        check_deadline(deadline)?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid))?;
+        let parent = File::from(
+            openat(
+                CWD,
+                parent,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid))?,
+        );
+        check_deadline(deadline)?;
+        let journal_name =
+            self.path.file_name().map(OsString::from).ok_or_else(|| {
+                AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid)
+            })?;
+        let lock_name = OsString::from(format!(".{}.lock", journal_name.to_string_lossy()));
+        let lock = File::from(
+            openat(
+                &parent,
+                &lock_name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid))?,
+        );
+        if !lock
+            .metadata()
+            .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalIo))?
+            .is_file()
+        {
+            return Err(AudioGraphError::new(
+                AudioGraphErrorCode::OwnershipJournalInvalid,
+            ));
+        }
+        check_deadline(deadline)?;
+        FileExt::try_lock_shared(&lock).map_err(|error| {
+            AudioGraphError::new(match error {
+                fs4::TryLockError::WouldBlock => AudioGraphErrorCode::OwnershipJournalBusy,
+                fs4::TryLockError::Error(_) => AudioGraphErrorCode::OwnershipJournalIo,
+            })
+        })?;
+        check_deadline(deadline)?;
+        Ok(JournalSession {
+            parent,
+            _lock: lock,
+            journal_name,
+        })
+    }
+
+    pub fn lock_until(&self, deadline: Instant) -> Result<JournalSession, AudioGraphError> {
+        check_deadline(deadline)?;
         let parent = self
             .path
             .parent()
             .ok_or_else(|| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid))?;
         fs::create_dir_all(parent)
             .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalIo))?;
+        check_deadline(deadline)?;
         let parent_fd = openat(
             CWD,
             parent,
@@ -121,6 +178,7 @@ impl JournalStore {
                 AudioGraphErrorCode::OwnershipJournalInvalid,
             ));
         }
+        check_deadline(deadline)?;
         parent_file
             .set_permissions(fs::Permissions::from_mode(0o700))
             .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalIo))?;
@@ -130,10 +188,11 @@ impl JournalStore {
                 AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid)
             })?;
         let lock_name = OsString::from(format!(".{}.lock", journal_name.to_string_lossy()));
+        check_deadline(deadline)?;
         let lock_fd = openat(
             &parent_file,
             &lock_name,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDWR | OFlags::NONBLOCK | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
         .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid))?;
@@ -147,11 +206,18 @@ impl JournalStore {
                 AudioGraphErrorCode::OwnershipJournalInvalid,
             ));
         }
+        check_deadline(deadline)?;
         lock_file
             .set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalIo))?;
-        FileExt::lock(&lock_file)
-            .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalIo))?;
+        check_deadline(deadline)?;
+        FileExt::try_lock(&lock_file).map_err(|error| {
+            AudioGraphError::new(match error {
+                fs4::TryLockError::WouldBlock => AudioGraphErrorCode::OwnershipJournalBusy,
+                fs4::TryLockError::Error(_) => AudioGraphErrorCode::OwnershipJournalIo,
+            })
+        })?;
+        check_deadline(deadline)?;
         Ok(JournalSession {
             parent: parent_file,
             _lock: lock_file,
@@ -167,15 +233,22 @@ pub(crate) struct JournalSession {
 }
 
 impl JournalSession {
-    pub fn load(&self) -> Result<Option<OwnershipJournal>, AudioGraphError> {
+    pub fn load_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<OwnershipJournal>, AudioGraphError> {
+        check_deadline(deadline)?;
         let journal_fd = match openat(
             &self.parent,
             &self.journal_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
             Ok(file) => file,
-            Err(Errno::NOENT) => return Ok(None),
+            Err(Errno::NOENT) => {
+                check_deadline(deadline)?;
+                return Ok(None);
+            }
             Err(_) => {
                 return Err(AudioGraphError::new(
                     AudioGraphErrorCode::OwnershipJournalInvalid,
@@ -195,9 +268,11 @@ impl JournalSession {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalIo))?;
+        check_deadline(deadline)?;
         let journal: OwnershipJournal = serde_json::from_slice(&bytes)
             .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::OwnershipJournalInvalid))?;
         journal.validate()?;
+        check_deadline(deadline)?;
         Ok(Some(journal))
     }
 
@@ -242,5 +317,13 @@ impl JournalSession {
                 AudioGraphErrorCode::OwnershipJournalIo,
             )),
         }
+    }
+}
+
+pub(crate) fn check_deadline(deadline: Instant) -> Result<(), AudioGraphError> {
+    if Instant::now() >= deadline {
+        Err(AudioGraphError::new(AudioGraphErrorCode::DeadlineExpired))
+    } else {
+        Ok(())
     }
 }

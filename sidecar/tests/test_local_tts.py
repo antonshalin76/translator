@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import builtins
-from concurrent.futures import ThreadPoolExecutor
 import logging
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 from math import ceil
 from pathlib import Path
 from threading import Event, Lock
-import traceback
 from typing import Any
 
 import numpy as np
 import pytest
 import soxr
+from test_model_lease import model_source
+from test_provider_contract import VOICE_OVERRIDE_CASES
 
 from translator_sidecar.local.tts import (
     PiperTts,
-    PiperVoiceRegistry,
     TtsOutputLimit,
     TtsUnavailable,
     TtsUnsupported,
+)
+from translator_sidecar.local.tts import (
+    PiperVoiceRegistry as NativeVoiceRegistry,
 )
 from translator_sidecar.provider_contract import (
     Language,
@@ -28,6 +32,20 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
+
+
+def PiperVoiceRegistry(paths, **kwargs):
+    sources = {
+        key: model_source(
+            path.parent,
+            {path.name: b"model", f"{path.name}.json": b"{}"},
+            write=False,
+        )
+        if path.is_absolute()
+        else path
+        for key, path in paths.items()
+    }
+    return NativeVoiceRegistry(sources, **kwargs)
 
 
 class Chunk:
@@ -103,9 +121,7 @@ class FakeResampleStream:
         self.init = (input_rate, output_rate, channels, dtype)
         self.calls: list[tuple[np.ndarray, bool]] = []
 
-    def resample_chunk(
-        self, samples: np.ndarray, *, last: bool
-    ) -> np.ndarray:
+    def resample_chunk(self, samples: np.ndarray, *, last: bool) -> np.ndarray:
         self.calls.append((samples.copy(), last))
         return samples.copy()
 
@@ -137,9 +153,7 @@ def test_voice_registry_loads_each_exact_language_gender_preset(
     tmp_path: Path,
 ) -> None:
     paths = {
-        (language, gender): create_voice(
-            tmp_path, f"{language.value}-{gender.value}"
-        )
+        (language, gender): create_voice(tmp_path, f"{language.value}-{gender.value}")
         for language in Language
         for gender in VoiceGender
     }
@@ -153,23 +167,21 @@ def test_voice_registry_loads_each_exact_language_gender_preset(
 
     for key, path in paths.items():
         assert registry.get(profile(*key)) is registry.get(profile(*key))
-        assert calls[-1] == (
-            str(path),
-            {
-                "config_path": str(path.with_suffix(".onnx.json")),
-                "use_cuda": False,
-            },
-        )
+        model_path, kwargs = calls[-1]
+        assert model_path.startswith("/proc/self/fd/")
+        assert kwargs["config_path"].startswith("/proc/self/fd/")
+        assert Path(model_path).read_bytes() == path.read_bytes()
+        assert Path(kwargs["config_path"]).read_bytes() == b"{}"
+        assert kwargs["use_cuda"] is False
     assert len(calls) == 4
+    registry.close()
 
 
 def test_voice_registry_prepare_loads_all_presets_without_synthesis(
     tmp_path: Path,
 ) -> None:
     paths = {
-        (language, gender): create_voice(
-            tmp_path, f"{language.value}-{gender.value}"
-        )
+        (language, gender): create_voice(tmp_path, f"{language.value}-{gender.value}")
         for language in Language
         for gender in VoiceGender
     }
@@ -187,10 +199,7 @@ def test_voice_registry_prepare_loads_all_presets_without_synthesis(
 
     assert len(voices) == len(paths)
     assert all(voice.texts == [] for voice in voices)
-    assert all(
-        registry.model_state(profile(*key)) is ModelState.READY
-        for key in paths
-    )
+    assert all(registry.model_state(profile(*key)) is ModelState.READY for key in paths)
 
 
 def test_voice_registry_never_falls_back_to_another_gender(
@@ -222,8 +231,9 @@ def test_voice_registry_never_falls_back_across_languages(
 @pytest.mark.parametrize(
     ("model_path", "provider_voice_id"),
     [
-        ("/tmp/unapproved.onnx", None),
-        (None, "unapproved-voice"),
+        pytest.param("/tmp/unapproved.onnx", None, id="model-path"),
+        pytest.param(None, "unapproved-voice", id="provider-voice-id"),
+        *VOICE_OVERRIDE_CASES,
     ],
 )
 def test_voice_registry_rejects_profile_overrides(
@@ -237,16 +247,16 @@ def test_voice_registry_rejects_profile_overrides(
         voice_factory=lambda _path, **_kwargs: pytest.fail("must not load"),
     )
 
+    value = VoiceProfile(
+        language=Language.RU,
+        gender=VoiceGender.MALE,
+        engine=VoiceEngine.PIPER,
+        model_path=model_path,
+        provider_voice_id=provider_voice_id,
+    )
+    assert registry.model_state(value) is ModelState.FAILED
     with pytest.raises(TtsUnsupported, match="override"):
-        registry.get(
-            VoiceProfile(
-                language=Language.RU,
-                gender=VoiceGender.MALE,
-                engine=VoiceEngine.PIPER,
-                model_path=model_path,
-                provider_voice_id=provider_voice_id,
-            )
-        )
+        registry.get(value)
 
 
 def test_voice_registry_rejects_non_piper_profile(tmp_path: Path) -> None:
@@ -354,9 +364,7 @@ def test_tts_frames_across_lazy_chunks_and_pads_final_frame(
 
     assert voice.texts == ["final text"]
     assert [len(frame) for frame in frames] == [640, 640]
-    assert np.frombuffer(frames[0], dtype=np.int16).tolist() == list(
-        range(320)
-    )
+    assert np.frombuffer(frames[0], dtype=np.int16).tolist() == list(range(320))
     final = np.frombuffer(frames[1], dtype=np.int16)
     assert final[:80].tolist() == list(range(320, 400))
     assert np.count_nonzero(final[80:]) == 0
@@ -445,9 +453,7 @@ def test_tts_does_not_pull_later_chunks_before_current_frames_are_consumed(
         {(Language.EN, VoiceGender.FEMALE): model_path},
         voice_factory=lambda _path, **_kwargs: PullObservedVoice(),
     )
-    frames = PiperTts(
-        registry, resampler_factory=resampler_factory
-    ).synthesize_frames(
+    frames = PiperTts(registry, resampler_factory=resampler_factory).synthesize_frames(
         "text",
         target_language=Language.EN,
         voice_profile=profile(Language.EN, VoiceGender.FEMALE),
@@ -492,9 +498,7 @@ def test_tts_streams_bounded_chunks_through_resampler(
     tmp_path: Path,
 ) -> None:
     model_path = create_voice(tmp_path, "en-male")
-    voice = FakeVoice(
-        [Chunk(np.arange(11_025, dtype=np.int16), sample_rate=22_050)]
-    )
+    voice = FakeVoice([Chunk(np.arange(11_025, dtype=np.int16), sample_rate=22_050)])
     streams: list[FakeResampleStream] = []
 
     def resampler_factory(*args: Any, **kwargs: Any) -> FakeResampleStream:
@@ -537,9 +541,7 @@ def test_tts_default_soxr_path_has_exact_rate_and_frame_count(
 ) -> None:
     model_path = create_voice(tmp_path, "en-male")
     input_samples = np.arange(4_410, dtype=np.int16)
-    voice = FakeVoice(
-        [Chunk(input_samples, sample_rate=22_050)]
-    )
+    voice = FakeVoice([Chunk(input_samples, sample_rate=22_050)])
     registry = PiperVoiceRegistry(
         {(Language.EN, VoiceGender.MALE): model_path},
         voice_factory=lambda _path, **_kwargs: voice,
@@ -622,9 +624,7 @@ def test_tts_cancellation_after_first_frame_stops_source_and_resampler(
         {(Language.EN, VoiceGender.MALE): model_path},
         voice_factory=lambda _path, **_kwargs: PullObservedVoice(),
     )
-    frames = PiperTts(
-        registry, resampler_factory=resampler_factory
-    ).synthesize_frames(
+    frames = PiperTts(registry, resampler_factory=resampler_factory).synthesize_frames(
         "text",
         target_language=Language.EN,
         voice_profile=profile(Language.EN, VoiceGender.MALE),
@@ -672,13 +672,9 @@ def test_tts_enforces_thirty_second_output_cap(
             self.output_samples = 0
             self.first_overflow_call: int | None = None
 
-        def resample_chunk(
-            self, samples: np.ndarray, *, last: bool
-        ) -> np.ndarray:
+        def resample_chunk(self, samples: np.ndarray, *, last: bool) -> np.ndarray:
             self.calls += 1
-            self.max_input_samples = max(
-                self.max_input_samples, len(samples)
-            )
+            self.max_input_samples = max(self.max_input_samples, len(samples))
             output = self.inner.resample_chunk(samples, last=last)
             self.output_samples += len(output)
             if (
@@ -698,9 +694,7 @@ def test_tts_enforces_thirty_second_output_cap(
         voice_factory=lambda _path, **_kwargs: LazyLongVoice(),
     )
     caplog.set_level(logging.DEBUG)
-    frames = PiperTts(
-        registry, resampler_factory=resampler_factory
-    ).synthesize_frames(
+    frames = PiperTts(registry, resampler_factory=resampler_factory).synthesize_frames(
         speech_marker,
         target_language=Language.EN,
         voice_profile=profile(Language.EN, VoiceGender.MALE),
@@ -847,14 +841,10 @@ def test_tts_sanitizes_resampler_failure_traceback(
 ) -> None:
     marker = f"private resampler {failure_at} marker"
     model_path = create_voice(tmp_path, "en-female")
-    voice = FakeVoice(
-        [Chunk(np.ones(100, dtype=np.int16), sample_rate=22_050)]
-    )
+    voice = FakeVoice([Chunk(np.ones(100, dtype=np.int16), sample_rate=22_050)])
 
     class FailingResampler:
-        def resample_chunk(
-            self, samples: np.ndarray, *, last: bool
-        ) -> np.ndarray:
+        def resample_chunk(self, samples: np.ndarray, *, last: bool) -> np.ndarray:
             if failure_at == "process" and len(samples):
                 raise RuntimeError(marker)
             if failure_at == "flush" and last:
@@ -873,9 +863,7 @@ def test_tts_sanitizes_resampler_failure_traceback(
     caplog.set_level(logging.DEBUG)
     with pytest.raises(TtsUnavailable, match="unavailable") as raised:
         list(
-            PiperTts(
-                registry, resampler_factory=resampler_factory
-            ).synthesize_frames(
+            PiperTts(registry, resampler_factory=resampler_factory).synthesize_frames(
                 "private spoken text",
                 target_language=Language.EN,
                 voice_profile=profile(Language.EN, VoiceGender.FEMALE),
@@ -940,9 +928,7 @@ def test_tts_sanitizes_missing_soxr_dependency(
     speech_marker = "private missing soxr speech marker"
     model_path = create_voice(tmp_path, "en-female")
     trapped = False
-    voice = FakeVoice(
-        [Chunk(np.zeros(2_205, dtype=np.int16), sample_rate=22_050)]
-    )
+    voice = FakeVoice([Chunk(np.zeros(2_205, dtype=np.int16), sample_rate=22_050)])
 
     def blocked_import(name: str, *args: Any, **kwargs: Any) -> object:
         nonlocal trapped
@@ -999,9 +985,7 @@ def test_tts_sanitizes_missing_piper_dependency(
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", blocked_import)
-    registry = PiperVoiceRegistry(
-        {(Language.EN, VoiceGender.FEMALE): model_path}
-    )
+    registry = PiperVoiceRegistry({(Language.EN, VoiceGender.FEMALE): model_path})
     caplog.set_level(logging.DEBUG)
     with pytest.raises(TtsUnavailable, match="unavailable") as raised:
         list(
