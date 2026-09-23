@@ -3,9 +3,39 @@
 This directory is the release contract for the production-stabilization fork.
 The untouched comparison baseline is
 `9291e8beafee3e02aaa179178ce460ac9e6c6de2`. Candidate work stays on
-`codex/stabilization-20260904` until the frozen release evidence passes.
+`codex/product-clean-20260923` until the frozen release evidence passes. The
+earlier `codex/stabilization-20260904` branch is retained as history, not the
+current implementation branch.
 
-The running production checkout and user service are not test targets during
+## Current recovery checkpoint (2026-09-23)
+
+The last code commit is `b239b9a1be094a4f2c1f53132e49a664bbf020fa`
+(tree `bf37345df5cad1e0d35bebd71d14e6260198e1f4`). It passed the complete
+18-gate deterministic suite and a bounded Task6 local-chain run. This is not a
+Stage B2 close or release: paired product accuracy/latency, Task7's recorded
+5968 ms first-audible failure, real acoustic admission without headphones,
+packaging, and physical end-to-end behavior remain open. The main daemon still
+sets `aec_calibration: None`, so open-speaker validation is not available.
+
+Do not infer a speed or accuracy win from the Task6 candidate/baseline reports.
+The baseline run used a lower CPU quota after thermal throttling, while Piper
+produced different PCM for repeated synthesis of the same text. The reports and
+their hashes are in the local evidence packet outside this repository at
+`translator-product-evidence-20260923`; the summary is not a release artifact.
+Both reports have the same critical-review translation-output SHA-256
+(`e7ef4511e68e0e7e08d1c6d62780b54aa10eed384e9a3bb4b0deeb533b392ffe`):
+the measured text translation did not improve.
+
+The next product measurement must reuse identical input PCM and model hashes,
+with the same build profile, CPU limit, cache condition, and timing boundary on
+baseline and candidate. Separately, a production `AecCalibrationEngine` must
+acquire real acoustic observations and attach to the daemon; none exists yet.
+The device watcher currently fixes AEC capability when constructed, so safe
+dynamic admission and revocation also remain to be implemented. A simulated
+graph test may establish cleanup ownership, but cannot authorize a physical
+open-speaker Start. No further C2C iteration substitutes for these gates.
+
+The production checkout and user service are not test targets during
 refactoring. Candidate installation, restart, rollback, and real-call tests are
 allowed only after the deterministic, security, and packaging gates pass.
 
