@@ -53,6 +53,14 @@ and Hy-MT2 on 12 diagnostic RU/EN phrases. Hy-MT2's higher chrF2 comes with
 roughly doubled CPU text latency and a participant-role error; neither model
 was changed in production. A larger independent critical-error eval is needed.
 
+The [33-pair FLEURS MT diagnostic](mt-fleurs-paired-20260924.md) broadens the
+text comparison and finds second-sentence omissions in NLLB, but its bootstrap
+intervals include zero and its sentences are not product-domain dialogue.
+The [RU/EN voice pilot](tts-voice-pilot-20260924.md) compares pinned Piper and
+Supertonic 3 on 16 WAVs. Piper remains the product baseline: Supertonic's
+nonstreaming CPU path is slower to first PCM and critical-number pronunciation
+signals remain unresolved. Neither pilot authorizes a model switch.
+
 ## Audited contracts
 
 - [`master-bdd.md`](master-bdd.md) defines 48 executable behavior scenarios.
