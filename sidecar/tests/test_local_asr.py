@@ -277,6 +277,7 @@ def test_asr_loads_absolute_local_path_without_download(
         model_paths=asr_sources({"small": tmp_path}),
         device=device,
         model_factory=factory,
+        cuda_available=lambda: True,
     )
     manager.transcribe(pcm(), language=Language.EN, mode=TranslationMode.BALANCED)
 
@@ -512,6 +513,7 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
         admission_lock=admission_lock,
+        cuda_available=lambda: True,
     )
 
     def run(language: Language) -> str:
@@ -574,6 +576,7 @@ def test_cuda_oom_while_loading_large_falls_back_to_small(
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
+        cuda_available=lambda: True,
     )
 
     assert (
@@ -605,6 +608,7 @@ def test_cuda_oom_while_loading_small_enters_terminal_unavailable(
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
+        cuda_available=lambda: True,
     )
 
     with pytest.raises(AsrUnavailable, match="unavailable") as raised:
@@ -648,6 +652,7 @@ def test_cuda_fallback_fails_closed_if_old_wrapper_is_still_alive(
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
+        cuda_available=lambda: True,
     )
 
     with pytest.raises(AsrUnavailable, match="unavailable"):
@@ -680,6 +685,7 @@ def test_cuda_oom_on_small_enters_unavailable_without_retry(
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
+        cuda_available=lambda: True,
     )
 
     with pytest.raises(AsrUnavailable, match="unavailable") as raised:
@@ -760,6 +766,7 @@ def test_asr_cleanup_failure_is_sanitized_and_fail_closed(
         device="cuda",
         model_factory=lambda _path, **_kwargs: model,
         release_cuda=release_cuda,
+        cuda_available=lambda: True,
     )
 
     with pytest.raises(AsrUnavailable, match="unavailable") as raised:
