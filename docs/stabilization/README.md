@@ -48,6 +48,11 @@ adds a speaker-disjoint RU/EN Turbo-vs-Qwen holdout. Turbo remains the
 single-model development baseline for downstream MT/TTS evaluation; no
 production model was changed.
 
+The [natural-text MT pilot](mt-natural-pilot-20260924.md) compares pinned NLLB
+and Hy-MT2 on 12 diagnostic RU/EN phrases. Hy-MT2's higher chrF2 comes with
+roughly doubled CPU text latency and a participant-role error; neither model
+was changed in production. A larger independent critical-error eval is needed.
+
 ## Audited contracts
 
 - [`master-bdd.md`](master-bdd.md) defines 48 executable behavior scenarios.
