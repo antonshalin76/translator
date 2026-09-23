@@ -39,6 +39,10 @@ The production checkout and user service are not test targets during
 refactoring. Candidate installation, restart, rollback, and real-call tests are
 allowed only after the deterministic, security, and packaging gates pass.
 
+The [2026-09-24 ASR input screen](asr-input-screen-20260924.md) freezes Turbo
+as the current comparison leader and records the five-model, paired development
+screen. It is not an ASR model-switch, full-chain result, or release gate.
+
 ## Audited contracts
 
 - [`master-bdd.md`](master-bdd.md) defines 48 executable behavior scenarios.
