@@ -317,7 +317,7 @@ class ManifestExecutionGateTests(unittest.TestCase):
         self.assertEqual(alive, [])
 
     def execute_single_receipted_child(
-        self, child_source: str
+        self, child_source: str, *, nodes: list[dict[str, str]] | None = None
     ) -> tuple[Exception | None, str, str]:
         command = {
             "id": "sidecar-test",
@@ -334,7 +334,7 @@ class ManifestExecutionGateTests(unittest.TestCase):
             tree="b" * 40,
             refs_sha256="c" * 64,
         )
-        stored = {"collections": {"pytest": {"nodes": []}}}
+        stored = {"collections": {"pytest": {"nodes": nodes or []}}}
         stdout = io.StringIO()
         stderr = io.StringIO()
         error: Exception | None = None
@@ -953,6 +953,110 @@ class ManifestExecutionGateTests(unittest.TestCase):
                 self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
                 self.assertNotIn(canary, stdout)
                 self.assertNotIn(canary, stderr)
+
+    @isolated_process_test
+    def test_parent_reports_only_manifest_bound_failed_test_identity(self) -> None:
+        node_id = "sidecar/tests/test_contract.py::test_known_failure"
+        canary = "PRIVATE_FAILURE_CANARY_MUST_NOT_REACH_PARENT"
+        payload = json.dumps(
+            {
+                "framework": "pytest",
+                "manifest_sha256": "d" * 64,
+                "nodes": [{"id": node_id, "status": "failed"}],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        child_source = (
+            f"print({MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX!r} + {payload!r})\n"
+            f"print('test manifest error: {canary}', file=__import__('sys').stderr)\n"
+            "raise SystemExit(1)\n"
+        )
+
+        error, stdout, stderr = self.execute_single_receipted_child(
+            child_source,
+            nodes=[{"id": node_id, "status": "deterministic", "reason": ""}],
+        )
+
+        self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
+        self.assertIn(node_id, str(error))
+        self.assertIn("failed", str(error))
+        self.assertNotIn(canary, str(error) + stdout + stderr)
+
+    @isolated_process_test
+    def test_parent_rejects_unbound_or_successful_failure_diagnostics(self) -> None:
+        node_id = "sidecar/tests/test_contract.py::test_known_failure"
+        for diagnostic_id, status, exit_code in (
+            ("unknown-test", "failed", 1),
+            (node_id, "failed", 0),
+            (node_id, [], 1),
+        ):
+            payload = json.dumps(
+                {
+                    "framework": "pytest",
+                    "manifest_sha256": "d" * 64,
+                    "nodes": [{"id": diagnostic_id, "status": status}],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            child_source = (
+                f"print({MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX!r} + {payload!r})\n"
+                "print('test manifest error: failed', file=__import__('sys').stderr)\n"
+                f"raise SystemExit({exit_code})\n"
+            )
+            error, stdout, stderr = self.execute_single_receipted_child(
+                child_source,
+                nodes=[{"id": node_id, "status": "deterministic", "reason": ""}],
+            )
+            with self.subTest(
+                diagnostic_id=diagnostic_id, status=status, exit_code=exit_code
+            ):
+                self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
+                self.assertNotIn(diagnostic_id, str(error) + stdout + stderr)
+
+    @isolated_process_test
+    def test_failing_unittest_emits_only_manifest_bound_diagnostic(self) -> None:
+        canary = "PRIVATE_UNITTEST_FAILURE_CANARY"
+
+        class FailingTest(unittest.TestCase):
+            def test_failure(self) -> None:
+                self.fail(canary)
+
+        test = FailingTest("test_failure")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            error = self.execute_synthetic_unittest_suite(unittest.TestSuite([test]))
+
+        self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
+        self.assertIn(MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX, output.getvalue())
+        self.assertIn(test.id(), output.getvalue())
+        self.assertNotIn(canary, output.getvalue() + str(error))
+
+    @isolated_process_test
+    def test_failure_diagnostic_cannot_accompany_a_forged_success_receipt(self) -> None:
+        node_id = "sidecar/tests/test_contract.py::test_known_failure"
+        diagnostic = json.dumps(
+            {
+                "framework": "pytest",
+                "manifest_sha256": "d" * 64,
+                "nodes": [{"id": node_id, "status": "failed"}],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        child_source = (
+            f"print({MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX!r} + {diagnostic!r})\n"
+            f"print({MANIFEST_RUNNER.OUTCOME_RECEIPT_PREFIX!r} + '{{}}')\n"
+            "print('test manifest error: failed', file=__import__('sys').stderr)\n"
+            "raise SystemExit(1)\n"
+        )
+        error, stdout, stderr = self.execute_single_receipted_child(
+            child_source,
+            nodes=[{"id": node_id, "status": "deterministic", "reason": ""}],
+        )
+        self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
+        self.assertNotIn(node_id, str(error) + stdout + stderr)
 
     @isolated_process_test
     def test_parent_rejects_successful_child_with_extra_stream_output(self) -> None:

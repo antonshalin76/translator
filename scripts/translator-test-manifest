@@ -74,6 +74,7 @@ SANITIZED_ENVIRONMENT = {
 }
 INTERNAL_MANIFEST_SHA_ENV = "TRANSLATOR_INTERNAL_TEST_MANIFEST_SHA256"
 OUTCOME_RECEIPT_PREFIX = "TRANSLATOR_TEST_OUTCOME_JSON="
+FAILURE_DIAGNOSTIC_PREFIX = "TRANSLATOR_TEST_FAILURE_JSON="
 COLLECTOR_RECEIPT_PREFIX = "TRANSLATOR_MANIFEST_JSON="
 OUTCOME_RECEIPT_COMMANDS = {
     "sidecar-test": "pytest",
@@ -3021,6 +3022,26 @@ def _run_unittest_outcomes() -> None:
     )
     if result.outcomes() != journal_outcomes:
         journal_issues.append("unittest mutable result diverged from journal")
+    expected_status = {
+        node["id"]: "skipped" if node["status"] == "external_skip" else "passed"
+        for node in expected_nodes
+    }
+    failed_nodes = [
+        {"id": node_id, "status": outcome["status"]}
+        for node_id, outcome in sorted(journal_outcomes.items())
+        if node_id in expected_status and outcome["status"] != expected_status[node_id]
+    ][:10]
+    if failed_nodes:
+        diagnostic = {
+            "framework": "unittest",
+            "manifest_sha256": manifest_digest,
+            "nodes": failed_nodes,
+        }
+        print(
+            FAILURE_DIAGNOSTIC_PREFIX
+            + json.dumps(diagnostic, sort_keys=True, separators=(",", ":")),
+            flush=True,
+        )
     verified_rows = _verify_execution_outcomes(
         "unittest",
         expected_nodes,
@@ -3502,6 +3523,67 @@ def _verify_outcome_receipt_payloads(
         )
 
 
+def _verified_failure_diagnostic(
+    payload: str, framework: str, stored: dict[str, Any], manifest_digest: str
+) -> str:
+    if len(payload) > 4096:
+        raise ManifestError("validation gate emitted an invalid failure diagnostic")
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError) as error:
+        raise ManifestError(
+            "validation gate emitted an invalid failure diagnostic"
+        ) from error
+    if not isinstance(parsed, dict) or set(parsed) != {
+        "framework",
+        "manifest_sha256",
+        "nodes",
+    }:
+        raise ManifestError("validation gate emitted an invalid failure diagnostic")
+    nodes = parsed["nodes"]
+    allowed = {
+        node["id"]: node["status"]
+        for node in _stored_framework_nodes(framework, stored)
+    }
+    if (
+        parsed["framework"] != framework
+        or parsed["manifest_sha256"] != manifest_digest
+        or not isinstance(nodes, list)
+        or not 1 <= len(nodes) <= 10
+    ):
+        raise ManifestError("validation gate emitted an invalid failure diagnostic")
+    previous_id = ""
+    for node in nodes:
+        if not isinstance(node, dict) or set(node) != {"id", "status"}:
+            raise ManifestError("validation gate emitted an invalid failure diagnostic")
+        node_id, status = node["id"], node["status"]
+        if (
+            not isinstance(node_id, str)
+            or node_id <= previous_id
+            or node_id not in allowed
+            or not isinstance(status, str)
+            or status
+            not in {
+                "failed",
+                "error",
+                "xpassed",
+                "xfailed",
+                "conflict",
+                "not_run",
+                "skipped",
+                "passed",
+            }
+            or (status == "skipped" and allowed[node_id] == "external_skip")
+            or (status == "passed" and allowed[node_id] == "deterministic")
+        ):
+            raise ManifestError("validation gate emitted an invalid failure diagnostic")
+        previous_id = node_id
+    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+    if payload != canonical:
+        raise ManifestError("validation gate emitted an invalid failure diagnostic")
+    return ", ".join(f"{node['id']}={node['status']}" for node in nodes)
+
+
 def _gate_process_group_exists(process_group: int) -> bool:
     try:
         os.killpg(process_group, 0)
@@ -3834,6 +3916,22 @@ def _run_receipted_gate(
             "receipt-bearing validation gate emitted invalid UTF-8"
         ) from error
     _verify_child_runtime_diagnostics(completed.stdout, completed.stderr)
+    if completed.returncode != 0 and completed.stdout.startswith(
+        FAILURE_DIAGNOSTIC_PREFIX
+    ):
+        if (
+            completed.stdout.count("\n") == 1
+            and completed.stdout.endswith("\n")
+            and completed.stderr.startswith("test manifest error: ")
+            and completed.stderr.count("\n") == 1
+            and completed.stderr.endswith("\n")
+        ):
+            return completed, [
+                completed.stdout.removeprefix(FAILURE_DIAGNOSTIC_PREFIX).removesuffix(
+                    "\n"
+                )
+            ]
+        raise ManifestError("receipt-bearing validation gate emitted unexpected output")
     if completed.stderr or any(
         not line.startswith(OUTCOME_RECEIPT_PREFIX)
         for line in completed.stdout.splitlines(keepends=True)
@@ -3913,6 +4011,14 @@ def _execute_plan() -> None:
         _verify_manifest_snapshot_unchanged(manifest_payload)
         _verify_allowlist_snapshot_unchanged(allowlist_payload)
         if returncode != 0:
+            if framework is not None and receipt_payloads:
+                failed_nodes = _verified_failure_diagnostic(
+                    receipt_payloads[0], framework, stored, manifest_digest
+                )
+                raise ManifestError(
+                    f"validation gate failed: {command['id']} "
+                    f"(exit {returncode}; nodes: {failed_nodes})"
+                )
             raise ManifestError(
                 f"validation gate failed: {command['id']} (exit {returncode})"
             )

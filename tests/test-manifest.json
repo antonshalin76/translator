@@ -10276,7 +10276,7 @@
         "tests/test_task9_desktop_run_mode.py",
         "tests/test_translator_ui_compact_layout.py"
       ],
-      "node_count": 271,
+      "node_count": 275,
       "nodes": [
         {
           "file": "tests/test_ci_contract.py",
@@ -10359,6 +10359,18 @@
         {
           "file": "tests/test_manifest_execution_gate.py",
           "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_execution_plan_requires_a_bounded_integer_timeout",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_manifest_execution_gate.py",
+          "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_failing_unittest_emits_only_manifest_bound_diagnostic",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_manifest_execution_gate.py",
+          "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_failure_diagnostic_cannot_accompany_a_forged_success_receipt",
           "reason": "",
           "status": "deterministic"
         },
@@ -10520,7 +10532,19 @@
         },
         {
           "file": "tests/test_manifest_execution_gate.py",
+          "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_parent_rejects_unbound_or_successful_failure_diagnostics",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_manifest_execution_gate.py",
           "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_parent_rejects_warning_subclass_at_child_shutdown",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_manifest_execution_gate.py",
+          "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_parent_reports_only_manifest_bound_failed_test_identity",
           "reason": "",
           "status": "deterministic"
         },
@@ -12329,7 +12353,7 @@
   ],
   "runner": {
     "path": "scripts/translator-test-manifest",
-    "sha256": "e0f4ca5245ca41a23ab98120522c801f2fd8fd2a99b19086a896100041ff66dc"
+    "sha256": "3401f424d43f0e7ca342303624c9b8ae4a897444c7ea587eee70b7a3bb68a737"
   },
   "schema_version": 1,
   "validator": {
