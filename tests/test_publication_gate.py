@@ -340,6 +340,28 @@ class PublicationGateTests(unittest.TestCase):
             run, "worktree bytes or executable mode differ from the staged candidate"
         )
 
+    def test_python_source_under_scripts_uses_interpreter_mode(self) -> None:
+        for name in ("scripts/evidence_helper.py", "scripts/translator_mdc_asr_run.py"):
+            with self.subTest(name=name):
+                run = self._run_candidate(added_files={name: "VALUE = 1\n"})
+
+                self.assertEqual(run.result.returncode, 0, self._output(run))
+
+    def test_python_module_with_executable_mode_is_rejected(self) -> None:
+        name = "scripts/evidence_helper.py"
+
+        def make_executable(candidate: Path) -> None:
+            (candidate / name).chmod(0o755)
+
+        run = self._run_candidate(
+            added_files={name: "VALUE = 1\n"},
+            pre_stage=make_executable,
+        )
+
+        self.assert_failed(
+            run, "candidate executable mode differs from publication policy"
+        )
+
     def test_staged_secret_then_clean_worktree_is_rejected(self) -> None:
         secret = _synthetic_secret("staged-secret")
 

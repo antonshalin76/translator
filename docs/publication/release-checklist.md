@@ -43,8 +43,10 @@ every required gate is bound to the same commit and tag object.
 - [ ] The full repository snapshot remains unchanged after every gate, not only
       after the Python collections.
 - [ ] The exact candidate paths equal `config/publication-files.txt`; every
-      `scripts/*` entry is mode `100755`, every other entry is `100644`, and no
-      symlink, gitlink, or nonregular entry exists.
+      extensionless or shell `scripts/*` command is mode `100755`; Python
+      `scripts/*.py` source is mode `100644` and is invoked through an explicit
+      interpreter, including evidence CLI modules. Every other entry is
+      `100644`, and no symlink, gitlink, or nonregular entry exists.
 - [ ] Full-history and immutable candidate-tree secret scans pass their git,
       directory, binary-stdin, and fast-export pipeline positive controls.
 - [ ] The pinned Gitleaks archive digest and extracted-executable digest both

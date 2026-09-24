@@ -48,6 +48,18 @@ adds a speaker-disjoint RU/EN Turbo-vs-Qwen holdout. Turbo remains the
 single-model development baseline for downstream MT/TTS evaluation; no
 production model was changed.
 
+The [fork-only Turbo local-chain smoke](turbo-local-chain-20260924.md) adds an
+opt-in pinned Turbo runtime to the fork and measures two ASR→NLLB→Piper paths
+against small. Production remains unchanged; live audio and release gates are
+still open. A subsequent two-direction local-provider session check completed,
+but an EN reference said *Javanese* where the recognized and translated result
+said *Japanese*. The complete chain therefore has a confirmed critical
+semantic error, not a quality PASS. The publication policy now distinguishes
+Python source invoked through an interpreter from executable commands under `scripts/`;
+the staged candidate passed its precommit publication check with
+`release=false`. This is not release evidence and does not authorize a merge
+or production activation.
+
 The [natural-text MT pilot](mt-natural-pilot-20260924.md) compares pinned NLLB
 and Hy-MT2 on 12 diagnostic RU/EN phrases. Hy-MT2's higher chrF2 comes with
 roughly doubled CPU text latency and a participant-role error; neither model

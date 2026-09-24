@@ -62,4 +62,4 @@ The recorded Task 7 first-audible result of 5,968 ms remains open.
 
 The isolated test servers on ports 11577 and 11578 were stopped; no test
 runner or listener remained. The GGUF remains in a separate eval cache under
-`/home/anton/Source/translator-eval-cache-20260924` for reproducibility.
+`translator-eval-cache-20260924` outside the repository for reproducibility.

@@ -56,6 +56,7 @@ class FakeManifest:
             for model_id in (
                 "faster-whisper-small",
                 "faster-whisper-large-v3",
+                "faster-whisper-large-v3-turbo",
                 "nllb-200-distilled-600m-ct2-int8",
                 "piper-ru-dmitri-medium",
                 "piper-en-ryan-medium",
@@ -164,10 +165,26 @@ def open_request() -> OpenProviderSession:
 
 
 @pytest.mark.parametrize(
-    ("cuda_available", "device", "compute_device"),
+    ("cuda_available", "device", "compute_device", "selected_asr_id", "selected_key"),
     [
-        (True, "cuda", ComputeDevice.CUDA),
-        (False, "cpu", ComputeDevice.CPU),
+        (True, "cuda", ComputeDevice.CUDA, "faster-whisper-small", "small"),
+        (False, "cpu", ComputeDevice.CPU, "faster-whisper-small", "small"),
+        (True, "cuda", ComputeDevice.CUDA, "faster-whisper-large-v3", "large-v3"),
+        (False, "cpu", ComputeDevice.CPU, "faster-whisper-large-v3", "small"),
+        (
+            True,
+            "cuda",
+            ComputeDevice.CUDA,
+            "faster-whisper-large-v3-turbo",
+            "large-v3-turbo",
+        ),
+        (
+            False,
+            "cpu",
+            ComputeDevice.CPU,
+            "faster-whisper-large-v3-turbo",
+            "small",
+        ),
     ],
 )
 def test_build_local_provider_uses_verified_manifest_runtime(
@@ -176,7 +193,10 @@ def test_build_local_provider_uses_verified_manifest_runtime(
     cuda_available: bool,
     device: str,
     compute_device: ComputeDevice,
+    selected_asr_id: str,
+    selected_key: str,
 ) -> None:
+    monkeypatch.setenv("TRANSLATOR_ASR_MODEL_ID", selected_asr_id)
     manifest = FakeManifest(tmp_path)
     captured = {}
 
@@ -249,9 +269,17 @@ def test_build_local_provider_uses_verified_manifest_runtime(
     assert isinstance(provider, FakeProvider)
     assert loaded_paths == [manifest_path]
     assert captured["asr"] == {
-        "selected_id": "small",
+        "selected_id": selected_key,
         "model_paths": {
-            "small": VerifiedModelSource(manifest, "faster-whisper-small"),
+            selected_key: VerifiedModelSource(
+                manifest,
+                "faster-whisper-small" if selected_key == "small" else selected_asr_id,
+            ),
+            **(
+                {"small": VerifiedModelSource(manifest, "faster-whisper-small")}
+                if selected_key != "small"
+                else {}
+            ),
         },
         "device": device,
     }
@@ -279,11 +307,11 @@ def test_build_local_provider_uses_verified_manifest_runtime(
     assert captured["provider"]["tts"] is captured["tts_instance"]
     assert captured["provider"]["scheduler"] is captured["scheduler_instance"]
     assert captured["provider"]["mt_device"] is compute_device
-    assert captured["provider"]["asr_model_id"] == "faster-whisper-small"
+    assert captured["provider"]["asr_model_id"] == selected_asr_id
     assert captured["provider"]["mt_model_id"] == "nllb-200-distilled-600m-ct2-int8"
     assert captured["provider"]["tts_model_id"] == "piper-medium"
     assert captured["registry_prepared"] is captured["registry_instance"]
-    assert len(captured["asr"]["model_paths"]) == 1
+    assert len(captured["asr"]["model_paths"]) == (1 if selected_key == "small" else 2)
 
 
 def test_build_local_provider_uses_repository_manifest_by_default(

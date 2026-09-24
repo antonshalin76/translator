@@ -507,7 +507,7 @@ def _assert_fd_closed(descriptor: int | None) -> None:
         os.fstat(descriptor)
 
 
-def test_repository_manifest_matches_approved_task6_inventory(
+def test_repository_manifest_matches_approved_runtime_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model_root = tmp_path / "model-cache"
@@ -518,6 +518,7 @@ def test_repository_manifest_matches_approved_task6_inventory(
     assert set(manifest.models) == {
         "faster-whisper-small",
         "faster-whisper-large-v3",
+        "faster-whisper-large-v3-turbo",
         "piper-ru-dmitri-medium",
         "piper-en-ryan-medium",
         "nllb-200-distilled-600m-ct2-int8",
@@ -545,6 +546,18 @@ def test_repository_manifest_matches_approved_task6_inventory(
             str(
                 model_root / "huggingface/hub/models--Systran--faster-whisper-large-v3/"
                 "snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
+            ),
+        ),
+        "faster-whisper-large-v3-turbo": (
+            "asr",
+            "reuse",
+            "deepdml/faster-whisper-large-v3-turbo-ct2",
+            "4df90f75321148c3a29a9e2351b7ddf8f5b115a8",
+            ("ru", "en"),
+            str(
+                model_root
+                / "huggingface/hub/models--deepdml--faster-whisper-large-v3-turbo-ct2/"
+                "snapshots/4df90f75321148c3a29a9e2351b7ddf8f5b115a8"
             ),
         ),
         "piper-ru-dmitri-medium": (
@@ -603,6 +616,7 @@ def test_repository_manifest_matches_approved_task6_inventory(
     approved_licenses = {
         "faster-whisper-small": ("MIT", None, None),
         "faster-whisper-large-v3": ("MIT", None, None),
+        "faster-whisper-large-v3-turbo": ("MIT", None, None),
         "piper-ru-dmitri-medium": ("MIT", "CC0", None),
         "piper-en-ryan-medium": ("MIT", "CC-BY-NC-SA-4.0", None),
         "nllb-200-distilled-600m-ct2-int8": (
@@ -851,6 +865,26 @@ def test_repository_manifest_matches_approved_task6_inventory(
             1_068_114,
             "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
         ),
+        ("faster-whisper-large-v3-turbo", "config.json"): (
+            2_263,
+            "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e",
+        ),
+        ("faster-whisper-large-v3-turbo", "model.bin"): (
+            1_617_884_929,
+            "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+        ),
+        ("faster-whisper-large-v3-turbo", "preprocessor_config.json"): (
+            340,
+            "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+        ),
+        ("faster-whisper-large-v3-turbo", "tokenizer.json"): (
+            2_710_337,
+            "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+        ),
+        ("faster-whisper-large-v3-turbo", "vocabulary.json"): (
+            1_068_114,
+            "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
+        ),
         ("piper-ru-dmitri-medium", "ru_RU-dmitri-medium.onnx"): (
             63_201_294,
             "f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb",
@@ -929,7 +963,7 @@ def test_repository_reused_assets_resolve_through_pinned_integrity_policy() -> N
         for file in model.files
     }
 
-    assert len(resolved) == 13
+    assert len(resolved) == 18
     assert all(path.exists() for path in resolved.values())
 
 

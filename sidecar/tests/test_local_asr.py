@@ -468,14 +468,16 @@ def test_cpu_rejects_large_candidate_before_model_load(tmp_path: Path) -> None:
     assert calls == 0
 
 
+@pytest.mark.parametrize("candidate_id", ["large-v3", "large-v3-turbo"])
 def test_cuda_oom_on_large_unloads_then_retries_small_once(
     tmp_path: Path,
+    candidate_id: str,
 ) -> None:
-    (tmp_path / "large-v3").mkdir()
+    (tmp_path / candidate_id).mkdir()
     (tmp_path / "small").mkdir()
     events: list[str] = []
     model_refs: list[weakref.ReferenceType[FakeWhisper]] = []
-    loads = {"large-v3": 0, "small": 0}
+    loads = {candidate_id: 0, "small": 0}
     large_entered = Event()
     release_large = Event()
     admission_lock = AdmissionProbeLock()
@@ -490,11 +492,11 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
             text="small result",
             failures=(
                 [RuntimeError("CUDA out of memory: private large marker")]
-                if model_id == "large-v3"
+                if model_id == candidate_id
                 else None
             ),
-            entered=large_entered if model_id == "large-v3" else None,
-            release=release_large if model_id == "large-v3" else None,
+            entered=large_entered if model_id == candidate_id else None,
+            release=release_large if model_id == candidate_id else None,
             events=events,
         )
         model.model = FakeNativeModel(events=events, name=model_id)
@@ -502,10 +504,10 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
         return model
 
     manager = AsrModelManager(
-        selected_id="large-v3",
+        selected_id=candidate_id,
         model_paths=asr_sources(
             {
-                "large-v3": tmp_path / "large-v3",
+                candidate_id: tmp_path / candidate_id,
                 "small": tmp_path / "small",
             }
         ),
@@ -527,8 +529,8 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
         second = pool.submit(run, Language.EN)
         assert admission_lock.second_attempt.wait(timeout=2)
         assert not second.done()
-        assert events == ["load:large-v3", "infer:enter"]
-        assert loads == {"large-v3": 1, "small": 0}
+        assert events == [f"load:{candidate_id}", "infer:enter"]
+        assert loads == {candidate_id: 1, "small": 0}
         release_large.set()
         futures = [first, second]
         assert [future.result(timeout=3) for future in futures] == [
@@ -536,15 +538,15 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
             "small result",
         ]
     assert events == [
-        "load:large-v3",
+        f"load:{candidate_id}",
         "infer:enter",
-        "unload:large-v3",
+        f"unload:{candidate_id}",
         "release",
         "load:small",
         "infer:enter",
         "infer:enter",
     ]
-    assert loads == {"large-v3": 1, "small": 1}
+    assert loads == {candidate_id: 1, "small": 1}
     assert manager.resident_model_id == "small"
     assert manager.residency_generation == 2
     assert manager.degraded
@@ -552,10 +554,12 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
     assert model_refs[1]() is not None
 
 
+@pytest.mark.parametrize("candidate_id", ["large-v3", "large-v3-turbo"])
 def test_cuda_oom_while_loading_large_falls_back_to_small(
     tmp_path: Path,
+    candidate_id: str,
 ) -> None:
-    large_path = tmp_path / "large-v3"
+    large_path = tmp_path / candidate_id
     small_path = tmp_path / "small"
     large_path.mkdir()
     small_path.mkdir()
@@ -564,15 +568,15 @@ def test_cuda_oom_while_loading_large_falls_back_to_small(
     def factory(path: str, **_kwargs: object) -> FakeWhisper:
         model_id = sealed_model_id(path)
         events.append(f"load:{model_id}")
-        if model_id == "large-v3":
+        if model_id == candidate_id:
             raise RuntimeError("CUDA out of memory: private load marker")
         model = FakeWhisper(text="small result")
         model.model = FakeNativeModel(events=events, name=model_id)
         return model
 
     manager = AsrModelManager(
-        selected_id="large-v3",
-        model_paths=asr_sources({"large-v3": large_path, "small": small_path}),
+        selected_id=candidate_id,
+        model_paths=asr_sources({candidate_id: large_path, "small": small_path}),
         device="cuda",
         model_factory=factory,
         release_cuda=lambda: events.append("release"),
@@ -585,7 +589,7 @@ def test_cuda_oom_while_loading_large_falls_back_to_small(
         )
         == "small result"
     )
-    assert events == ["load:large-v3", "release", "load:small"]
+    assert events == [f"load:{candidate_id}", "release", "load:small"]
     assert manager.resident_model_id == "small"
     assert manager.residency_generation == 2
     assert manager.degraded

@@ -81,8 +81,9 @@ gitleaks_path="$(command -v -- "${gitleaks_command}" 2>/dev/null)" ||
   fail 'gitleaks is unavailable'
 gitleaks_bin="$("${readlink_bin}" -f -- "${gitleaks_path}")" ||
   fail 'gitleaks path cannot be resolved'
-[ -f "${gitleaks_bin}" ] && [ -x "${gitleaks_bin}" ] ||
+if [ ! -f "${gitleaks_bin}" ] || [ ! -x "${gitleaks_bin}" ]; then
   fail 'gitleaks is unavailable'
+fi
 readonly gitleaks_command gitleaks_path gitleaks_bin
 
 exec {gitleaks_fd}<"${gitleaks_bin}" || fail 'gitleaks cannot be opened'
@@ -351,8 +352,10 @@ assert_history_source_complete() {
   replace_refs="$(source_git for-each-ref --format='%(refname)' refs/replace)" ||
     fail 'replace refs cannot be enumerated'
   [ -z "${replace_refs}" ] || fail 'Git replace refs are forbidden'
-  [ ! -e "${git_common_dir}/info/grafts" ] &&
-    [ ! -L "${git_common_dir}/info/grafts" ] || fail 'Git grafts are forbidden'
+  if [ -e "${git_common_dir}/info/grafts" ] ||
+    [ -L "${git_common_dir}/info/grafts" ]; then
+    fail 'Git grafts are forbidden'
+  fi
 
   for config_query in \
     'extensions.partialClone' \
@@ -392,8 +395,10 @@ esac
 temporary_root="$(
   "${mktemp_bin}" -d -- "${temporary_parent}/translator-publication.XXXXXX"
 )" || fail 'temporary publication workspace cannot be created'
-[ -d "${temporary_root}" ] && [ ! -L "${temporary_root}" ] &&
-  [ -O "${temporary_root}" ] || fail 'temporary publication workspace is unsafe'
+if [ ! -d "${temporary_root}" ] || [ -L "${temporary_root}" ] ||
+  [ ! -O "${temporary_root}" ]; then
+  fail 'temporary publication workspace is unsafe'
+fi
 [ "${temporary_root%/*}" = "${temporary_parent}" ] ||
   fail 'temporary publication workspace escaped its parent'
 case "${temporary_root##*/}" in
@@ -1086,11 +1091,11 @@ while IFS= read -r -d '' candidate_entry; do
     120000) fail_path 'candidate symlink is forbidden' "${candidate_path}" ;;
     *) fail_path 'candidate entry is not a regular file' "${candidate_path}" ;;
   esac
-  if [[ "${candidate_path}" == scripts/* ]]; then
-    expected_mode=100755
-  else
-    expected_mode=100644
-  fi
+  case "${candidate_path}" in
+    scripts/*.py) expected_mode=100644 ;;
+    scripts/*) expected_mode=100755 ;;
+    *) expected_mode=100644 ;;
+  esac
   [ "${candidate_mode}" = "${expected_mode}" ] ||
     fail_path 'candidate executable mode differs from publication policy' \
       "${candidate_path}"
@@ -1167,8 +1172,9 @@ verify_publication_manifest \
   "${candidate_root}/${publication_manifest}" "${candidate_paths}"
 
 require_candidate_file() {
-  [ -f "${candidate_root}/$1" ] && [ ! -L "${candidate_root}/$1" ] ||
+  if [ ! -f "${candidate_root}/$1" ] || [ -L "${candidate_root}/$1" ]; then
     fail 'required public file is missing from the candidate snapshot'
+  fi
 }
 
 for required_file in \

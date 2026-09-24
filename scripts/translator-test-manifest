@@ -3843,10 +3843,19 @@ def _run_gate_process_locked(
             process,
             command["timeout_seconds"],
         )
-        if _gate_process_group_exists(process.pid) or _owned_gate_process_ids():
-            _terminate_gate_process_group(process)
-            process_group_cleaned = True
-            raise ManifestError("validation gate left background processes running")
+        cleanup_deadline = time.monotonic() + GATE_TERMINATION_GRACE_SECONDS
+        while True:
+            _reap_adopted_gate_children(exclude=set())
+            if (
+                not _gate_process_group_exists(process.pid)
+                and not _owned_gate_process_ids()
+            ):
+                break
+            if time.monotonic() >= cleanup_deadline:
+                _terminate_gate_process_group(process)
+                process_group_cleaned = True
+                raise ManifestError("validation gate left background processes running")
+            time.sleep(GATE_ADOPTED_REAP_POLL_SECONDS)
         return subprocess.CompletedProcess(
             command["argv"], process.returncode, stdout, stderr
         )

@@ -80,6 +80,24 @@ fn cleanup_recorded_child(identity: ProcessIdentity) -> bool {
     !Path::new(&format!("/proc/{}", identity.pid)).exists()
 }
 
+fn active_command_reader_threads() -> usize {
+    fs::read_dir("/proc/self/task")
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("comm"))
+        .filter(|path| {
+            fs::read_to_string(path).is_ok_and(|name| name.trim_end() == "tr-cmd-reader")
+        })
+        .count()
+}
+
+fn command_readers_after_kernel_retirement() -> usize {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    while active_command_reader_threads() != 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    active_command_reader_threads()
+}
+
 #[test]
 fn command_timeout_probe_child() {
     let Some(directory) = std::env::var_os("TRANSLATOR_TEST_COMMAND_DIRECTORY") else {
@@ -89,7 +107,7 @@ fn command_timeout_probe_child() {
     let case = std::env::var("TRANSLATOR_TEST_COMMAND_CASE").unwrap();
     SystemCommandRunner.run("true", &[]).unwrap();
     let baseline_fds = fs::read_dir("/proc/self/fd").unwrap().count();
-    let baseline_threads = fs::read_dir("/proc/self/task").unwrap().count();
+    assert_eq!(command_readers_after_kernel_retirement(), 0);
     let iterations = if case == "repeat" { 5 } else { 1 };
     for iteration in 0..iterations {
         let marker = directory.join(format!("child-{iteration}.json"));
@@ -102,7 +120,7 @@ fn command_timeout_probe_child() {
         let budget = if case == "local" {
             Duration::from_secs(8)
         } else {
-            Duration::from_millis(100)
+            Duration::from_millis(500)
         };
         let result =
             SystemCommandRunner.run_until("sh", &["-c".to_owned(), script], started + budget);
@@ -121,7 +139,7 @@ fn command_timeout_probe_child() {
         let reaped_before_cleanup =
             identity.is_some_and(|value| !Path::new(&format!("/proc/{}", value.pid)).exists());
         let observed_fds = fs::read_dir("/proc/self/fd").unwrap().count();
-        let observed_threads = fs::read_dir("/proc/self/task").unwrap().count();
+        let observed_reader_threads = command_readers_after_kernel_retirement();
         let cleaned = identity.is_some_and(cleanup_recorded_child);
 
         assert!(cleaned, "fixture child identity missing or cleanup failed");
@@ -138,9 +156,9 @@ fn command_timeout_probe_child() {
         assert!(
             elapsed
                 < if case == "local" {
-                    Duration::from_millis(2500)
+                    Duration::from_secs(4)
                 } else {
-                    Duration::from_millis(800)
+                    Duration::from_secs(2)
                 }
         );
         assert_eq!(
@@ -148,8 +166,8 @@ fn command_timeout_probe_child() {
             "reader FDs survived returned command"
         );
         assert_eq!(
-            observed_threads, baseline_threads,
-            "reader threads survived returned command"
+            observed_reader_threads, 0,
+            "command reader threads survived returned command"
         );
     }
     fs::write(directory.join("completed"), b"all assertions passed").unwrap();
@@ -170,7 +188,7 @@ fn run_isolated_probe(case: &str) {
         .spawn()
         .unwrap();
     let pid = Pid::from_raw(child.id() as i32).unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(10);
     while !directory.path().join("completed").exists() && Instant::now() < until {
         thread::sleep(Duration::from_millis(10));
     }

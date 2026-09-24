@@ -4,9 +4,11 @@ This is a development screen, not EVAL-0/EVAL-1 or release evidence. It does not
 change the production service, model manifest, or release admission. The
 current Turbo evaluation baseline remains frozen while the input-side
 comparison is completed; translation and voice optimization follow a
-defensible ASR choice. Turbo is not declared as the deployed model: the current
-`models/manifest.json` still lists `faster-whisper-small` and
-`faster-whisper-large-v3` as ASR assets.
+defensible ASR choice. Turbo is not declared as the deployed model: at the time
+of this screen, `models/manifest.json` listed only `faster-whisper-small` and
+`faster-whisper-large-v3` as ASR assets. A later
+[fork-only runtime smoke](turbo-local-chain-20260924.md) added Turbo without
+changing the production service.
 
 ## Frozen inputs and method
 

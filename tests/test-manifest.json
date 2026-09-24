@@ -137,7 +137,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1028,
+      "node_count": 1034,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -1119,7 +1119,13 @@
         },
         {
           "file": "sidecar/tests/test_local_asr.py",
-          "id": "sidecar/tests/test_local_asr.py::test_cuda_oom_on_large_unloads_then_retries_small_once",
+          "id": "sidecar/tests/test_local_asr.py::test_cuda_oom_on_large_unloads_then_retries_small_once[large-v3-turbo]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_asr.py",
+          "id": "sidecar/tests/test_local_asr.py::test_cuda_oom_on_large_unloads_then_retries_small_once[large-v3]",
           "reason": "",
           "status": "deterministic"
         },
@@ -1131,7 +1137,13 @@
         },
         {
           "file": "sidecar/tests/test_local_asr.py",
-          "id": "sidecar/tests/test_local_asr.py::test_cuda_oom_while_loading_large_falls_back_to_small",
+          "id": "sidecar/tests/test_local_asr.py::test_cuda_oom_while_loading_large_falls_back_to_small[large-v3-turbo]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_asr.py",
+          "id": "sidecar/tests/test_local_asr.py::test_cuda_oom_while_loading_large_falls_back_to_small[large-v3]",
           "reason": "",
           "status": "deterministic"
         },
@@ -1929,13 +1941,37 @@
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-large-v3-small]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-large-v3-turbo-small]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-small-small]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-large-v3-large-v3]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-large-v3-turbo-large-v3-turbo]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-small-small]",
           "reason": "",
           "status": "deterministic"
         },
@@ -3429,7 +3465,7 @@
         },
         {
           "file": "sidecar/tests/test_model_manifest.py",
-          "id": "sidecar/tests/test_model_manifest.py::test_repository_manifest_matches_approved_task6_inventory",
+          "id": "sidecar/tests/test_model_manifest.py::test_repository_manifest_matches_approved_runtime_inventory",
           "reason": "",
           "status": "deterministic"
         },
@@ -10276,7 +10312,7 @@
         "tests/test_task9_desktop_run_mode.py",
         "tests/test_translator_ui_compact_layout.py"
       ],
-      "node_count": 275,
+      "node_count": 279,
       "nodes": [
         {
           "file": "tests/test_ci_contract.py",
@@ -10700,6 +10736,12 @@
         },
         {
           "file": "tests/test_manifest_execution_gate.py",
+          "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_recently_exiting_child_is_drained_before_background_check",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_manifest_execution_gate.py",
           "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_sidecar_pytest_rejects_unittest_compatibility_items",
           "reason": "",
           "status": "deterministic"
@@ -10731,6 +10773,12 @@
         {
           "file": "tests/test_manifest_execution_gate.py",
           "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_successful_gate_rejects_and_reaps_background_process",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_manifest_execution_gate.py",
+          "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_terminal_child_after_communicate_is_reaped_before_background_check",
           "reason": "",
           "status": "deterministic"
         },
@@ -11205,6 +11253,18 @@
         {
           "file": "tests/test_publication_gate.py",
           "id": "test_publication_gate.PublicationGateTests.test_precommit_receipt_cannot_cover_later_same_tree_metadata",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_publication_gate.py",
+          "id": "test_publication_gate.PublicationGateTests.test_python_module_with_executable_mode_is_rejected",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_publication_gate.py",
+          "id": "test_publication_gate.PublicationGateTests.test_python_source_under_scripts_uses_interpreter_mode",
           "reason": "",
           "status": "deterministic"
         },
@@ -12353,7 +12413,7 @@
   ],
   "runner": {
     "path": "scripts/translator-test-manifest",
-    "sha256": "3401f424d43f0e7ca342303624c9b8ae4a897444c7ea587eee70b7a3bb68a737"
+    "sha256": "270f3398251b71e34b8ba7f0d267019ff02ebbd4be0334140ab5ccc72fc413fd"
   },
   "schema_version": 1,
   "validator": {

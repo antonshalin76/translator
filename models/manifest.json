@@ -90,6 +90,45 @@
       ]
     },
     {
+      "id": "faster-whisper-large-v3-turbo",
+      "role": "asr",
+      "source": {
+        "repository": "deepdml/faster-whisper-large-v3-turbo-ct2",
+        "revision": "4df90f75321148c3a29a9e2351b7ddf8f5b115a8",
+        "license": "MIT"
+      },
+      "languages": ["ru", "en"],
+      "cache_path": "huggingface/hub/models--deepdml--faster-whisper-large-v3-turbo-ct2/snapshots/4df90f75321148c3a29a9e2351b7ddf8f5b115a8",
+      "acquisition": "reuse",
+      "files": [
+        {
+          "path": "config.json",
+          "size_bytes": 2263,
+          "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"
+        },
+        {
+          "path": "model.bin",
+          "size_bytes": 1617884929,
+          "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size_bytes": 340,
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+        },
+        {
+          "path": "tokenizer.json",
+          "size_bytes": 2710337,
+          "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"
+        },
+        {
+          "path": "vocabulary.json",
+          "size_bytes": 1068114,
+          "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+        }
+      ]
+    },
+    {
       "id": "piper-ru-dmitri-medium",
       "role": "tts",
       "source": {

@@ -271,7 +271,7 @@ class AsrModelManager:
         if (
             failure == "oom"
             and self._actual_device == "cuda"
-            and self._selected_id == "large-v3"
+            and self._selected_id in {"large-v3", "large-v3-turbo"}
         ):
             if not self._drop_resident(invalidate_without_replacement=False):
                 return False

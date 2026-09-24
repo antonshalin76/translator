@@ -163,6 +163,7 @@ where
 {
     let (sender, receiver) = mpsc::sync_channel(1);
     let handle = thread::Builder::new()
+        .name("tr-cmd-reader".to_owned())
         .spawn(move || {
             let mut output = Vec::new();
             let result = stream.read_to_end(&mut output).map(|_| output);

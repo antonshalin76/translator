@@ -41,6 +41,7 @@ from translator_sidecar.provider_contract import (
 _ASR_MODELS = {
     "faster-whisper-small": "small",
     "faster-whisper-large-v3": "large-v3",
+    "faster-whisper-large-v3-turbo": "large-v3-turbo",
 }
 _DEFAULT_ASR_MODEL_ID = "faster-whisper-small"
 _MT_MODEL_ID = "nllb-200-distilled-600m-ct2-int8"
@@ -286,11 +287,15 @@ def build_local_provider(
     failed: dict[str, Any] = {}
     resources.callback(_close_bootstrap_component, "translator", translator, failed)
     try:
-        selected_key = _ASR_MODELS[selected_asr_id]
+        requested_key = _ASR_MODELS[selected_asr_id]
+        selected_key = requested_key if asr_device == "cuda" else "small"
+        source_id = (
+            selected_asr_id if selected_key != "small" else _DEFAULT_ASR_MODEL_ID
+        )
         asr_paths = {
-            selected_key: model_sources[selected_asr_id],
+            selected_key: model_sources[source_id],
         }
-        if selected_key == "large-v3":
+        if selected_key != "small":
             asr_paths["small"] = model_sources[_DEFAULT_ASR_MODEL_ID]
         asr = AsrModelManager(
             selected_id=selected_key,

@@ -2137,6 +2137,87 @@ class ManifestExecutionGateTests(unittest.TestCase):
             self.assert_processes_gone(child_pids)
 
     @isolated_process_test
+    def test_terminal_child_after_communicate_is_reaped_before_background_check(
+        self,
+    ) -> None:
+        environment = MANIFEST_RUNNER._validation_environment(source=dict(os.environ))
+        command = {
+            "argv": [sys.executable, "-c", "pass"],
+            "cwd": ".",
+            "timeout_seconds": 5,
+        }
+        original = MANIFEST_RUNNER._communicate_while_reaping_adopted_children
+        child_pid: int | None = None
+
+        def terminal_child_after_communicate(process, timeout_seconds):
+            nonlocal child_pid
+            output = original(process, timeout_seconds)
+            child_pid = os.fork()
+            if child_pid == 0:
+                os._exit(0)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                state = Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1]
+                if state.lstrip().startswith("Z"):
+                    return output
+                time.sleep(0.005)
+            self.fail("fixture child did not reach zombie state")
+
+        with mock.patch.object(
+            MANIFEST_RUNNER,
+            "_communicate_while_reaping_adopted_children",
+            side_effect=terminal_child_after_communicate,
+        ):
+            completed = MANIFEST_RUNNER._run_gate_process(
+                command,
+                environment,
+                capture_output=True,
+                encoding="utf-8",
+                errors="strict",
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIsNotNone(child_pid)
+        self.assert_processes_gone([child_pid])
+
+    @isolated_process_test
+    def test_recently_exiting_child_is_drained_before_background_check(self) -> None:
+        environment = MANIFEST_RUNNER._validation_environment(source=dict(os.environ))
+        command = {
+            "argv": [sys.executable, "-c", "pass"],
+            "cwd": ".",
+            "timeout_seconds": 5,
+        }
+        original = MANIFEST_RUNNER._communicate_while_reaping_adopted_children
+        child_pid: int | None = None
+
+        def child_exits_after_communicate(process, timeout_seconds):
+            nonlocal child_pid
+            output = original(process, timeout_seconds)
+            child_pid = os.fork()
+            if child_pid == 0:
+                time.sleep(0.05)
+                os._exit(0)
+            return output
+
+        with mock.patch.object(
+            MANIFEST_RUNNER,
+            "_communicate_while_reaping_adopted_children",
+            side_effect=child_exits_after_communicate,
+        ):
+            completed = MANIFEST_RUNNER._run_gate_process(
+                command,
+                environment,
+                capture_output=True,
+                encoding="utf-8",
+                errors="strict",
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIsNotNone(child_pid)
+        self.assert_processes_gone([child_pid])
+
+    @isolated_process_test
     def test_receipted_gate_rejects_and_reaps_detached_descendant(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             pid_path = Path(temporary) / "detached.pid"
