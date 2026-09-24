@@ -48,6 +48,34 @@ had omitted. The clip and raw text remain outside Git. This was not physical
 capture/playback or a paired first-audible measurement. The complete sidecar
 test suite and scoped Ruff checks passed.
 
+### 2026-09-25 critical-case replay
+
+The same pinned CPU NLLB adapter at `036a98f` completed all 26 directions
+from the 13 critical FLEURS pair IDs predeclared in the earlier paired MT
+review. The frozen old-NLLB/Hy-MT2 report has SHA-256
+`357859460840a240380f476b80533d818115393271b84c235fc3bd68bc1719b4`;
+the new private per-case report has SHA-256
+`8db8b37cd572a0d116031d785e94c3fd5f252e51badcebb097a89212f64b6add`.
+Seven NLLB outputs changed and 19 remained byte-identical. All five formerly
+omitted second sentences in pairs `1516`, `1546`, and `1586` are now present.
+The prohibition in `1516` is preserved in both directions.
+
+A private selected-case fact-review matrix has SHA-256
+`b66fb5c6007bc8a7ce180e04b7a2a8a28d6524c19320d40390cf3cff572415c6`.
+It binds ten explicit case findings to both translation reports without
+publishing their text; it is not a 26-case pass rate.
+
+Completeness did not make the translation reliable: `1546` EN→RU still
+distorts the adult-plumage-versus-chick-down contrast. The unchanged `1609`
+RU→EN output changes a cricket count's unit, and `1650` still misidentifies a
+species. Hy-MT2 better preserves some long-clause and sports facts but also
+has critical or unresolved term errors in this selected set. Pair `1566` has
+an extra English source sentence absent from its Russian reference, so its
+changed EN→RU output cannot be scored as a regression against that reference.
+This replay was text-only; its 881-ms request-to-text median over these 26
+selected inputs is not paired latency or first audible sound. Neither MT
+candidate is admitted for production on this evidence.
+
 This is a completeness improvement, **not** a zero-critical-error claim.
 Short segments sometimes lose context: a Russian social-commentary case was
 translated worse, and the dinosaur-feather example retained its second

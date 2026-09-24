@@ -113,6 +113,28 @@ omitted the name, and a noisy Russian duration changed from ten years to
 decades; these are diagnostic discrepancies, not a blinded or audio-adjudicated
 critical-error rate. The private MDC audio and transcripts remain outside Git.
 
+### 2026-09-25 reference-conditioned critical screen
+
+An independent AI text review assessed an explicitly recorded retrospective
+subset of ten clean critical-labelled test origins (five RU, five EN) and two
+existing 10-dB variants. Its private per-attempt verdict matrix has SHA-256
+`2067c0ef209f9f2d895f09ba0b3ac8cb20bcc1615e6852fa344d8239cc2839a2`;
+it records the twelve IDs, alias policy, decisions, and matching manifest and
+report hashes without raw text. Selection and review happened after model
+outputs existed; no model was rerun. Against the publisher's
+written reference, Turbo preserved all reviewed critical facts in 8/10 clean
+cases and Qwen in 7/10. The two noise variants scored 1/2 and 0/2,
+respectively. An unambiguous phonetic spelling variant of a person's name
+was accepted for both models. The failures included a changed predicate under
+negation (`ru-72182`, Qwen), an omitted or substituted person (`en-20216`,
+both), and a changed actor (`en-70798`, both). On noisy `ru-71376`, Qwen also
+changed a numeric time span. Noise variants are not independent utterances.
+
+This is a retrospective, non-blinded **reference-conditioned diagnostic**,
+not an audio-adjudicated error rate: the source recordings could not be
+listened to in this review, and the written references may be wrong. It does
+not resolve the existing input errors or justify an EN-specific Qwen route.
+
 Median isolated inference time over the bound test attempts was 283 ms for
 Turbo and 324 ms for Qwen; measured load was 3.9 versus 15.0 seconds, and
 peak process RSS was 1.9 versus 5.0 GiB. These measurements exclude
