@@ -85,6 +85,34 @@ interpretation. The eight-clip EN-noise estimate is therefore sensitive to
 decoder output variation and should not be treated as a stable regression
 size or a product admission result. Clean pooled WER reproduced exactly.
 
+## Targeted semantic-critical replay
+
+After the paired comparison, the isolated Qwen runtime was restored for one
+offline replay of the previously identified FLEURS EN `en_us-1.wav` failure.
+The WAV SHA-256 was
+`5fefdcd12d4c136762cc7841b084126fc60c6d6410f983cc9f82b6cfc45737a2`;
+the Qwen model-directory SHA-256 remained
+`fed91fc61c395e5cf9e851742942c13e776df1fd1afcdc42a1e4a93a93cc7a8a`.
+The eval-only runtime imported `qwen-asr==0.0.6`, `torch==2.9.1+cu130`, and
+`transformers==4.57.3` on the RTX 4080 Laptop GPU. With offline mode, two
+OpenMP threads, a four-core affinity mask, and a 150-second process deadline,
+the inference completed in 2.194 seconds after model load; process elapsed
+time was 17.01 seconds and peak RSS was 5,130,020 KiB. This is a single-clip
+diagnostic, not a paired latency score. The inference path works, but the
+isolated environment is not dependency-metadata clean: `qwen-asr==0.0.6`
+declares `transformers==4.57.6`, and `gradio`, `flask`, and `pytz` are absent;
+this replay retained the earlier evaluation's `transformers==4.57.3`. It must
+not be copied into the service as a production environment.
+
+The published FLEURS transcript says *Javanese* three times. Qwen rendered
+all three as *Japanese*, as Turbo did in the earlier local-chain run. Qwen
+therefore does not repair this observed meaning-changing input error. A
+reference-text inspection of ten selected frozen MDC critical cases found a
+Qwen omission of a Russian negation, a wrong English person name where Turbo
+omitted the name, and a noisy Russian duration changed from ten years to
+decades; these are diagnostic discrepancies, not a blinded or audio-adjudicated
+critical-error rate. The private MDC audio and transcripts remain outside Git.
+
 Median isolated inference time over the bound test attempts was 283 ms for
 Turbo and 324 ms for Qwen; measured load was 3.9 versus 15.0 seconds, and
 peak process RSS was 1.9 versus 5.0 GiB. These measurements exclude

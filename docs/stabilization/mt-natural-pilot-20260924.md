@@ -51,6 +51,34 @@ NLLB preserved that role but translated `review` awkwardly as `обзор`.
 Hy-MT2 also produced a typo in its Russian invoice output. These examples
 prevent declaring it a quality winner from the higher aggregate chrF2.
 
+## Follow-up on natural ASR output
+
+Ten clean, critical-label-tagged transcripts from the frozen MDC test report
+were selected for a text-only diagnostic after that ASR report already existed.
+The same Turbo ASR text was sent to the existing NLLB adapter and the same
+Hy-MT2 GGUF through CPU-only `llama-server --jinja` with the pilot's sampling
+settings. This was not blinded, the publisher's
+references were not checked against audio, and no translated-reference corpus
+was created. Private transcripts and outputs remain outside Git.
+
+NLLB silently omitted later clauses on several multi-sentence Russian inputs:
+one output lost the fact that somebody was training and the time of day;
+another lost the speaker's lack of money and phone. It also omitted the
+subject of an English algebra anecdote. Hy-MT2 retained more of those source
+clauses, but changed a named television title and rendered a description of
+spoiled dogs as lazy. Neither candidate has a verified zero-critical-error
+result. Direct single-process median text latency on these ten selected cases
+was 1,111 ms for NLLB and 3,134 ms for Hy-MT2; this is not a first-audible or
+population latency estimate.
+
+An exploratory sentence-by-sentence NLLB run recovered the omitted clauses,
+but mistranslated some short utterances after losing their surrounding
+context. The current adapter feeds the full utterance to NLLB once; its
+decoding limit already scales with input length, so merely raising that limit
+is unsupported. No sentence splitting, model routing, or runtime change was
+made. A broader paired critical-error gate must compare completeness and
+meaning before either change is safe.
+
 ## Decision
 
 Keep NLLB as the current product translation baseline and Hy-MT2 as a
