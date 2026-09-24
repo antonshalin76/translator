@@ -516,6 +516,14 @@ wheels = [
 ]
 
 [[package]]
+name = "pysbd"
+version = "0.3.4"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/0a/c99fb7d7e176f8b176ef19704a32e6a9c6aafdf19ef75a187f701fc15801/pysbd-0.3.4-py3-none-any.whl", hash = "sha256:cd838939b7b0b185fcf86b0baf6636667dfb6e474743beeff878e9f42e022953", size = 71082, upload-time = "2021-02-11T16:36:33.351Z" },
+]
+
+[[package]]
 name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -747,6 +755,7 @@ dependencies = [
     { name = "piper-tts" },
     { name = "psutil" },
     { name = "pydantic" },
+    { name = "pysbd" },
     { name = "sacrebleu" },
     { name = "sentencepiece" },
     { name = "soxr" },
@@ -773,6 +782,7 @@ requires-dist = [
     { name = "piper-tts", specifier = "==1.4.2" },
     { name = "psutil", specifier = "==7.2.2" },
     { name = "pydantic", specifier = ">=2.11,<3" },
+    { name = "pysbd", specifier = "==0.3.4" },
     { name = "sacrebleu", specifier = ">=2.5,<3" },
     { name = "sentencepiece", specifier = "==0.2.1" },
     { name = "soxr", specifier = "==1.0.0" },

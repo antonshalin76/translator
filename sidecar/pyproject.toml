@@ -15,6 +15,7 @@ dependencies = [
     "nvidia-ml-py==13.610.43",
     "piper-tts==1.4.2",
     "psutil==7.2.2",
+    "pysbd==0.3.4",
     "pydantic>=2.11,<3",
     "sacrebleu>=2.5,<3",
     "sentencepiece==0.2.1",
@@ -55,6 +56,7 @@ known-first-party = ["translator_sidecar"]
 "**/translator_sidecar/local/mt.py" = ["RUF001"]
 "**/translator_sidecar/local/tts.py" = ["RUF001"]
 "**/tests/test_local_mt.py" = ["RUF001"]
+"**/tests/fixtures/native_nllb_load.py" = ["RUF001"]
 "**/tests/test_task6_benchmark.py" = ["RUF001"]
 # Wire enums retain their established `str, Enum` stringification contract.
 "**/translator_sidecar/benchmark/task7.py" = ["UP042"]

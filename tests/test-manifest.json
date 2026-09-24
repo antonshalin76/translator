@@ -137,7 +137,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1034,
+      "node_count": 1041,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -1179,6 +1179,18 @@
         },
         {
           "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_keeps_abbreviations_and_times_in_their_sentences[/u0413-/u043d /u0418/u0432/u0430/u043d/u043e/u0432 /u043f/u0440/u0438/u0448/u0451/u043b /u0432 18:05. /u041e/u043d /u043d/u0435 /u043e/u043f/u043e/u0437/u0434/u0430/u043b.-ru-expected_sentences0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_keeps_abbreviations_and_times_in_their_sentences[Dr. House arrived at 5:30 p.m. He did not leave.-en-expected_sentences1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_load_sanitizes_missing_dependency_traceback[ctranslate2]",
           "reason": "",
           "status": "deterministic"
@@ -1245,6 +1257,30 @@
         },
         {
           "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_rejects_empty_translation_of_later_sentence",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_rejects_excessive_sentence_work_before_native_call",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_rejects_excessive_token_work_before_native_call",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_rejects_missing_batch_result",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_rejects_same_language_and_empty_source_before_inference",
           "reason": "",
           "status": "deterministic"
@@ -1276,6 +1312,12 @@
         {
           "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_supports_reverse_direction_with_same_resident_model",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_translates_every_sentence_in_order",
           "reason": "",
           "status": "deterministic"
         },

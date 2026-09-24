@@ -73,11 +73,12 @@ population latency estimate.
 
 An exploratory sentence-by-sentence NLLB run recovered the omitted clauses,
 but mistranslated some short utterances after losing their surrounding
-context. The current adapter feeds the full utterance to NLLB once; its
-decoding limit already scales with input length, so merely raising that limit
-is unsupported. No sentence splitting, model routing, or runtime change was
-made. A broader paired critical-error gate must compare completeness and
-meaning before either change is safe.
+context. The old adapter fed the full utterance to NLLB once; its decoding
+limit already scaled with input length, so merely raising that limit was
+unsupported. A [fork-only sentence-completeness candidate](mt-sentence-completeness-20260924.md)
+now has targeted tests and a 66-direction FLEURS screen. It remains unmerged
+pending broader paired critical-error adjudication and product-chain testing;
+no model routing or production runtime change was made.
 
 ## Decision
 

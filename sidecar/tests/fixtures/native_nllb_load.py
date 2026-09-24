@@ -35,6 +35,22 @@ def main() -> int:
                 target_language=Language.RU,
                 mode=TranslationMode.BALANCED,
             ),
+            "ru_en_multisentence": translator.translate(
+                "Пожалуйста, относитесь к этому месту со всем достоинством, "
+                "серьёзностью и уважением, которых оно заслуживает. "
+                "Не шутите про Холокост и нацистов.",
+                source_language=Language.RU,
+                target_language=Language.EN,
+                mode=TranslationMode.QUALITY_FIRST,
+            ),
+            "en_ru_multisentence": translator.translate(
+                "Please treat the site with all of the dignity, solemnity "
+                "and respect it deserves. Do not make jokes about the "
+                "Holocaust or Nazis.",
+                source_language=Language.EN,
+                target_language=Language.RU,
+                mode=TranslationMode.QUALITY_FIRST,
+            ),
         }
     finally:
         translator.close()

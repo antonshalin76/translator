@@ -8,6 +8,8 @@ import weakref
 from pathlib import Path
 from typing import Any
 
+import pysbd
+
 from translator_sidecar.provider_contract import Language, TranslationMode
 
 from .model_lease import VerifiedModelSource
@@ -23,6 +25,8 @@ _BEAM_SIZE = {
 }
 _BASE_DECODING_LENGTH = 96
 _MAX_DECODING_LENGTH = 512
+_MAX_SENTENCES_PER_REQUEST = 16
+_MAX_SOURCE_PIECES_PER_REQUEST = 512
 _TIME_24_RE = re.compile(r"(?<!\d)(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?!\d)")
 _PURCHASE_ORDER_ID_RE = re.compile(
     r"\border[ \t]+(?:number|no\.?)\b[ \t]*(?:#[ \t]*)?(?P<identifier>\d+)\b",
@@ -247,40 +251,61 @@ class NllbTranslator:
         source_token = _LANGUAGE_TOKENS[source_language]
         target_token = _LANGUAGE_TOKENS[target_language]
         try:
-            pieces = self._tokenizer.encode(normalized, out_type=str)
-            source = [source_token, *pieces, "</s>"]
+            segments = pysbd.Segmenter(
+                language=source_language.value, clean=False
+            ).segment(normalized)
+            if "".join(segments) != normalized:
+                raise ValueError("sentence segmentation changed source text")
+            sentences = [segment.strip() for segment in segments if segment.strip()]
+            if not sentences or len(sentences) > _MAX_SENTENCES_PER_REQUEST:
+                raise LocalTranslationError("local MT input exceeds work limit")
+            sources: list[list[str]] = []
+            piece_counts: list[int] = []
+            for sentence in sentences:
+                pieces = self._tokenizer.encode(sentence, out_type=str)
+                piece_counts.append(len(pieces))
+                sources.append([source_token, *pieces, "</s>"])
+            if sum(piece_counts) > _MAX_SOURCE_PIECES_PER_REQUEST:
+                raise LocalTranslationError("local MT input exceeds work limit")
             results = self._translator.translate_batch(
-                [source],
-                target_prefix=[[target_token]],
+                sources,
+                target_prefix=[[target_token] for _ in sources],
                 beam_size=_BEAM_SIZE[mode],
-                max_decoding_length=_decoding_length(len(pieces), mode),
+                max_decoding_length=_decoding_length(max(piece_counts), mode),
             )
-            tokens = list(results[0].hypotheses[0])
-            if tokens and tokens[0] == target_token:
-                tokens.pop(0)
-            if tokens and tokens[-1] == "</s>":
-                tokens.pop()
-            translated = _preserve_24_hour_times(
-                normalized,
-                self._tokenizer.decode(tokens).strip(),
-            )
-            translated = _preserve_purchase_order_identifiers(
-                normalized,
-                translated,
-                source_language=source_language,
-                target_language=target_language,
-            )
-            translated = _preserve_named_entity_roles(
-                normalized,
-                translated,
-                source_language=source_language,
-                target_language=target_language,
-            )
+            if len(results) != len(sentences):
+                raise LocalTranslationError("local MT returned incomplete output")
+            translated_parts: list[str] = []
+            for sentence, result in zip(sentences, results, strict=True):
+                tokens = list(result.hypotheses[0])
+                if tokens and tokens[0] == target_token:
+                    tokens.pop(0)
+                if tokens and tokens[-1] == "</s>":
+                    tokens.pop()
+                translated = _preserve_24_hour_times(
+                    sentence,
+                    self._tokenizer.decode(tokens).strip(),
+                )
+                translated = _preserve_purchase_order_identifiers(
+                    sentence,
+                    translated,
+                    source_language=source_language,
+                    target_language=target_language,
+                )
+                translated = _preserve_named_entity_roles(
+                    sentence,
+                    translated,
+                    source_language=source_language,
+                    target_language=target_language,
+                )
+                if not translated:
+                    raise LocalTranslationError("local MT returned empty output")
+                translated_parts.append(translated)
+        except LocalTranslationError:
+            raise
         except Exception:
             raise LocalTranslationError("local MT inference failed") from None
-        if not translated:
-            raise LocalTranslationError("local MT returned empty output")
-        return translated
+        return " ".join(translated_parts)
 
     def count_tokens(self, text: str) -> int:
         if self.unavailable:

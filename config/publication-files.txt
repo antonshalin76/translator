@@ -125,6 +125,7 @@ docs/stabilization/defect-register.md
 docs/stabilization/master-bdd.md
 docs/stabilization/mt-fleurs-paired-20260924.md
 docs/stabilization/mt-natural-pilot-20260924.md
+docs/stabilization/mt-sentence-completeness-20260924.md
 docs/stabilization/output-model-screen-20260924.md
 docs/stabilization/stage-a-evidence.md
 docs/stabilization/stage-b1-evidence.md
