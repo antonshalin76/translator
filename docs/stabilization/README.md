@@ -47,6 +47,10 @@ The [MDC Spontaneous Speech comparison](asr-mdc-sps5-comparison-20260924.md)
 adds a speaker-disjoint RU/EN Turbo-vs-Qwen holdout. Turbo remains the
 single-model development baseline for downstream MT/TTS evaluation; no
 production model was changed.
+The [local audio-first critical screen](audio-first-critical-screen-20260925.md)
+adds an eval-only direct-WAV diagnostic for the frozen critical cases. Its
+exact-source run retained an Ollama CUDA failure, so it is not an audio-truth
+or release gate.
 
 The [fork-only Turbo local-chain smoke](turbo-local-chain-20260924.md) adds an
 opt-in pinned Turbo runtime to the fork and measures two ASR→NLLB→Piper paths
