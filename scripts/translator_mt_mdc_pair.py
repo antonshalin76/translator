@@ -50,6 +50,34 @@ def validate_server(pid: int, started: float) -> None:
         raise RuntimeError("pinned local MT listener is unavailable")
 
 
+def validate_server_command(command: list[str], model: Path, layers: int) -> None:
+    if layers < 0:
+        raise ValueError("Hy GPU layers must be nonnegative")
+    expected = [
+        str(HY_SERVER),
+        "--model",
+        str(model),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "11578",
+        "--threads",
+        "2",
+        "--threads-batch",
+        "2",
+        "--parallel",
+        "1",
+        "--ctx-size",
+        "2048",
+        "--gpu-layers",
+        str(layers),
+        "--jinja",
+        "--log-disable",
+    ]
+    if command != expected:
+        raise ValueError("local MT server identity does not match pinned command")
+
+
 def hy_translate(text: str, target: Language, pid: int, started: float) -> str:
     validate_server(pid, started)
     target_name = "English" if target is Language.EN else "Russian"
@@ -82,13 +110,20 @@ def hy_translate(text: str, target: Language, pid: int, started: float) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screen", type=Path, required=True)
+    parser.add_argument("--screen-sha256", default=SCREEN_SHA256)
+    parser.add_argument("--case-count", type=int, default=12)
     parser.add_argument("--turbo", type=Path, required=True)
     parser.add_argument("--backend", choices=("nllb", "hy_mt2"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--hy-model", type=Path)
     parser.add_argument("--hy-server-pid", type=int)
+    parser.add_argument("--hy-gpu-layers", type=int, default=0)
     args = parser.parse_args()
 
+    if args.hy_gpu_layers < 0:
+        raise ValueError("Hy GPU layers must be nonnegative")
+    if args.backend == "nllb" and args.hy_gpu_layers != 0:
+        raise ValueError("Hy GPU layers are not valid for NLLB")
     if (
         not args.output.is_absolute()
         or args.output.resolve().is_relative_to(ROOT)
@@ -99,7 +134,7 @@ def main() -> None:
     ):
         raise ValueError("output must be a new file in a private directory outside Git")
     screen_bytes = args.screen.read_bytes()
-    if hashlib.sha256(screen_bytes).hexdigest() != SCREEN_SHA256:
+    if hashlib.sha256(screen_bytes).hexdigest() != args.screen_sha256:
         raise ValueError("selected screen identity changed")
     screen = json.loads(screen_bytes)
     turbo_bytes = args.turbo.read_bytes()
@@ -112,13 +147,19 @@ def main() -> None:
         for case in report["results"]
         if (case["origin_id"], case["condition"]) in selected
     ]
-    if len(cases) != len(selected) or len(selected) != 12:
+    if (
+        args.case_count < 1
+        or len(cases) != len(selected)
+        or len(selected) != args.case_count
+    ):
         raise ValueError("selected cases are missing or duplicated")
     if any(case["status"] != "completed" or not case["transcript"] for case in cases):
         raise ValueError("selected Turbo transcript is unavailable")
 
     pid: int | None = None
     server_started: float | None = None
+    command: list[str] | None = None
+    server_affinity: list[int] | None = None
     if args.backend == "hy_mt2":
         model = args.hy_model
         pid = args.hy_server_pid
@@ -136,13 +177,10 @@ def main() -> None:
         if (
             process.uids().real != os.getuid()
             or Path(process.exe()).resolve() != HY_SERVER.resolve()
-            or "--model" not in command
-            or command[command.index("--model") + 1] != str(model)
-            or "--jinja" not in command
-            or "--gpu-layers" not in command
-            or command[command.index("--gpu-layers") + 1] != "0"
         ):
-            raise ValueError("local MT server identity does not match pinned CPU model")
+            raise ValueError("local MT server identity does not match pinned model")
+        validate_server_command(command, model, args.hy_gpu_layers)
+        server_affinity = process.cpu_affinity()
         server_started = process.create_time()
         validate_server(pid, server_started)
     elif args.hy_model is not None or args.hy_server_pid is not None:
@@ -206,12 +244,32 @@ def main() -> None:
     evidence = {
         "scope": "selected text-only diagnostic; EN source audio not human verified",
         "backend": args.backend,
-        "screen_sha256": SCREEN_SHA256,
+        "screen_sha256": args.screen_sha256,
         "turbo_report_sha256": screen["turbo_report_sha256"],
         "manifest_sha256": sha256(manifest_path),
         "source_head": report["source_head"],
+        "source_head_role": "Turbo ASR report provenance, not this runtime checkout",
+        "runner_sha256": sha256(Path(__file__)),
+        "runtime_code_sha256": {
+            name: sha256(ROOT / name)
+            for name in (
+                "sidecar/translator_sidecar/local/mt.py",
+                "sidecar/translator_sidecar/local/model_lease.py",
+                "sidecar/translator_sidecar/local/model_manifest.py",
+                "sidecar/translator_sidecar/provider_contract.py",
+            )
+        },
+        "runner_cpu_affinity": sorted(os.sched_getaffinity(0)),
         "hy_gguf_sha256": HY_GGUF_SHA256 if server_started is not None else None,
         "hy_server_pid": pid if server_started is not None else None,
+        "hy_server_binary_sha256": sha256(HY_SERVER)
+        if server_started is not None
+        else None,
+        "hy_server_command": command,
+        "hy_server_cpu_affinity": server_affinity,
+        "requested_hy_gpu_layers": args.hy_gpu_layers
+        if server_started is not None
+        else None,
         "decoding": "QUALITY_FIRST"
         if translator is not None
         else "temperature=0 top_p=0.6 top_k=20 repeat_penalty=1.05 max_tokens=128",

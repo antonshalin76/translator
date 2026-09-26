@@ -72,6 +72,11 @@ was changed in production. A larger independent critical-error eval is needed.
 The [33-pair FLEURS MT diagnostic](mt-fleurs-paired-20260924.md) broadens the
 text comparison and finds second-sentence omissions in NLLB, but its bootstrap
 intervals include zero and its sentences are not product-domain dialogue.
+The [prospective Turbo-text MT comparison](mt-mdc-pair-20260926.md) uses 24 new
+clean MDC origins: Hy-MT2 retained more critical facts than NLLB on the saved
+ASR text, and GPU offload reduced warm MT latency on this machine. One garbled
+ASR case still fails, the output path is not integrated, and this is not a
+live-audio or release result.
 The [RU/EN voice pilot](tts-voice-pilot-20260924.md) compares pinned Piper and
 Supertonic 3 on 16 WAVs. Piper remains the product baseline: Supertonic's
 nonstreaming CPU path is slower to first PCM and critical-number pronunciation
