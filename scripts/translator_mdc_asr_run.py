@@ -43,9 +43,10 @@ def directory_sha256(directory: Path) -> str:
 
 
 def validate_manifest(path: Path, expected_hash: str) -> list[dict]:
-    if sha256(path) != expected_hash:
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected_hash:
         raise ValueError("frozen manifest hash changed")
-    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest = json.loads(data)
     if manifest["schema"] != 1 or manifest["purpose"] not in (
         "asr_model_selection",
         "asr_independent_holdout",

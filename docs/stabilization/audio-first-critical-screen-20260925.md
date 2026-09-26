@@ -80,3 +80,37 @@ Gemma GPU judging. The four unresolved cases and the written references
 still need blinded listening for a release-grade critical-error verdict.
 Task 7 first-audible latency and full-chain quality gates remain open. No
 merge, model repin, or release is authorized by this diagnostic.
+
+## 2026-09-26 resource-safe listening handoff
+
+The 9.6-GB local Gemma model was not rerun after the CUDA failure. At this
+checkpoint, `free -h` reported 9.2 GiB available RAM and 16 GiB already used
+swap, with another workstation build and a VM active. A separate CPU-only
+load would have left inadequate headroom for the model and its runtime. This
+is a resource stop, not evidence that CPU inference works or fails.
+
+[`translator_blind_audio_review.py`](../../scripts/translator_blind_audio_review.py)
+now builds an offline, private listening packet from the exact frozen test
+manifest and critical-case screen. It verifies every WAV hash, shuffles the 12
+cases, embeds only audio and empty transcription fields in the review page,
+and stores written references in a different owner-only directory. The review
+directory contains only the HTML page, never the answer key or model answers.
+The page requires a response or explicit `UNINTELLIGIBLE` for every clip.
+Exported responses must be kept private too; opening the answer key before
+listening defeats blinding. The first combined-directory packet was retained
+privately under a `superseded-` name and must not be handed to a listener.
+
+The final split-directory packet is outside Git. Its review-page SHA-256 is
+`edaaa138528da33615b73b2a3d9be41168e2167724d139337e019058b38db7e6`;
+the separate key SHA-256 is
+`6599687e670bdebdb3f7bf18982d1cc9eda9264c6423823b03ced830c748f02a`.
+Both private directories are mode `0700`, their files are mode `0600`, and an
+independent decode check matched all 12 embedded WAV hashes to the key with
+zero written-reference leaks. A 16-MiB bounded read prevents a large WAV
+from consuming unbounded memory while building the packet. The export
+JavaScript passed a syntax check; actual browser playback and export have not
+been exercised. The available Playwright CLI rejects local `file:` URLs, and
+serving private audio over HTTP solely for this smoke test was declined.
+Seventeen focused tests pass across the packet and prior audio-judge harness.
+This prepares a blind listening review; it is not a human review result or a
+product-quality pass.
