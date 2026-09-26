@@ -20,6 +20,12 @@ The current fork is still not release-ready: the failure cause, Task 7's
 physical first-audible debt, acoustic admission and playback remain open.
 Production and the default model are unchanged.
 
+The fork also corrects AEC preflight resource custody: cancellation, failed
+inspection, and invalid binding now require confirmed graph cleanup before the
+calibration lease is released. Deterministic controller tests cover failed
+cleanup and retry. This does not enable open-speaker use: no production
+calibration engine is connected, and no physical acoustic proof has been run.
+
 ## Recovery baseline (2026-09-23)
 
 The last code commit is `b239b9a1be094a4f2c1f53132e49a664bbf020fa`

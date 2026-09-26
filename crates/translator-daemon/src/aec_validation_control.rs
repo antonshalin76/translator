@@ -496,7 +496,8 @@ async fn run_owned_attempt(
             attempt_id,
             AecCalibrationControlStatus::Cancelled { attempt_id },
             lease,
-        );
+        )
+        .await;
         return;
     }
     #[cfg(test)]
@@ -509,7 +510,8 @@ async fn run_owned_attempt(
                 attempt_id,
                 AecCalibrationControlStatus::Failed { attempt_id, code },
                 lease,
-            );
+            )
+            .await;
             return;
         }
         Err(_) => {
@@ -521,7 +523,8 @@ async fn run_owned_attempt(
                     code: "aec_calibration_inspection_failed",
                 },
                 lease,
-            );
+            )
+            .await;
             return;
         }
     };
@@ -539,7 +542,8 @@ async fn run_owned_attempt(
                     code: coordinator_error_code(error),
                 },
                 lease,
-            );
+            )
+            .await;
             return;
         }
     };
@@ -573,13 +577,14 @@ async fn run_owned_attempt(
     };
     let engine_future = match launch {
         CalibrationLaunch::Cancelled => {
-            inner.coordinator.cancel_attempt(&challenge, true);
+            inner.coordinator.cancel_attempt(&challenge, false);
             finish_preflight(
                 &inner,
                 attempt_id,
                 AecCalibrationControlStatus::Cancelled { attempt_id },
                 lease,
-            );
+            )
+            .await;
             return;
         }
         CalibrationLaunch::Started(engine_future) => Some(engine_future),
@@ -606,13 +611,25 @@ async fn wait_at_preflight_terminal_barrier(inner: &ControllerInner) {
     }
 }
 
-fn finish_preflight(
-    inner: &ControllerInner,
+async fn finish_preflight(
+    inner: &Arc<ControllerInner>,
     attempt_id: Uuid,
     terminal: AecCalibrationControlStatus,
     lease: AudioOperationLease,
 ) {
-    drop(lease);
+    {
+        let mut state = lock_recovering(&inner.state);
+        state.retained_custody = Some(RetainedCustody {
+            attempt_id,
+            lease: Some(lease),
+            cleanup_task: Arc::new(AsyncMutex::new(None)),
+        });
+    }
+    let cleanup_confirmed = AecCalibrationController {
+        inner: Arc::clone(inner),
+    }
+    .retry_retained_cleanup()
+    .await;
     let mut state = lock_recovering(&inner.state);
     if !state.stopping
         && state
@@ -620,7 +637,9 @@ fn finish_preflight(
             .as_ref()
             .is_some_and(|active| active.attempt_id == attempt_id)
     {
-        state.status = if state
+        state.status = if !cleanup_confirmed {
+            AecCalibrationControlStatus::CleanupUncertain { attempt_id }
+        } else if state
             .active
             .as_ref()
             .is_some_and(|active| active.cancellation.is_cancelled())
@@ -1256,6 +1275,343 @@ mod tests {
             *self.0.released.0.lock().unwrap() = true;
             self.0.released.1.notify_all();
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PreflightInspection {
+        Valid,
+        Error,
+        Panic,
+        InvalidBinding,
+    }
+
+    struct PreflightGraphEngine {
+        first_inspection: PreflightInspection,
+        inspection_entered: Notify,
+        inspection_released: (Mutex<bool>, std::sync::Condvar),
+        cleanup_entered: Notify,
+        cleanup_released: Arc<Notify>,
+        hold_cleanup: AtomicBool,
+        cleanup_confirmed: AtomicBool,
+        graph_owned: Arc<AtomicBool>,
+        inspections: AtomicUsize,
+        cleanups: AtomicUsize,
+        calibrations: AtomicUsize,
+    }
+
+    impl PreflightGraphEngine {
+        fn new(first_inspection: PreflightInspection) -> Self {
+            Self {
+                first_inspection,
+                inspection_entered: Notify::new(),
+                inspection_released: (Mutex::new(false), std::sync::Condvar::new()),
+                cleanup_entered: Notify::new(),
+                cleanup_released: Arc::new(Notify::new()),
+                hold_cleanup: AtomicBool::new(true),
+                cleanup_confirmed: AtomicBool::new(true),
+                graph_owned: Arc::new(AtomicBool::new(false)),
+                inspections: AtomicUsize::new(0),
+                cleanups: AtomicUsize::new(0),
+                calibrations: AtomicUsize::new(0),
+            }
+        }
+
+        fn release_inspection(&self) {
+            *self.inspection_released.0.lock().unwrap() = true;
+            self.inspection_released.1.notify_all();
+        }
+
+        fn release_cleanup(&self) {
+            self.hold_cleanup.store(false, Ordering::SeqCst);
+            self.cleanup_released.notify_one();
+        }
+    }
+
+    impl AecCalibrationEngine for PreflightGraphEngine {
+        fn inspect_binding(
+            &self,
+            _: Instant,
+        ) -> Result<AecProofBinding, AecCalibrationEngineError> {
+            let ordinal = self.inspections.fetch_add(1, Ordering::SeqCst);
+            if ordinal > 0 {
+                assert!(
+                    !self.graph_owned.load(Ordering::SeqCst),
+                    "replacement inspection started before graph cleanup"
+                );
+            }
+            self.graph_owned.store(true, Ordering::SeqCst);
+            self.inspection_entered.notify_one();
+            let released = self.inspection_released.0.lock().unwrap();
+            let (released, _) = self
+                .inspection_released
+                .1
+                .wait_timeout_while(released, Duration::from_secs(3), |released| !*released)
+                .unwrap();
+            assert!(*released, "inspection barrier expired");
+            drop(released);
+            if ordinal == 0 {
+                match self.first_inspection {
+                    PreflightInspection::Error => {
+                        return Err(AecCalibrationEngineError {
+                            code: "injected_inspection_failure",
+                            cleanup_confirmed: false,
+                        });
+                    }
+                    PreflightInspection::Panic => panic!("injected inspection panic"),
+                    PreflightInspection::InvalidBinding => {
+                        let mut binding = test_binding();
+                        binding.aec_module_id = 0;
+                        return Ok(binding);
+                    }
+                    PreflightInspection::Valid => {}
+                }
+            }
+            Ok(test_binding())
+        }
+
+        fn calibrate(&self, _: AecCalibrationRequest) -> AecCalibrationFuture {
+            self.calibrations.fetch_add(1, Ordering::SeqCst);
+            self.graph_owned.store(false, Ordering::SeqCst);
+            Box::pin(async {
+                Err(AecCalibrationEngineError {
+                    code: "injected_calibration_terminal",
+                    cleanup_confirmed: true,
+                })
+            })
+        }
+
+        fn cleanup(&self, _: Instant) -> AecCleanupFuture {
+            self.cleanups.fetch_add(1, Ordering::SeqCst);
+            self.cleanup_entered.notify_one();
+            let held = self.hold_cleanup.load(Ordering::SeqCst);
+            let confirmed = self.cleanup_confirmed.load(Ordering::SeqCst);
+            let released = Arc::clone(&self.cleanup_released);
+            let graph_owned = Arc::clone(&self.graph_owned);
+            Box::pin(async move {
+                if held {
+                    released.notified().await;
+                }
+                if confirmed {
+                    assert!(
+                        graph_owned.swap(false, Ordering::SeqCst),
+                        "cleanup must own the inspected graph"
+                    );
+                }
+                confirmed
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preflight_cancel_retains_gate_until_graph_cleanup_confirms() {
+        let engine = Arc::new(PreflightGraphEngine::new(PreflightInspection::Valid));
+        let (controller, coordinator, gate) = controller(engine.clone());
+        let AecCalibrationControlStatus::Running { attempt_id } = controller.start().await.unwrap()
+        else {
+            panic!("attempt not admitted")
+        };
+        tokio::time::timeout(Duration::from_secs(1), engine.inspection_entered.notified())
+            .await
+            .unwrap();
+        controller.cancel(attempt_id).await;
+        engine.release_inspection();
+        tokio::time::timeout(Duration::from_secs(1), engine.cleanup_entered.notified())
+            .await
+            .expect("preflight graph must enter cleanup");
+        assert_eq!(
+            controller.status(),
+            AecCalibrationControlStatus::Running { attempt_id }
+        );
+        assert_eq!(
+            gate.state(),
+            AudioOperationState::Calibration { attempt_id }
+        );
+        assert!(matches!(
+            gate.acquire_production(),
+            Err(AudioOperationAdmissionError::Busy { .. })
+        ));
+        engine.release_cleanup();
+        wait_until(&controller, |status| {
+            matches!(status, AecCalibrationControlStatus::Cancelled { attempt_id: current } if *current == attempt_id)
+        })
+        .await;
+        assert_eq!(engine.cleanups.load(Ordering::SeqCst), 1);
+        assert!(!engine.graph_owned.load(Ordering::SeqCst));
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        assert!(gate.acquire_production().is_ok());
+        assert_eq!(engine.calibrations.load(Ordering::SeqCst), 0);
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        controller.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preflight_inspection_error_and_panic_keep_custody_through_failed_retry() {
+        for outcome in [PreflightInspection::Error, PreflightInspection::Panic] {
+            let engine = Arc::new(PreflightGraphEngine::new(outcome));
+            engine.cleanup_confirmed.store(false, Ordering::SeqCst);
+            let (controller, coordinator, gate) = controller(engine.clone());
+            let AecCalibrationControlStatus::Running { attempt_id } =
+                controller.start().await.unwrap()
+            else {
+                panic!("attempt not admitted")
+            };
+            tokio::time::timeout(Duration::from_secs(1), engine.inspection_entered.notified())
+                .await
+                .unwrap();
+            engine.release_inspection();
+            tokio::time::timeout(Duration::from_secs(1), engine.cleanup_entered.notified())
+                .await
+                .expect("failed inspection must enter graph cleanup");
+            assert_eq!(
+                gate.state(),
+                AudioOperationState::Calibration { attempt_id }
+            );
+            assert!(gate.acquire_production().is_err());
+            engine.release_cleanup();
+            wait_until(&controller, |status| {
+                matches!(status, AecCalibrationControlStatus::CleanupUncertain { attempt_id: current } if *current == attempt_id)
+            })
+            .await;
+            assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+            assert_eq!(
+                lock_recovering(&controller.inner.state)
+                    .retained_custody
+                    .as_ref()
+                    .unwrap()
+                    .lease
+                    .as_ref()
+                    .unwrap()
+                    .state(),
+                AudioOperationState::Calibration { attempt_id }
+            );
+            assert_eq!(
+                controller.start().await,
+                Err(AecCalibrationControlError::Busy)
+            );
+            assert_eq!(engine.inspections.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                gate.state(),
+                AudioOperationState::Calibration { attempt_id }
+            );
+            engine.cleanup_confirmed.store(true, Ordering::SeqCst);
+            controller.start().await.unwrap();
+            wait_until(&controller, |status| {
+                matches!(status, AecCalibrationControlStatus::Failed { .. })
+            })
+            .await;
+            assert_eq!(engine.inspections.load(Ordering::SeqCst), 2);
+            assert_eq!(engine.calibrations.load(Ordering::SeqCst), 1);
+            assert!(!engine.graph_owned.load(Ordering::SeqCst));
+            assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+            controller.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_preflight_binding_cannot_skip_graph_cleanup() {
+        let engine = Arc::new(PreflightGraphEngine::new(
+            PreflightInspection::InvalidBinding,
+        ));
+        engine.cleanup_confirmed.store(false, Ordering::SeqCst);
+        let (controller, coordinator, gate) = controller(engine.clone());
+        let AecCalibrationControlStatus::Running { attempt_id } = controller.start().await.unwrap()
+        else {
+            panic!("attempt not admitted")
+        };
+        tokio::time::timeout(Duration::from_secs(1), engine.inspection_entered.notified())
+            .await
+            .unwrap();
+        engine.release_inspection();
+        tokio::time::timeout(Duration::from_secs(1), engine.cleanup_entered.notified())
+            .await
+            .expect("invalid binding must enter cleanup");
+        assert_eq!(
+            gate.state(),
+            AudioOperationState::Calibration { attempt_id }
+        );
+        assert!(gate.acquire_production().is_err());
+        engine.release_cleanup();
+        wait_until(&controller, |status| {
+            matches!(status, AecCalibrationControlStatus::CleanupUncertain { attempt_id: current } if *current == attempt_id)
+        })
+        .await;
+        assert_eq!(engine.calibrations.load(Ordering::SeqCst), 0);
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert_eq!(
+            controller.start().await,
+            Err(AecCalibrationControlError::Busy)
+        );
+        assert_eq!(engine.inspections.load(Ordering::SeqCst), 1);
+        assert!(
+            lock_recovering(&controller.inner.state)
+                .retained_custody
+                .as_ref()
+                .unwrap()
+                .lease
+                .is_some()
+        );
+        engine.cleanup_confirmed.store(true, Ordering::SeqCst);
+        controller.shutdown().await.unwrap();
+        assert!(!engine.graph_owned.load(Ordering::SeqCst));
+        assert!(
+            lock_recovering(&controller.inner.state)
+                .retained_custody
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_joins_preflight_and_retains_lease_on_cleanup_error() {
+        let engine = Arc::new(PreflightGraphEngine::new(PreflightInspection::Valid));
+        engine.cleanup_confirmed.store(false, Ordering::SeqCst);
+        let (controller, coordinator, gate) = controller(engine.clone());
+        let AecCalibrationControlStatus::Running { attempt_id } = controller.start().await.unwrap()
+        else {
+            panic!("attempt not admitted")
+        };
+        tokio::time::timeout(Duration::from_secs(1), engine.inspection_entered.notified())
+            .await
+            .unwrap();
+        let shutdown_controller = controller.clone();
+        let mut shutdown = tokio::spawn(async move { shutdown_controller.shutdown().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.state() != AudioOperationState::Stopping {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        engine.release_inspection();
+        tokio::time::timeout(Duration::from_secs(1), engine.cleanup_entered.notified())
+            .await
+            .expect("shutdown must enter graph cleanup");
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown returned before graph cleanup"
+        );
+        engine.release_cleanup();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(AecCalibrationControlError::Unavailable)
+        );
+        {
+            let state = lock_recovering(&controller.inner.state);
+            let custody = state.retained_custody.as_ref().unwrap();
+            assert_eq!(custody.attempt_id, attempt_id);
+            assert!(custody.lease.is_some());
+        }
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        engine.cleanup_confirmed.store(true, Ordering::SeqCst);
+        controller.shutdown().await.unwrap();
+        assert!(!engine.graph_owned.load(Ordering::SeqCst));
+        assert!(
+            lock_recovering(&controller.inner.state)
+                .retained_custody
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
