@@ -114,3 +114,52 @@ serving private audio over HTTP solely for this smoke test was declined.
 Seventeen focused tests pass across the packet and prior audio-judge harness.
 This prepares a blind listening review; it is not a human review result or a
 product-quality pass.
+
+## 2026-09-26 listener follow-up and English CPU triage
+
+One Russian-speaking listener completed all six RU fields in the blind page
+and explicitly marked the six EN fields `NOT_REVIEWED_EN`. The exported JSON
+matched the packet ID and all 12 labels. A private `0600` copy has SHA-256
+`0eae652ccb20df922d9053e1cabffa02895597cfde23577a62b9cea6fb6a4ba7`.
+The listener reported that the Russian words were intelligible, including
+the speech-shaped-noise case. This is a single-listener judgment of a selected
+set, not a population accuracy estimate.
+
+Compared against that listener's own transcript, Turbo retained the selected
+critical facts in all five clean RU cases and the one noisy RU variant. Qwen
+retained the selected facts in four uncontroversial clean cases but changed
+the noisy clip's ten-year span to decades and its final characterization.
+The fifth clean case is rubric-sensitive: Qwen changed the predicate
+`включено` to `яркое` under negation while retaining the broader inference
+that someone was training under the lit field at 9 p.m. An independent text
+reviewer counted the broader fact as preserved; the earlier strict screen
+counted the predicate substitution as a failure. Thus Qwen is 4/5 on clean
+RU under the strict predicate rubric or 5/5 under the broader semantic rubric;
+its noisy variant is 0/1 in either reading. The same clip's opening
+interjection appears in the written reference and Turbo but not in the
+listener transcript; its audibility remains unresolved. The noisy RU case
+is a variant of a clean origin, not an independent utterance.
+
+No English case received human transcription. To triangulate without another
+GPU load, a pinned local `faster-whisper-small` snapshot transcribed the six
+EN clips on CPU only. The transient user scope launch requested a 3-GiB
+`MemoryMax`, zero `MemorySwapMax`, and 200% `CPUQuota`; the runner used two
+CPU threads. These scope settings are launch evidence, not fields in the
+model report.
+The run completed with a 742,220-KiB peak process RSS. Its private report
+SHA-256 is
+`7482aee364096c6dcd8f45b69809eec2e98efea7a1af2b0edf0369c9d5ad2c59`;
+the one-off runner SHA-256 is
+`f8705b636cd584514d995133c29e90b9e0bb899d47fa0a713cf60ded564ea9cd`.
+Small's agreement with Turbo/Qwen on simple facts is not independent audio
+truth: it shares Whisper ancestry with Turbo and made a time error itself.
+All three ASR outputs differ from the written reference on the actor in one
+English clip, raising reference-versus-audio uncertainty; none reliably
+recovered the person's name in another. These remain unresolved until an
+English-capable listener or a validated independent audio oracle checks the
+recordings.
+
+Turbo remains the single input-side evaluation baseline. This new RU evidence
+does not authorize production model replacement, merge, or release. The
+English critical cases, full-chain audio quality, and Task 7 first-audible
+latency are still open gates.

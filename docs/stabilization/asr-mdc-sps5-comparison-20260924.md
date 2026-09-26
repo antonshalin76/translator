@@ -134,6 +134,9 @@ This is a retrospective, non-blinded **reference-conditioned diagnostic**,
 not an audio-adjudicated error rate: the source recordings could not be
 listened to in this review, and the written references may be wrong. It does
 not resolve the existing input errors or justify an EN-specific Qwen route.
+The later [blind RU listener follow-up](audio-first-critical-screen-20260925.md#2026-09-26-listener-follow-up-and-english-cpu-triage)
+checks six selected RU recordings only; EN remains unreviewed by a listener,
+and the clean RU predicate case is rubric-sensitive.
 
 Median isolated inference time over the bound test attempts was 283 ms for
 Turbo and 324 ms for Qwen; measured load was 3.9 versus 15.0 seconds, and
