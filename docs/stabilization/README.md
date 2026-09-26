@@ -66,6 +66,11 @@ The [MDC Spontaneous Speech comparison](asr-mdc-sps5-comparison-20260924.md)
 adds a speaker-disjoint RU/EN Turbo-vs-Qwen holdout. Turbo remains the
 single-model development baseline for downstream MT/TTS evaluation; no
 production model was changed.
+The [AppTek English dialogue diagnostic](asr-apptek-dialogues-20260927.md)
+adds 28 separate calls across 14 accent groups and publisher-manual references.
+Its WER ranking changes under number normalization, while both models retain
+critical fact errors. Turbo remains the input baseline; this is not a release
+holdout or model switch.
 The [local audio-first critical screen](audio-first-critical-screen-20260925.md)
 adds an eval-only direct-WAV diagnostic for the frozen critical cases. Its
 exact-source run retained an Ollama CUDA failure, so it is not an audio-truth
