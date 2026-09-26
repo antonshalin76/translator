@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import weakref
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -52,6 +54,27 @@ def _suppress_piper_content_logs() -> None:
     piper_logger = logging.getLogger("piper.voice")
     if piper_logger.level < logging.INFO:
         piper_logger.setLevel(logging.INFO)
+
+
+def _load_bounded_piper_voice(
+    model_path: str, *, config_path: str, use_cuda: bool
+) -> Any:
+    if use_cuda:
+        raise TtsUnsupported("Piper CUDA voice is unsupported")
+    import onnxruntime
+    from piper import PiperConfig, PiperVoice
+
+    with open(config_path, encoding="utf-8") as config_file:
+        config = PiperConfig.from_dict(json.load(config_file))
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+    session = onnxruntime.InferenceSession(
+        model_path,
+        sess_options=options,
+        providers=["CPUExecutionProvider"],
+    )
+    return PiperVoice(config=config, session=session, download_dir=Path.cwd())
 
 
 def _prepare_synthesis_text(text: str, *, continuation: bool) -> str:
@@ -130,9 +153,7 @@ class PiperVoiceRegistry:
             try:
                 factory = self._voice_factory
                 if factory is None:
-                    from piper import PiperVoice
-
-                    factory = PiperVoice.load
+                    factory = _load_bounded_piper_voice
                 lease = source.acquire()
                 model_name = next(
                     name for name in lease.names if name.endswith(".onnx")

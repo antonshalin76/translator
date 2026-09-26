@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import logging
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +21,7 @@ from translator_sidecar.local.tts import (
     TtsOutputLimit,
     TtsUnavailable,
     TtsUnsupported,
+    _load_bounded_piper_voice,
 )
 from translator_sidecar.local.tts import (
     PiperVoiceRegistry as NativeVoiceRegistry,
@@ -134,6 +136,42 @@ def create_voice(
     model_path.write_bytes(b"model")
     model_path.with_suffix(".onnx.json").write_text("{}", encoding="utf-8")
     return model_path
+
+
+def test_default_piper_loader_bounds_onnx_threads_without_changing_voice_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import onnxruntime
+    import piper
+
+    model_path = create_voice(tmp_path, "bounded")
+    config_path = model_path.with_suffix(".onnx.json")
+    config_path.write_text(json.dumps({"voice": "bounded"}), encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    def session_factory(path, *, sess_options, providers):
+        captured["session"] = (path, sess_options, providers)
+        return object()
+
+    def voice_factory(**kwargs):
+        captured["voice"] = kwargs
+        return object()
+
+    monkeypatch.setattr(onnxruntime, "InferenceSession", session_factory)
+    monkeypatch.setattr(piper.PiperConfig, "from_dict", lambda value: value)
+    monkeypatch.setattr(piper, "PiperVoice", voice_factory)
+
+    _load_bounded_piper_voice(
+        str(model_path), config_path=str(config_path), use_cuda=False
+    )
+
+    path, options, providers = captured["session"]
+    assert path == str(model_path)
+    assert providers == ["CPUExecutionProvider"]
+    assert options.intra_op_num_threads == 2
+    assert options.inter_op_num_threads == 1
+    assert captured["voice"]["config"] == {"voice": "bounded"}
+    assert captured["voice"]["session"] is not None
 
 
 def profile(

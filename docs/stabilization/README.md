@@ -81,6 +81,9 @@ The [RU/EN voice pilot](tts-voice-pilot-20260924.md) compares pinned Piper and
 Supertonic 3 on 16 WAVs. Piper remains the product baseline: Supertonic's
 nonstreaming CPU path is slower to first PCM and critical-number pronunciation
 signals remain unresolved. Neither pilot authorizes a model switch.
+The [bounded Piper product loader](piper-bounded-20260927.md) limits the
+four verified voices' ONNX worker pools and passes a saved-output PCM probe.
+This is a fork-only resource and format result, not live-audio release evidence.
 
 ## Audited contracts
 
