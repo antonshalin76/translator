@@ -81,6 +81,40 @@ review found no lost critical fact. Synthesized PCM hashes varied between
 runs, as already observed in the separate Piper probe; nonempty PCM is not
 proof of pronunciation or intelligibility.
 
+### Numerical ASR follow-up
+
+The installed faster-whisper 1.2.1 decoder uses a temperature fallback
+sequence when a decoded segment fails its quality thresholds. The current
+Turbo adapter leaves that library default intact. On the exact frozen
+`en-78643` WAV, 20 direct default decodes produced 18 distinct transcript
+hashes; an independent 12-decode check produced 10, with observed fallback
+temperatures of 0.2 and 0.4. This is a concrete repeatability risk for a
+critical numerical utterance, not evidence that either transcript is true.
+
+Twelve direct decodes with `temperature=0.0` were identical, but this is not
+a viable quality fix: in a frozen 24-origin comparison it changed only this
+English case and produced a repeated-word hallucination. Its WER against the
+*unverified written reference* rose from 0.9 for the frozen Turbo output to
+7.6 for the temperature-zero output; mean English WER rose from 0.245 to
+0.804. The private `asr-temp0-24.json` receipt has SHA-256
+`4ca08d03a9a1dc9e9369423b7b6c3df4116841da23a2a0c9c910f2f9a39ad7cb`.
+Setting the CTranslate2 random seed before each default decode also did not
+stabilize this case (11 distinct outputs in 12 attempts). Neither setting
+was applied to the product. The next input-side candidate needs a
+predeclared critical-case and independent-speech evaluation; optimizing one
+ambiguous utterance would overfit this diagnostic screen.
+
+A metadata-only inventory of the available MDC SPS5 archives also ruled out
+using their remaining official-test rows as a new **speaker-disjoint** release
+holdout. After the existing duration/text/quality filters and exclusion of
+all origins and speakers already exposed by both corpus versions' dev/test
+manifests, the remaining official-test count is 0 Russian and 2 English.
+Excluding only origins leaves 165 Russian and 138 English eligible rows, but
+their speakers overlap earlier evaluations. No audio or model was run for
+this inventory. An audio source outside these MDC archives is required for
+the independent release holdout; re-labelling these rows would not satisfy
+EVAL-0.
+
 **Decision:** retain Turbo as the input development baseline, NLLB as the
 production/default MT, Piper as the voice baseline, and Hy as an opt-in
 quality challenger in the fork. A small additional PCM delay would be
