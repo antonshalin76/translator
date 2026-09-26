@@ -1,15 +1,30 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use translator_audio::{
-    AcousticSafety, AecCapability, AudioGraphState, DeviceHealth, DeviceSelectionState,
-    DeviceState, GraphHealth, OutputMode, PhysicalDevice, RouteResolution, RoutingState,
+    AecCapability, AudioGraphState, DeviceHealth, DeviceSelectionState, GraphHealth, OutputMode,
+    PhysicalDevice, RouteResolution, RoutingState,
 };
 use translator_daemon::{
-    ActiveRoundTripRuntime, AudioOperationGate, AudioOperationLease, AudioOperationState,
-    RoundTripCheckpoint, RoundTripProgress, RoundTripRunner, RoundTripRuntimeError,
-    RoundTripRuntimeHandle, RuntimeSnapshot, RuntimeStore,
+    AcousticSafety, ActiveRoundTripRuntime, AdmittedDuplex, AudioOperationGate,
+    AudioOperationState, DeviceState, RoundTripCheckpoint, RoundTripProgress, RoundTripRunner,
+    RoundTripRuntimeError, RoundTripRuntimeHandle, RuntimeStore,
 };
 use uuid::Uuid;
+
+#[path = "support/audio_facts.rs"]
+mod audio_facts;
+
+fn test_controller(
+    store: RuntimeStore,
+    runner: Arc<dyn RoundTripRunner>,
+    gate: AudioOperationGate,
+) -> RoundTripRuntimeHandle {
+    let facts = audio_facts::fixture(store.snapshot());
+    RoundTripRuntimeHandle::try_new(store, runner, gate, facts).unwrap()
+}
 
 struct FakeRunner {
     starts: Mutex<Vec<Uuid>>,
@@ -34,10 +49,10 @@ impl Default for FakeRunner {
 impl RoundTripRunner for FakeRunner {
     fn start(
         &self,
-        _snapshot: RuntimeSnapshot,
+        _admitted: AdmittedDuplex,
         session_id: Uuid,
         progress: RoundTripProgress,
-        lease: AudioOperationLease,
+        _start_deadline: std::time::Instant,
     ) -> Result<Box<dyn ActiveRoundTripRuntime>, RoundTripRuntimeError> {
         self.starts.lock().unwrap().push(session_id);
         *self.progress.lock().unwrap() = Some(progress);
@@ -45,8 +60,6 @@ impl RoundTripRunner for FakeRunner {
             return Err(RoundTripRuntimeError::StartFailed);
         }
         Ok(Box::new(FakeActive {
-            lease: Some(lease),
-            finished: false,
             stop_failures: self.stop_failures,
             stop_attempts: Arc::clone(&self.stop_attempts),
         }))
@@ -54,26 +67,77 @@ impl RoundTripRunner for FakeRunner {
 }
 
 struct FakeActive {
-    lease: Option<AudioOperationLease>,
-    finished: bool,
     stop_failures: usize,
     stop_attempts: Arc<Mutex<usize>>,
 }
 
+struct PanicOnceRunner {
+    runtime_ids: Arc<Mutex<Vec<Uuid>>>,
+    stop_calls: Arc<Mutex<Vec<Uuid>>>,
+    drops: Arc<AtomicUsize>,
+    progress: Arc<Mutex<Option<RoundTripProgress>>>,
+}
+
+impl RoundTripRunner for PanicOnceRunner {
+    fn start(
+        &self,
+        _admitted: AdmittedDuplex,
+        _session_id: Uuid,
+        progress: RoundTripProgress,
+        _start_deadline: std::time::Instant,
+    ) -> Result<Box<dyn ActiveRoundTripRuntime>, RoundTripRuntimeError> {
+        let runtime_id = Uuid::new_v4();
+        self.runtime_ids.lock().unwrap().push(runtime_id);
+        *self.progress.lock().unwrap() = Some(progress);
+        Ok(Box::new(PanicOnceActive {
+            runtime_id,
+            panicked: false,
+            stop_calls: Arc::clone(&self.stop_calls),
+            drops: Arc::clone(&self.drops),
+        }))
+    }
+}
+
+struct PanicOnceActive {
+    runtime_id: Uuid,
+    panicked: bool,
+    stop_calls: Arc<Mutex<Vec<Uuid>>>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl ActiveRoundTripRuntime for PanicOnceActive {
+    fn stop(
+        &mut self,
+        _deadline: std::time::Instant,
+        _cleanup_deadline: std::time::Instant,
+    ) -> Result<translator_daemon::RoundTripTerminal, RoundTripRuntimeError> {
+        self.stop_calls.lock().unwrap().push(self.runtime_id);
+        if !self.panicked {
+            self.panicked = true;
+            panic!("injected Stop panic");
+        }
+        Ok(translator_daemon::RoundTripTerminal::Stopped)
+    }
+}
+
+impl Drop for PanicOnceActive {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl ActiveRoundTripRuntime for FakeActive {
-    fn stop(&mut self) -> Result<(), RoundTripRuntimeError> {
+    fn stop(
+        &mut self,
+        _: std::time::Instant,
+        _: std::time::Instant,
+    ) -> Result<translator_daemon::RoundTripTerminal, RoundTripRuntimeError> {
         let mut attempts = self.stop_attempts.lock().unwrap();
         *attempts += 1;
         if *attempts <= self.stop_failures {
             return Err(RoundTripRuntimeError::StopFailed);
         }
-        self.lease.take();
-        self.finished = true;
-        Ok(())
-    }
-
-    fn is_finished(&self) -> bool {
-        self.finished
+        Ok(translator_daemon::RoundTripTerminal::Stopped)
     }
 }
 
@@ -134,7 +198,7 @@ fn selection(device: PhysicalDevice) -> DeviceSelectionState {
 #[test]
 fn controller_publishes_availability_before_first_start() {
     let store = ready_store();
-    let controller = RoundTripRuntimeHandle::new(
+    let controller = test_controller(
         store.clone(),
         Arc::new(FakeRunner::default()),
         AudioOperationGate::new(),
@@ -150,7 +214,7 @@ fn controller_holds_shared_gate_until_idempotent_runtime_teardown() {
     let store = ready_store();
     let gate = AudioOperationGate::new();
     let runner = Arc::new(FakeRunner::default());
-    let controller = RoundTripRuntimeHandle::new(store, runner, gate.clone());
+    let controller = test_controller(store, runner, gate.clone());
 
     let started = translator_daemon::RoundTripController::start(&controller).unwrap();
     let session_id = started.status.session_id.unwrap();
@@ -171,7 +235,7 @@ fn controller_holds_shared_gate_until_idempotent_runtime_teardown() {
         Some(RoundTripCheckpoint::Stopped)
     );
     assert_eq!(gate.state(), AudioOperationState::Idle);
-    assert!(translator_daemon::RoundTripController::stop(&controller).is_err());
+    assert!(translator_daemon::RoundTripController::stop(&controller).is_ok());
 }
 
 #[test]
@@ -180,7 +244,7 @@ fn shared_gate_and_runner_failure_leave_no_live_self_test_lease() {
     let gate = AudioOperationGate::new();
     let production = gate.acquire_production().unwrap();
     let runner = Arc::new(FakeRunner::default());
-    let controller = RoundTripRuntimeHandle::new(store.clone(), runner.clone(), gate.clone());
+    let controller = test_controller(store.clone(), runner.clone(), gate.clone());
 
     let busy = translator_daemon::RoundTripController::start(&controller).unwrap_err();
     assert_eq!(busy.code, "audio_operation_busy");
@@ -191,7 +255,7 @@ fn shared_gate_and_runner_failure_leave_no_live_self_test_lease() {
         fail_start: true,
         ..FakeRunner::default()
     });
-    let controller = RoundTripRuntimeHandle::new(store, failing, gate.clone());
+    let controller = test_controller(store, failing, gate.clone());
     let error = translator_daemon::RoundTripController::start(&controller).unwrap_err();
     assert_eq!(error.code, "self_test_start_failed");
     assert_eq!(gate.state(), AudioOperationState::Idle);
@@ -205,7 +269,7 @@ fn stop_timeout_retains_runtime_and_gate_for_retry_cleanup() {
         stop_failures: 1,
         ..FakeRunner::default()
     });
-    let controller = RoundTripRuntimeHandle::new(store, runner.clone(), gate.clone());
+    let controller = test_controller(store, runner.clone(), gate.clone());
 
     let started = translator_daemon::RoundTripController::start(&controller).unwrap();
     let session_id = started.status.session_id.unwrap();
@@ -219,24 +283,178 @@ fn stop_timeout_retains_runtime_and_gate_for_retry_cleanup() {
     assert!(translator_daemon::RoundTripController::start(&controller).is_err());
 
     let stopped = translator_daemon::RoundTripController::stop(&controller).unwrap();
-    assert_eq!(
-        stopped.status.checkpoint,
-        Some(RoundTripCheckpoint::Stopped)
-    );
+    assert_eq!(stopped.status.checkpoint, Some(RoundTripCheckpoint::Failed));
+    assert!(!stopped.status.cleanup_pending);
     assert_eq!(*runner.stop_attempts.lock().unwrap(), 2);
     assert_eq!(gate.state(), AudioOperationState::Idle);
 }
 
 #[test]
+fn shutdown_admission_keeps_start_disabled_across_cleanup_retry() {
+    let store = ready_store();
+    let gate = AudioOperationGate::new();
+    let runner = Arc::new(FakeRunner {
+        stop_failures: 1,
+        ..FakeRunner::default()
+    });
+    let controller = test_controller(store, runner.clone(), gate.clone());
+    translator_daemon::RoundTripController::start(&controller).unwrap();
+
+    let first_shutdown = controller.shutdown();
+    let retry = translator_daemon::RoundTripController::stop(&controller);
+    let rejected_start = translator_daemon::RoundTripController::start(&controller);
+    let final_shutdown = controller.shutdown();
+
+    assert_eq!(
+        first_shutdown,
+        Err(translator_daemon::RoundTripOwnerShutdownError::CleanupPending)
+    );
+    assert!(retry.is_ok());
+    assert_eq!(rejected_start.unwrap_err().code, "self_test_owner_failed");
+    assert_eq!(*runner.stop_attempts.lock().unwrap(), 2);
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+    assert_eq!(final_shutdown, Ok(()));
+}
+
+#[test]
 fn unsafe_snapshot_is_rejected_before_runner_or_gate_acquisition() {
-    let store = RuntimeStore::default();
+    let store = ready_store();
+    let mut devices = store.snapshot().devices.unwrap();
+    devices.acoustic.mode = OutputMode::UnknownUnsafe;
+    store.set_devices(devices);
     let gate = AudioOperationGate::new();
     let runner = Arc::new(FakeRunner::default());
-    let controller = RoundTripRuntimeHandle::new(store, runner.clone(), gate.clone());
+    let controller = test_controller(store, runner.clone(), gate.clone());
 
     let error = translator_daemon::RoundTripController::start(&controller).unwrap_err();
 
     assert_eq!(error.code, "self_test_headphones_required");
     assert!(runner.starts.lock().unwrap().is_empty());
     assert_eq!(gate.state(), AudioOperationState::Idle);
+}
+
+#[test]
+fn unavailable_facts_are_rejected_before_runner_or_gate_acquisition() {
+    let gate = AudioOperationGate::new();
+    let runner = Arc::new(FakeRunner::default());
+    let controller = test_controller(RuntimeStore::default(), runner.clone(), gate.clone());
+
+    let error = translator_daemon::RoundTripController::start(&controller).unwrap_err();
+
+    assert_eq!(
+        (error.status.as_u16(), error.code),
+        (503, "audio_facts_unavailable")
+    );
+    assert!(runner.starts.lock().unwrap().is_empty());
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+}
+
+#[test]
+fn stop_panic_retains_exact_runtime_and_gate_for_same_owner_retry() {
+    let store = ready_store();
+    let gate = AudioOperationGate::new();
+    let runtime_ids = Arc::new(Mutex::new(Vec::new()));
+    let stop_calls = Arc::new(Mutex::new(Vec::new()));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let progress = Arc::new(Mutex::new(None));
+    let runner = Arc::new(PanicOnceRunner {
+        runtime_ids: Arc::clone(&runtime_ids),
+        stop_calls: Arc::clone(&stop_calls),
+        drops: Arc::clone(&drops),
+        progress,
+    });
+    let controller = test_controller(store.clone(), runner, gate.clone());
+    let started = translator_daemon::RoundTripController::start(&controller).unwrap();
+    let session_id = started.status.session_id.unwrap();
+
+    let first_stop = translator_daemon::RoundTripController::stop(&controller);
+    let status_after_panic = store.snapshot().self_test.status;
+    let gate_after_panic = gate.state();
+    let drops_after_panic = drops.load(Ordering::SeqCst);
+    let second_stop = translator_daemon::RoundTripController::stop(&controller);
+    let start_after_cleanup = translator_daemon::RoundTripController::start(&controller);
+    let shutdown = controller.shutdown();
+    let runtime_ids = runtime_ids.lock().unwrap().clone();
+    let calls = stop_calls.lock().unwrap().clone();
+    let final_drops = drops.load(Ordering::SeqCst);
+
+    assert_eq!(first_stop.unwrap_err().code, "self_test_cleanup_pending");
+    assert_eq!(
+        status_after_panic.checkpoint,
+        Some(RoundTripCheckpoint::Failed)
+    );
+    assert!(status_after_panic.cleanup_pending);
+    assert_eq!(
+        gate_after_panic,
+        AudioOperationState::HumanRoundTrip { session_id }
+    );
+    assert_eq!(drops_after_panic, 0);
+    let stopped = second_stop.expect("same owner must retry the retained runtime");
+    assert_eq!(stopped.status.checkpoint, Some(RoundTripCheckpoint::Failed));
+    assert!(!stopped.status.cleanup_pending);
+    assert!(start_after_cleanup.is_err());
+    assert_eq!(runtime_ids.len(), 1);
+    assert_eq!(calls, vec![runtime_ids[0], runtime_ids[0]]);
+    assert_eq!(final_drops, 1);
+    assert!(shutdown.is_ok());
+}
+
+#[test]
+fn completion_panic_keeps_same_owner_retryable_and_start_disabled() {
+    let store = ready_store();
+    let gate = AudioOperationGate::new();
+    let runtime_ids = Arc::new(Mutex::new(Vec::new()));
+    let stop_calls = Arc::new(Mutex::new(Vec::new()));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let progress = Arc::new(Mutex::new(None));
+    let runner = Arc::new(PanicOnceRunner {
+        runtime_ids: Arc::clone(&runtime_ids),
+        stop_calls: Arc::clone(&stop_calls),
+        drops: Arc::clone(&drops),
+        progress: Arc::clone(&progress),
+    });
+    let controller = test_controller(store.clone(), runner, gate.clone());
+    let started = translator_daemon::RoundTripController::start(&controller).unwrap();
+    let session_id = started.status.session_id.unwrap();
+
+    progress
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap()
+        .completed(session_id);
+    let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while !store.snapshot().self_test.status.cleanup_pending
+        && std::time::Instant::now() < wait_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let status_after_panic = store.snapshot().self_test.status;
+    let gate_after_panic = gate.state();
+    let drops_after_panic = drops.load(Ordering::SeqCst);
+    let retry = translator_daemon::RoundTripController::stop(&controller);
+    let start_after_cleanup = translator_daemon::RoundTripController::start(&controller);
+    let shutdown = controller.shutdown();
+    let runtime_ids = runtime_ids.lock().unwrap().clone();
+    let calls = stop_calls.lock().unwrap().clone();
+    let final_drops = drops.load(Ordering::SeqCst);
+
+    assert_eq!(
+        status_after_panic.checkpoint,
+        Some(RoundTripCheckpoint::Failed)
+    );
+    assert!(status_after_panic.cleanup_pending);
+    assert_eq!(
+        gate_after_panic,
+        AudioOperationState::HumanRoundTrip { session_id }
+    );
+    assert_eq!(drops_after_panic, 0);
+    let stopped = retry.expect("explicit Stop must retry the completion owner");
+    assert_eq!(stopped.status.checkpoint, Some(RoundTripCheckpoint::Failed));
+    assert!(!stopped.status.cleanup_pending);
+    assert!(start_after_cleanup.is_err());
+    assert_eq!(runtime_ids.len(), 1);
+    assert_eq!(calls, vec![runtime_ids[0], runtime_ids[0]]);
+    assert_eq!(final_drops, 1);
+    assert!(shutdown.is_ok());
 }

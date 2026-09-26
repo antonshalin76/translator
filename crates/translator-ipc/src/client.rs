@@ -187,6 +187,178 @@ fn event_stream_error(code: Code) -> ProviderClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{
+        OpenProviderSession, ProviderProbeResponse,
+        provider_transport_server::{ProviderTransport, ProviderTransportServer},
+    };
+    use std::{net::Shutdown, os::unix::fs::DirBuilderExt, pin::Pin};
+    use tokio::sync::oneshot;
+    use tokio_stream::{Stream, StreamExt};
+    use tonic::{Response, Status};
+
+    const PRIVATE_DETAIL: &str = "private-provider-diagnostic-not-for-clients";
+
+    struct StatusTransport {
+        code: Option<Code>,
+        initial: bool,
+    }
+
+    #[tonic::async_trait]
+    impl ProviderTransport for StatusTransport {
+        type StreamStream = Pin<Box<dyn Stream<Item = Result<ProviderEvent, Status>> + Send>>;
+
+        async fn stream(
+            &self,
+            _: Request<tonic::Streaming<ProviderRequest>>,
+        ) -> Result<Response<Self::StreamStream>, Status> {
+            if let Some(code) = self.code
+                && self.initial
+            {
+                return Err(Status::new(code, PRIVATE_DETAIL));
+            }
+            let events = self
+                .code
+                .map(|code| {
+                    vec![
+                        Ok(ProviderEvent::default()),
+                        Err(Status::new(code, PRIVATE_DETAIL)),
+                    ]
+                })
+                .unwrap_or_default();
+            Ok(Response::new(Box::pin(tokio_stream::iter(events))))
+        }
+
+        async fn probe(
+            &self,
+            _: Request<ProviderProbeRequest>,
+        ) -> Result<Response<ProviderProbeResponse>, Status> {
+            Err(Status::unimplemented("probe not used"))
+        }
+    }
+
+    async fn observe_transport(
+        code: Option<Code>,
+        initial: bool,
+    ) -> Result<ProviderClientError, String> {
+        let directory = std::env::temp_dir().join(format!("translator-ipc-{}", Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let socket = directory.join("provider.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let (remote_sender, remote_receiver) = oneshot::channel();
+        let mut server = tokio::spawn(async move {
+            let (connection, _) = listener.accept().await.unwrap();
+            let connection = connection.into_std().unwrap();
+            let remote = connection.try_clone().unwrap();
+            remote_sender.send(remote).unwrap();
+            let connection = UnixStream::from_std(connection).unwrap();
+            let incoming = tokio_stream::once(Ok::<_, std::io::Error>(connection))
+                .chain(tokio_stream::pending());
+            tonic::transport::Server::builder()
+                .add_service(ProviderTransportServer::new(StatusTransport {
+                    code,
+                    initial,
+                }))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+            let opened = ProviderStreamClient::open(
+                &socket,
+                &"ab".repeat(32),
+                ProviderRequest {
+                    request: Some(provider_request::Request::OpenSession(
+                        OpenProviderSession::default(),
+                    )),
+                },
+            )
+            .await;
+            let remote = remote_receiver.await.map_err(|_| "remote socket missing")?;
+            let mut client = match opened {
+                Err(error) if initial => return Ok(error),
+                Err(_) => return Err("RPC failed before late-status boundary"),
+                Ok(_) if initial => return Err("initial RPC status missing"),
+                Ok(client) => client,
+            };
+            if code.is_some() {
+                if client
+                    .next_event()
+                    .await
+                    .map_err(|_| "first event failed")?
+                    .is_none()
+                {
+                    return Err("first event missing");
+                }
+                return client.next_event().await.err().ok_or("late status missing");
+            }
+            if !matches!(client.next_event().await, Ok(None)) {
+                return Err("clean EOF missing");
+            }
+            remote
+                .shutdown(Shutdown::Both)
+                .map_err(|_| "remote disconnect failed")?;
+            loop {
+                match client.send(ProviderRequest::default()).await {
+                    Err(error) => return Ok(error),
+                    Ok(()) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await;
+        let _ = stop.send(());
+        let drained = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
+        if drained.is_err() {
+            server.abort();
+            let _ = server.await;
+        }
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        if !matches!(drained, Ok(Ok(Ok(())))) {
+            return Err("server cleanup failed".into());
+        }
+        outcome
+            .map_err(|_| "transport observation timed out".to_owned())?
+            .map_err(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn real_uds_initial_and_late_statuses_preserve_typed_private_errors() {
+        for (code, expected) in [
+            (
+                Code::InvalidArgument,
+                ProviderClientError::EventStreamProtocol,
+            ),
+            (
+                Code::ResourceExhausted,
+                ProviderClientError::EventStreamResourceExhausted,
+            ),
+            (Code::Internal, ProviderClientError::EventStreamInternal),
+            (Code::Cancelled, ProviderClientError::EventStreamCancelled),
+            (Code::Unavailable, ProviderClientError::TransportUnavailable),
+            (Code::Unknown, ProviderClientError::EventStreamFailed),
+        ] {
+            for initial in [true, false] {
+                let error = observe_transport(Some(code), initial).await.unwrap();
+                assert_eq!(
+                    std::mem::discriminant(&error),
+                    std::mem::discriminant(&expected),
+                    "{code:?}, initial={initial}"
+                );
+                assert!(!error.to_string().contains(PRIVATE_DETAIL));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn real_uds_clean_eof_and_explicit_remote_disconnect_are_distinct() {
+        let error = observe_transport(None, false).await.unwrap();
+        assert!(matches!(error, ProviderClientError::RequestChannelClosed));
+    }
 
     #[test]
     fn event_stream_status_is_reduced_to_privacy_safe_categories() {

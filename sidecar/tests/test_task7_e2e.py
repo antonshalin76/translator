@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import shlex
+import subprocess
+import uuid
 from pathlib import Path
 from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,7 +38,522 @@ from translator_sidecar.benchmark.task7_e2e import (
     run_live_e2e,
     run_smoke_pairs,
 )
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.provider_contract import TranslationMode
+
+
+class TemporarySinkCommands:
+    def __init__(self):
+        self.calls = []
+        self.modules = []
+        self.load_error = False
+        self.unload_errors = 0
+        self.unload_failure = subprocess.CalledProcessError(
+            1, ["pactl", "unload-module", "73"]
+        )
+        self.apply_failed_unload = False
+        self.read_error = None
+        self.read_failure = None
+        self.after_read = lambda: None
+
+    def __call__(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        assert len(self.calls) <= 20, "cleanup must not spin"
+        assert kwargs["check"] is True
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert 0 < kwargs["timeout"] <= 3
+        if command[:3] == ["pactl", "load-module", "module-null-sink"]:
+            self.modules = [
+                {
+                    "index": 73,
+                    "name": "module-null-sink",
+                    "argument": " ".join(command[3:]),
+                }
+            ]
+            if self.load_error:
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return SimpleNamespace(stdout="73\n")
+        if command == ["pactl", "list", "short", "modules"]:
+            self.after_read()
+            if self.read_failure is not None:
+                failure, self.read_failure = self.read_failure, None
+                raise failure
+            if self.read_error is not None:
+                return SimpleNamespace(stdout=self.read_error)
+            # pactl v16.1 e5ad31e8 uses a final tab-newline after each full argument.
+            return SimpleNamespace(
+                stdout="".join(
+                    f"{module['index']}\t{module['name']}\t{module['argument']}\t\n"
+                    for module in self.modules
+                )
+            )
+        assert command == ["pactl", "unload-module", "73"]
+        if self.unload_errors:
+            self.unload_errors -= 1
+            if self.apply_failed_unload:
+                self.modules = []
+            raise self.unload_failure
+        self.modules = []
+        return SimpleNamespace(stdout="")
+
+    def unloads(self):
+        return [command for command, _ in self.calls if command[1] == "unload-module"]
+
+
+def test_temporary_sink_start_command_preserves_task7_contract_and_unique_owner():
+    runners = [TemporarySinkCommands(), TemporarySinkCommands()]
+    owners = [task7_e2e.TemporaryInputSink(runner=runner) for runner in runners]
+    markers = []
+    for owner, runner in zip(owners, runners, strict=True):
+        owner.start()
+        assert owner.module_id == 73
+        assert owner.monitor_source == "translator_task7_ru_in.monitor"
+        command = runner.calls[0][0]
+        assert command[:7] == [
+            "pactl",
+            "load-module",
+            "module-null-sink",
+            "sink_name=translator_task7_ru_in",
+            "rate=16000",
+            "channels=1",
+            "channel_map=mono",
+        ]
+        assert len(command) == 8
+        parameters = dict(
+            token.split("=", 1) for token in shlex.split(" ".join(command[3:]))
+        )
+        assert set(parameters) == {
+            "sink_name",
+            "rate",
+            "channels",
+            "channel_map",
+            "sink_properties",
+        }
+        properties = dict(
+            token.split("=", 1) for token in shlex.split(parameters["sink_properties"])
+        )
+        assert properties["device.description"] == "Translator_Task7_Input"
+        assert properties["translator.task7_e2e"] == "true"
+        marker = properties["translator.task7_owner"]
+        assert uuid.UUID(hex=marker).hex == marker
+        markers.append(marker)
+        with pytest.raises(Task7E2EError):
+            owner.start()
+        assert len(runner.calls) == 1
+        owner.stop()
+        assert owner.module_id is None
+    assert markers[0] != markers[1]
+
+
+def test_temporary_sink_failed_unload_retains_owner_until_confirmed_cleanup(
+    monkeypatch,
+):
+    runner = TemporarySinkCommands()
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    owner.start()
+    now = [100.0]
+    monkeypatch.setattr(task7_e2e, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    runner.after_read = lambda: now.__setitem__(0, now[0] + 7)
+    runner.unload_errors = 1
+    with pytest.raises(subprocess.CalledProcessError):
+        owner.stop()
+    assert owner.module_id == 73
+    owner.stop()
+    assert owner.module_id is None
+    assert runner.unloads() == [["pactl", "unload-module", "73"]] * 2
+    assert [
+        kwargs["timeout"]
+        for command, kwargs in runner.calls
+        if command[1] == "unload-module"
+    ] == [1, 1]
+    before = len(runner.calls)
+    owner.stop()
+    assert len(runner.calls) == before
+
+
+def test_temporary_sink_lost_load_response_keeps_recoverable_intent():
+    runner = TemporarySinkCommands()
+    runner.load_error = True
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    with pytest.raises(subprocess.TimeoutExpired):
+        owner.start()
+    with pytest.raises(Task7E2EError):
+        owner.start()
+    owner.stop()
+    assert runner.modules == []
+    assert runner.unloads() == [["pactl", "unload-module", "73"]]
+    assert owner.module_id is None
+
+
+@pytest.mark.parametrize("foreign_reuse", [False, True])
+def test_temporary_sink_lost_unload_response_never_unloads_absent_or_reused_id(
+    foreign_reuse,
+):
+    runner = TemporarySinkCommands()
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    owner.start()
+    runner.unload_errors = 1
+    runner.apply_failed_unload = True
+    with pytest.raises(subprocess.CalledProcessError):
+        owner.stop()
+    assert owner.module_id == 73
+    if foreign_reuse:
+        runner.modules = [
+            {"index": 73, "name": "module-null-sink", "argument": "sink_name=foreign"}
+        ]
+    before = list(runner.modules)
+    owner.stop()
+    assert runner.modules == before
+    assert len(runner.unloads()) == 1
+    assert owner.module_id is None
+
+
+@pytest.mark.parametrize("defect", ["json", "duplicate", "kind", "expired"])
+def test_temporary_sink_uncertain_identity_retains_intent_and_never_unloads(
+    monkeypatch, defect
+):
+    runner = TemporarySinkCommands()
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    owner.start()
+    now = [100.0]
+    monkeypatch.setattr(task7_e2e, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    if defect == "json":
+        runner.read_error = "invalid-json"
+    elif defect == "duplicate":
+        runner.modules.append({**runner.modules[0], "index": 74})
+    elif defect == "kind":
+        runner.modules[0]["name"] = "module-loopback"
+    else:
+        runner.after_read = lambda: now.__setitem__(0, 109.0)
+    with pytest.raises(Task7E2EError):
+        owner.stop()
+    assert owner.module_id == 73
+    assert not runner.unloads()
+
+
+def test_temporary_sink_literal_multiline_inventory_preserves_foreign_records(
+    monkeypatch,
+):
+    monkeypatch.setattr(task7_e2e.uuid, "uuid4", lambda: uuid.UUID(int=1))
+    runner = TemporarySinkCommands()
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    owner.start()
+    runner.read_error = (
+        "91\tmodule-native-protocol-unix\t\t\n"
+        "92\tmodule-foreign\tvalue='first line\nsecond\tline'\t\n"
+        "73\tmodule-null-sink\tsink_name=translator_task7_ru_in rate=16000 "
+        "channels=1 channel_map=mono sink_properties='device.description=Translator_Task7_Input "
+        "translator.task7_e2e=true translator.task7_owner=00000000000000000000000000000001'\t\n"
+    )
+    owner.stop()
+    assert runner.unloads() == [["pactl", "unload-module", "73"]]
+    assert owner.module_id is None
+    assert runner.calls[1][0] == ["pactl", "list", "short", "modules"]
+
+
+@pytest.mark.parametrize("payload", ["", "99\tmodule-native-protocol-unix\t\t\n"])
+def test_temporary_sink_valid_absence_is_confirmed_without_unload(payload):
+    runner = TemporarySinkCommands()
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    owner.start()
+    runner.read_error = payload
+    owner.stop()
+    assert owner.module_id is None
+    assert runner.unloads() == []
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "terminator",
+        "fields",
+        "duplicate",
+        "positive_sign",
+        "leading_zero",
+        "negative",
+        "unicode",
+        "sentinel",
+        "out_of_range",
+        "owned_multiline",
+        "owned_malformed",
+        "foreign_only_malformed",
+        "empty_name",
+        "own_then_malformed_foreign",
+        "misplaced_owner",
+        "foreign_header_lf",
+        "foreign_header_cr",
+    ],
+)
+def test_temporary_sink_malformed_short_inventory_never_confirms_absence(defect):
+    runner = TemporarySinkCommands()
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    owner.start()
+    argument = runner.modules[0]["argument"]
+    record = f"73\tmodule-null-sink\t{argument}\t\n"
+    malformed_ids = {
+        "positive_sign": "+73",
+        "leading_zero": "073",
+        "negative": "-1",
+        "unicode": "٧٣",
+        "sentinel": "4294967295",
+        "out_of_range": "4294967296",
+    }
+    if defect in malformed_ids:
+        record = f"{malformed_ids[defect]}\tmodule-null-sink\t{argument}\t\n"
+    elif defect == "terminator":
+        record = record[:-2]
+    elif defect == "fields":
+        record = "73\tmodule-null-sink\t\n"
+    elif defect == "duplicate":
+        record += "73\tmodule-foreign\t\t\n"
+    elif defect == "owned_multiline":
+        record = record.replace(" channels=1", "\n channels=1")
+    elif defect == "foreign_only_malformed":
+        record = "not-an-id\tmodule-foreign\t\t\n"
+    elif defect == "empty_name":
+        record = "99\t\t\t\n"
+    elif defect == "foreign_header_lf":
+        record = "99\tmodule-\nforeign\t\t\n"
+    elif defect == "foreign_header_cr":
+        record = "99\tmodule-\rforeign\t\t\n"
+    elif defect == "own_then_malformed_foreign":
+        record += "99\tmodule-foreign\t\n"
+    elif defect == "misplaced_owner":
+        record = record.replace("sink_properties='", "sink_properties=").replace(
+            "'\t\n", "\t\n"
+        )
+    else:
+        record = record.replace(" channels=1", " broken-token channels=1")
+    runner.read_error = record
+    with pytest.raises(Task7E2EError):
+        owner.stop()
+    assert owner.module_id == 73
+    assert runner.unloads() == []
+
+
+def temporary_sink_live_fixture(tmp_path, monkeypatch):
+    bridge_path = tmp_path / "bridge"
+    bridge_path.touch()
+    arguments = parse_arguments(
+        (
+            "--profile",
+            "warm",
+            "--physical-sink",
+            "alsa_output.headphones",
+            "--bridge",
+            str(bridge_path),
+            "--output",
+            str(tmp_path / "report.json"),
+            "--smoke",
+        )
+    )
+    fixture = task7_e2e.AudioFixture(
+        FixtureIdentity("fixture", BenchmarkDirection.RU_TO_EN, "a" * 64, 20),
+        bytearray(b"private-fixture-audio"),
+    )
+    monkeypatch.setattr(
+        task7_e2e,
+        "build_local_fixtures",
+        lambda *a, **kw: ({BenchmarkDirection.RU_TO_EN: [fixture]}, ()),
+    )
+    monkeypatch.setattr(
+        task7_e2e,
+        "load_task6_quality_evidence",
+        lambda *a: QualityEvidence("b" * 64, "test", True),
+    )
+    monkeypatch.setattr(task7_e2e, "pulse_graph_summary", lambda: {})
+    runner = TemporarySinkCommands()
+    owner = task7_e2e.TemporaryInputSink(runner=runner)
+    monkeypatch.setattr(task7_e2e, "TemporaryInputSink", lambda: owner)
+    monkeypatch.setattr(
+        task7_e2e, "PulseOnsetMonitor", lambda *a: SimpleNamespace(stop=lambda: None)
+    )
+    monkeypatch.setattr(task7_e2e, "PidTreeResourceSampler", lambda *a: lambda: None)
+    monkeypatch.setattr(
+        task7_e2e,
+        "ContinuousResourceCollector",
+        lambda *a: SimpleNamespace(start=lambda: None, stop=lambda: ()),
+    )
+    monkeypatch.setattr(
+        task7_e2e,
+        "LivePipelineMeasurement",
+        lambda **kw: SimpleNamespace(measure_pair=lambda *a: {}),
+    )
+    monkeypatch.setattr(task7_e2e, "run_smoke_pairs", lambda *a, **kw: ({},))
+    arguments.report_calls = []
+
+    def report(*a, **kw):
+        arguments.report_calls.append((a, kw))
+        return {"success": True}
+
+    monkeypatch.setattr(task7_e2e, "build_smoke_report_payload", report)
+    bridge = SimpleNamespace(
+        pid=123,
+        events=None,
+        wait_ready=lambda: None,
+        stop=lambda: None,
+        kill=lambda: None,
+        diagnostic_tail=lambda: "",
+    )
+    monkeypatch.setattr(task7_e2e, "BridgeProcess", lambda *a: bridge)
+    return arguments, fixture, runner, owner, bridge
+
+
+@pytest.mark.parametrize(
+    "body_failure", ["none", "measure", "bridge_stop", "bridge_kill", "decode"]
+)
+def test_live_e2e_retains_temporary_owner_wipes_before_retry_and_never_reports_success(
+    tmp_path, monkeypatch, body_failure
+):
+    arguments, fixture, runner, owner, bridge = temporary_sink_live_fixture(
+        tmp_path, monkeypatch
+    )
+    runner.unload_errors = 1
+    stop_failure = Task7E2EError("synthetic bridge stop failed")
+    decode_failure = UnicodeDecodeError(
+        "utf-8", b"\xff", 0, 1, "synthetic invalid output"
+    )
+    if body_failure == "decode":
+        runner.unload_errors = 0
+        runner.read_failure = decode_failure
+    kill_failure = Task7E2EError("synthetic bridge kill failed")
+
+    def fail(error):
+        raise error
+
+    if body_failure == "measure":
+        monkeypatch.setattr(
+            task7_e2e,
+            "run_smoke_pairs",
+            lambda *a, **kw: fail(Task7E2EError("synthetic measurement failed")),
+        )
+    if body_failure in {"bridge_stop", "bridge_kill"}:
+        bridge.stop = lambda: fail(stop_failure)
+    if body_failure == "bridge_kill":
+        bridge.kill = lambda: fail(kill_failure)
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        assert sleeps == [1], "cleanup retries must be bounded in this fixture"
+        assert owner.module_id == 73
+        assert fixture.audio == bytearray(len(fixture.audio))
+
+    monkeypatch.setattr(
+        task7_e2e,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: 100.0, monotonic_ns=lambda: 100_000_000_000, sleep=sleep
+        ),
+    )
+    with pytest.raises(Task7E2EError, match="E2E cleanup failed") as failure:
+        run_live_e2e(arguments)
+    if body_failure in {"bridge_stop", "bridge_kill"}:
+        assert failure.value.__cause__ is stop_failure
+    elif body_failure == "decode":
+        assert isinstance(failure.value.__cause__, Task7E2EError)
+        assert (
+            str(failure.value.__cause__) == "temporary sink cleanup output is invalid"
+        )
+        assert failure.value.__cause__.__cause__ is decode_failure
+    else:
+        assert failure.value.__cause__ is runner.unload_failure
+    assert sleeps == [1]
+    assert owner.module_id is None
+    assert runner.modules == []
+    assert len(runner.unloads()) == (1 if body_failure == "decode" else 2)
+    assert fixture.audio == bytearray(len(fixture.audio))
+    assert not arguments.output.exists()
+    assert arguments.report_calls == []
+
+
+@pytest.mark.parametrize("setup_failure", ["none", "quality", "graph", "profile"])
+def test_live_e2e_setup_and_success_zeroize_returned_fixtures(
+    tmp_path, monkeypatch, setup_failure
+):
+    arguments, fixture, runner, owner, _ = temporary_sink_live_fixture(
+        tmp_path, monkeypatch
+    )
+    if setup_failure != "none":
+        function = {
+            "quality": "load_task6_quality_evidence",
+            "graph": "pulse_graph_summary",
+            "profile": "profile_pair_plan",
+        }[setup_failure]
+
+        def fail(*a, **kw):
+            raise Task7E2EError("setup failed")
+
+        monkeypatch.setattr(task7_e2e, function, fail)
+        with pytest.raises(Task7E2EError, match="setup failed"):
+            run_live_e2e(arguments)
+        assert not runner.calls
+        assert arguments.report_calls == []
+    else:
+        assert run_live_e2e(arguments) == {"success": True}
+        assert len(runner.unloads()) == 1
+        assert len(arguments.report_calls) == 1
+    assert owner.module_id is None
+    assert fixture.audio == bytearray(len(fixture.audio))
+    assert not arguments.output.exists()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_local_fixture_builder_uses_sources_and_closes_voices_on_every_exit(
+    tmp_path, monkeypatch, failure
+):
+    manifest = SimpleNamespace(
+        models={
+            model_id: SimpleNamespace(
+                id=model_id,
+                cache_path=tmp_path,
+                files=[SimpleNamespace(path="voice.onnx")],
+            )
+            for model_id in task7_e2e._VOICE_IDS.values()
+        },
+        resolve_runtime_file=lambda *_args: None,
+    )
+    observed = {}
+
+    class Registry:
+        def __init__(self, sources):
+            observed["sources"] = sources
+
+        def close(self):
+            observed["closed"] = True
+
+    class Tts:
+        def __init__(self, registry):
+            pass
+
+        def synthesize_frames(self, *_args, **kwargs):
+            assert observed.get("closed") is not True, "fixture used a closed voice"
+            if failure:
+                raise RuntimeError("synthesis failed")
+            return iter([b"\0\0" * 160])
+
+    monkeypatch.setattr(task7_e2e, "load_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(
+        task7_e2e,
+        "load_quality_corpus",
+        lambda *_args: SimpleNamespace(
+            warmups=[], cases=[SimpleNamespace(ru="fixture", en="fixture")]
+        ),
+    )
+    monkeypatch.setattr(task7_e2e, "PiperVoiceRegistry", Registry)
+    monkeypatch.setattr(task7_e2e, "PiperTts", Tts)
+    if failure:
+        with pytest.raises(RuntimeError, match="synthesis failed"):
+            task7_e2e.build_local_fixtures(tmp_path, tmp_path)
+    else:
+        fixtures, identities = task7_e2e.build_local_fixtures(tmp_path, tmp_path)
+        assert len(fixtures) == len(identities) == 2
+    assert observed.get("closed") is True
+    assert all(
+        isinstance(source, VerifiedModelSource)
+        for source in observed["sources"].values()
+    )
 
 
 def _context(direction: BenchmarkDirection, pair_index: int = 10) -> RunContext:
@@ -239,7 +758,7 @@ def test_bridge_event_stream_timeout_names_direction_and_buffered_events() -> No
 
     with pytest.raises(
         RuntimeError,
-        match=("ru_to_en.*expected=speech_started.*buffered=provider_latency"),
+        match=r"ru_to_en.*expected=speech_started.*buffered=provider_latency",
     ):
         stream.next_for(
             BenchmarkDirection.RU_TO_EN,

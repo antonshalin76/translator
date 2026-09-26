@@ -15,7 +15,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 TASK10_SCRIPT = ROOT / "scripts/translator-task10-real-app-smoke"
 DEFAULT_OUTPUT = ROOT / "output/browser-live-stream/browser-live-stream-smoke.json"
@@ -24,7 +23,7 @@ DEFAULT_YOUTUBE_QUERY = "English technology podcast interview"
 
 
 def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def load_task10_module() -> Any:
@@ -116,9 +115,12 @@ def resolve_youtube_url(
     search_query = query or DEFAULT_YOUTUBE_QUERY
     yt_dlp = shutil.which("yt-dlp")
     if yt_dlp is None:
-        fallback = "https://www.youtube.com/results?search_query=" + search_query.replace(
-            " ",
-            "+",
+        fallback = (
+            "https://www.youtube.com/results?search_query="
+            + search_query.replace(
+                " ",
+                "+",
+            )
         )
         return fallback, {"source": "youtube_search_page", "ok": False}
     result = run_command(
@@ -153,7 +155,9 @@ def resolve_youtube_url(
     }
 
 
-def start_browser(url: str, profile: Path) -> tuple[subprocess.Popen[Any] | None, str | None]:
+def start_browser(
+    url: str, profile: Path
+) -> tuple[subprocess.Popen[Any] | None, str | None]:
     binary = browser_binary()
     if binary is None:
         return None, "browser_binary_unavailable"
@@ -193,14 +197,22 @@ def terminate_owned(process: subprocess.Popen[Any] | None) -> None:
             pass
 
 
-def browser_stream_candidate(stream: dict[str, Any], baseline_ids: set[int]) -> dict[str, Any] | None:
+def browser_stream_candidate(
+    stream: dict[str, Any], baseline_ids: set[int]
+) -> dict[str, Any] | None:
     stream_id = int(stream.get("index", 0) or 0)
     properties = props(stream)
     binary = properties.get("application.process.binary", "").lower()
     application = properties.get("application.name", "")
     if stream_id in baseline_ids:
         return None
-    if binary not in {"google-chrome", "chrome", "chromium", "chromium-browser", "firefox"}:
+    if binary not in {
+        "google-chrome",
+        "chrome",
+        "chromium",
+        "chromium-browser",
+        "firefox",
+    }:
         return None
     sinks = sink_names()
     sink_index = int(stream.get("sink", 0) or 0)
@@ -247,7 +259,9 @@ def maybe_press_play() -> dict[str, Any]:
     if shutil.which("xdotool") is None:
         return {"attempted": False, "safe_error": "xdotool_unavailable"}
     search = run_command(["xdotool", "search", "--name", "YouTube"], timeout=5.0)
-    window_ids = [line.strip() for line in search["stdout"].splitlines() if line.strip().isdigit()]
+    window_ids = [
+        line.strip() for line in search["stdout"].splitlines() if line.strip().isdigit()
+    ]
     if not window_ids:
         return {"attempted": True, "safe_error": "youtube_window_not_found"}
     result = run_command(
@@ -360,7 +374,8 @@ def main() -> int:
                         "selected_stream": selected_stream,
                         "selected_stream_on_remote_in": (
                             selected_stream is not None
-                            and selected_stream.get("sink_name") == "translator_remote_in"
+                            and selected_stream.get("sink_name")
+                            == "translator_remote_in"
                         ),
                     }
                 )
@@ -385,7 +400,9 @@ def main() -> int:
     selected_stream_remote_samples = sum(
         1 for sample in samples if sample.get("selected_stream_on_remote_in")
     )
-    latest_stream_bound = bool(samples and samples[-1].get("selected_stream_on_remote_in"))
+    latest_stream_bound = bool(
+        samples and samples[-1].get("selected_stream_on_remote_in")
+    )
     report = {
         "schema_version": "translator.browser-live-stream-smoke.v1",
         "generated_at": utc_now(),
@@ -414,13 +431,18 @@ def main() -> int:
             "selected_stream_remote_sample_count": selected_stream_remote_samples,
             "latest_selected_stream_on_remote_in": latest_stream_bound,
         },
-        "passed": stream is not None and route_bound and bool(samples) and latest_stream_bound,
+        "passed": stream is not None
+        and route_bound
+        and bool(samples)
+        and latest_stream_bound,
         "blockers": [
             value
             for value in (
                 browser_error,
                 "browser_audio_stream_not_found" if stream is None else None,
-                "manual_route_failed" if stream is not None and not route_bound else None,
+                "manual_route_failed"
+                if stream is not None and not route_bound
+                else None,
                 "no_status_samples" if stream is not None and not samples else None,
                 "selected_stream_not_on_remote_in"
                 if stream is not None and samples and not latest_stream_bound

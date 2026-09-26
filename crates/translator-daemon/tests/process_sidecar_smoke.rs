@@ -25,6 +25,110 @@ use uuid::Uuid;
 
 const WRONG_TOKEN: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
+#[tokio::test]
+async fn accepted_open_timeout_drains_real_python_session_before_server_shutdown() {
+    use std::os::unix::fs::FileTypeExt;
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let root = workspace_root();
+    let directory = tempdir().unwrap();
+    fs::set_permissions(directory.path(), PermissionsExt::from_mode(0o700)).unwrap();
+    let expected_uid = fs::metadata(directory.path()).unwrap().uid();
+    let socket = directory.path().join("provider.sock");
+    let session_id = Uuid::new_v4();
+    let mut child = tokio::process::Command::new(root.join("sidecar/.venv/bin/python"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .args(["-E", "-s", "-m", "tests.fixtures.accepted_open"])
+        .arg(&socket)
+        .arg(session_id.to_string())
+        .current_dir(root.join("sidecar"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let pid = child.id().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let result = tokio::time::timeout(Duration::from_secs(7), async {
+        if lines.next_line().await.map_err(|_| "ready pipe")?.as_deref() != Some("ready") {
+            return Err("fixture not ready");
+        }
+        let metadata = fs::symlink_metadata(&socket).map_err(|_| "socket metadata missing")?;
+        if !metadata.file_type().is_socket() || metadata.uid() != expected_uid || metadata.mode() & 0o777 != 0o600 {
+            return Err("socket security evidence invalid");
+        }
+        let contract = session_contract(session_id, AudioDirection::Microphone);
+        let request = open_request(&contract);
+        let token = "ab".repeat(32);
+        {
+            let opening = ProviderStreamClient::open(&socket, &token, request);
+            tokio::pin!(opening);
+            tokio::select! {
+                _ = &mut opening => return Err("open completed before acceptance gate"),
+                accepted = lines.next_line() => {
+                    if accepted.map_err(|_| "accepted pipe")?.as_deref() != Some("accepted") {
+                        return Err("acceptance evidence missing");
+                    }
+                }
+            }
+            if tokio::time::timeout(Duration::from_millis(20), &mut opening).await.is_ok() {
+                return Err("accepted open was not pending at timeout");
+            }
+        }
+        if lines.next_line().await.map_err(|_| "drained pipe")?.as_deref() != Some("drained") {
+            return Err("pre-shutdown session cleanup missing");
+        }
+        let mut reopened = ProviderStreamClient::open(&socket, &token, open_request(&contract))
+            .await.map_err(|_| "same identity reopen failed")?;
+        if !matches!(reopened.next_event().await, Ok(Some(event))
+            if matches!(event.event, Some(translator_ipc::provider::provider_event::Event::SessionOpened(_)))) {
+            return Err("same identity not opened");
+        }
+        if !matches!(reopened.next_event().await, Ok(Some(event))
+            if matches!(event.event, Some(translator_ipc::provider::provider_event::Event::Health(_)))) {
+            return Err("same identity health missing");
+        }
+        reopened.send(ProviderRequest {
+            request: Some(provider_request::Request::CloseSession(translator_ipc::provider::CloseProviderSession {
+                schema_version: "translator.provider.close_session.v1".into(),
+                session_id: session_id.to_string(),
+                reason: translator_ipc::provider::CloseRequestReason::DaemonShutdown.into(),
+            })),
+        }).await.map_err(|_| "same identity close failed")?;
+        if !matches!(reopened.next_event().await, Ok(Some(event))
+            if matches!(event.event, Some(translator_ipc::provider::provider_event::Event::SessionClosed(_)))) {
+            return Err("same identity close acknowledgement missing");
+        }
+        drop(reopened);
+        Ok(())
+    }).await;
+    let _ = input.write_all(b"stop\n").await;
+    drop(input);
+    let exited = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    let forced = if exited.is_err() {
+        Some(
+            tokio::time::timeout(Duration::from_secs(2), async {
+                child.start_kill()?;
+                child.wait().await
+            })
+            .await,
+        )
+    } else {
+        None
+    };
+    let remaining_output = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await;
+    assert!(forced.is_none() || matches!(forced, Some(Ok(Ok(_)))));
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(matches!(exited, Ok(Ok(status)) if status.success()));
+    assert!(matches!(remaining_output, Ok(Ok(None))));
+    assert_eq!(result.unwrap(), Ok(()));
+    assert!(!socket.exists());
+}
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -158,6 +262,78 @@ async fn assert_matching_probe(socket_path: &Path, token: &str, generation_id: U
         "translator.provider.probe_response.v1"
     );
     assert_eq!(response.generation_id, generation_id.to_string());
+}
+
+#[tokio::test]
+async fn dead_private_sidecar_generation_restarts_without_live_session() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let root = workspace_root();
+        let runtime_dir = tempdir().unwrap();
+        fs::set_permissions(runtime_dir.path(), PermissionsExt::from_mode(0o700)).unwrap();
+        let expected_uid = fs::metadata(runtime_dir.path()).unwrap().uid();
+        let socket_path = runtime_dir.path().join("sidecar.sock");
+        let runtime = process_runtime(
+            &root,
+            root.join("sidecar/.venv/bin/python"),
+            socket_path.clone(),
+            expected_uid,
+        );
+        let mut supervisor = SidecarSupervisor::new(runtime);
+        supervisor.start().await.unwrap();
+        let previous = supervisor.launch().unwrap().clone();
+        let previous_pid = supervisor.runtime().child_pid().unwrap();
+        supervisor.register_session(Uuid::new_v4()).unwrap();
+        assert!(
+            Command::new("kill")
+                .args(["-KILL", &previous_pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while supervisor.is_ready() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(supervisor.active_sessions().is_empty());
+        assert!(!Path::new(&format!("/proc/{previous_pid}")).exists());
+        supervisor.restart_generation().await.unwrap();
+        assert!(!supervisor.is_ready());
+        let receipt = supervisor
+            .generation_retirement(previous.generation_id)
+            .unwrap();
+        assert!(receipt.old_generation_reaped);
+        supervisor
+            .acknowledge_generation_retirement(previous.generation_id)
+            .unwrap();
+        let replacement = supervisor.launch().unwrap().clone();
+        let replacement_pid = supervisor.runtime().child_pid().unwrap();
+        assert!(supervisor.is_ready());
+        assert_ne!(previous.generation_id, replacement.generation_id);
+        assert!(previous.token != replacement.token);
+        assert!(!supervisor.status_handle().close_wait_armed());
+        assert_matching_probe(&socket_path, &replacement.token, replacement.generation_id).await;
+        let mut client = connect_provider(&socket_path).await.unwrap();
+        let old_request = authenticated_request(
+            ProviderProbeRequest {
+                schema_version: "translator.provider.probe_request.v1".into(),
+            },
+            &previous.token,
+        )
+        .unwrap();
+        assert_eq!(
+            client.probe(old_request).await.unwrap_err().code(),
+            Code::Unauthenticated
+        );
+        drop(client);
+        supervisor.shutdown().await.unwrap();
+        assert!(!Path::new(&format!("/proc/{replacement_pid}")).exists());
+        assert!(!socket_path.exists());
+    })
+    .await
+    .expect("private sidecar restart exceeded ten seconds");
 }
 
 #[tokio::test]

@@ -5,7 +5,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use fs4::{FileExt, TryLockError};
-use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
+use rustix::fs::{
+    AtFlags, CWD, Mode, OFlags, ResolveFlags, mkdirat, openat, openat2, renameat, unlinkat,
+};
 use rustix::io::Errno;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -167,11 +169,12 @@ pub(crate) fn open_directory<Fd: std::os::fd::AsFd>(
     parent: Fd,
     path: impl rustix::path::Arg,
 ) -> Result<File, SecureRuntimeError> {
-    let fd = openat(
+    let fd = openat2(
         parent,
         path,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
+        ResolveFlags::NO_SYMLINKS,
     )
     .map_err(|_| SecureRuntimeError::new(SecureRuntimeErrorCode::UnsafePath))?;
     let file = File::from(fd);

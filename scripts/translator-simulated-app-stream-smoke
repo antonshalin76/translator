@@ -17,7 +17,6 @@ import wave
 from pathlib import Path
 from typing import Any, NamedTuple
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPORT = ROOT / "docs/benchmarks/task10-simulated-app-streams-report.json"
 TASK10_SCRIPT = ROOT / "scripts/translator-task10-real-app-smoke"
@@ -70,11 +69,13 @@ CASES = (
 
 
 def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def load_task10_module() -> Any:
-    loader = importlib.machinery.SourceFileLoader("task10_real_app_smoke", str(TASK10_SCRIPT))
+    loader = importlib.machinery.SourceFileLoader(
+        "task10_real_app_smoke", str(TASK10_SCRIPT)
+    )
     spec = importlib.util.spec_from_loader(loader.name, loader)
     if spec is None:
         raise RuntimeError("task10_module_spec_unavailable")
@@ -83,7 +84,9 @@ def load_task10_module() -> Any:
     return module
 
 
-def command_json(args: list[str], timeout: float = 10.0) -> tuple[list[dict[str, Any]], str | None]:
+def command_json(
+    args: list[str], timeout: float = 10.0
+) -> tuple[list[dict[str, Any]], str | None]:
     try:
         completed = subprocess.run(
             args,
@@ -269,7 +272,9 @@ def browser_binary() -> str | None:
     return None
 
 
-def start_browser_stream(case: Case, temp_dir: Path) -> tuple[subprocess.Popen[Any] | None, str | None]:
+def start_browser_stream(
+    case: Case, temp_dir: Path
+) -> tuple[subprocess.Popen[Any] | None, str | None]:
     binary = browser_binary()
     if binary is None:
         return None, "browser_binary_unavailable"
@@ -322,7 +327,11 @@ def direct_manual_route(task10: Any, stream_id: int) -> dict[str, Any]:
     )
     snapshot = response.get("json") if isinstance(response.get("json"), dict) else {}
     routes = snapshot.get("routes") if isinstance(snapshot.get("routes"), dict) else {}
-    active = routes.get("active_route") if isinstance(routes.get("active_route"), dict) else {}
+    active = (
+        routes.get("active_route")
+        if isinstance(routes.get("active_route"), dict)
+        else {}
+    )
     route_bound = (
         response["ok"]
         and active.get("stream_id") == stream_id
@@ -330,7 +339,11 @@ def direct_manual_route(task10: Any, stream_id: int) -> dict[str, Any]:
     )
     return {
         "attempted": True,
-        "status": "passed" if route_bound else "blocked" if response["ok"] else "failed",
+        "status": "passed"
+        if route_bound
+        else "blocked"
+        if response["ok"]
+        else "failed",
         "stream_id": stream_id,
         "http_status": response.get("status"),
         "route_resolution": routes.get("resolution"),
@@ -354,7 +367,13 @@ def run_case(
     if case.stream_kind == "browser_web_audio":
         process, start_error = start_browser_stream(case, temp_dir)
         marker = "Task10 Meet Synthetic Audio"
-        binaries = {"google-chrome", "chrome", "chromium", "chromium-browser", "firefox"}
+        binaries = {
+            "google-chrome",
+            "chrome",
+            "chromium",
+            "chromium-browser",
+            "firefox",
+        }
     else:
         process = start_pulse_property_stream(case, wav_path, playback_sink)
         marker = case.media_name
@@ -364,12 +383,18 @@ def run_case(
         if start_error
         else find_stream_by_marker(marker, baseline_ids, binaries, settle_seconds)
     )
-    route_attempt = {"attempted": False, "status": "blocked", "safe_error": "stream_not_found"}
+    route_attempt = {
+        "attempted": False,
+        "status": "blocked",
+        "safe_error": "stream_not_found",
+    }
     after_route_stream = None
     task10_candidate = None
     if stream is not None:
         stream_id = int(stream["stream_id"])
-        confirmed_meet_stream_id = stream_id if case.app_key == "google_meet_browser" else None
+        confirmed_meet_stream_id = (
+            stream_id if case.app_key == "google_meet_browser" else None
+        )
         if case.app_key in {"telegram_desktop", "google_meet_browser"}:
             before = task10.collect_audio_state(confirmed_meet_stream_id)
             task10_candidate = next(
@@ -410,7 +435,8 @@ def run_case(
                 after_route_stream = {
                     "stream_id": stream_id,
                     "current_sink_name": names.get(sink_index, ""),
-                    "on_translator_remote_in": names.get(sink_index, "") == "translator_remote_in",
+                    "on_translator_remote_in": names.get(sink_index, "")
+                    == "translator_remote_in",
                 }
     return (
         {
@@ -421,7 +447,9 @@ def run_case(
             "counts_toward_task10_mvp_a": case.counts_toward_task10_mvp_a,
             "synthetic_input": {
                 "audio_material": "silence",
-                "duration_seconds": None if case.stream_kind == "browser_web_audio" else 15,
+                "duration_seconds": None
+                if case.stream_kind == "browser_web_audio"
+                else 15,
             },
             "process_probe": {
                 "start_error": start_error,
@@ -473,12 +501,16 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run synthetic app stream route diagnostics.")
+    parser = argparse.ArgumentParser(
+        description="Run synthetic app stream route diagnostics."
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--start-service", action="store_true")
     parser.add_argument("--stop-after", action="store_true")
     parser.add_argument("--settle-seconds", type=float, default=8.0)
-    parser.add_argument("--case", choices=[case.app_key for case in CASES], action="append")
+    parser.add_argument(
+        "--case", choices=[case.app_key for case in CASES], action="append"
+    )
     parser.add_argument("--require-task10-synthetic-routes", action="store_true")
     return parser.parse_args()
 
@@ -492,7 +524,9 @@ def main() -> int:
     report: dict[str, Any]
     stop_report = None
     owned_processes: list[subprocess.Popen[Any]] = []
-    with tempfile.TemporaryDirectory(prefix="translator-simulated-app-streams.") as temp:
+    with tempfile.TemporaryDirectory(
+        prefix="translator-simulated-app-streams."
+    ) as temp:
         try:
             temp_dir = Path(temp)
             wav_path = temp_dir / "silence.wav"
@@ -513,7 +547,9 @@ def main() -> int:
                 if process is not None:
                     owned_processes.append(process)
         finally:
-            stop_report = task10.stop_service_if_needed(started_by_script, args.stop_after)
+            stop_report = task10.stop_service_if_needed(
+                started_by_script, args.stop_after
+            )
             for process in reversed(owned_processes):
                 terminate_owned(process)
         task10_route_cases = [
@@ -548,7 +584,8 @@ def main() -> int:
         }
         return_code = (
             2
-            if args.require_task10_synthetic_routes and not task10_synthetic_routes_passed
+            if args.require_task10_synthetic_routes
+            and not task10_synthetic_routes_passed
             else 0
         )
     if stop_report is not None:

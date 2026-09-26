@@ -54,6 +54,12 @@ pub struct VoiceProfile {
     pub provider_voice_id: Option<String>,
 }
 
+impl VoiceProfile {
+    pub fn has_overrides(&self) -> bool {
+        self.model_path.is_some() || self.provider_voice_id.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SampleFormat {

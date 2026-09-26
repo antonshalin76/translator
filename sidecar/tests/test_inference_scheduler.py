@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from threading import Event as ThreadEvent
-from threading import Lock
 import traceback
+from threading import Event as ThreadEvent
+from threading import Lock, current_thread
 from uuid import uuid4
 
 import pytest
@@ -32,9 +33,7 @@ def test_scheduler_allows_one_active_and_two_queued_per_direction() -> None:
         release = asyncio.Event()
         order: list[int] = []
 
-        async def work(
-            _context: SchedulerContext, value: int
-        ) -> int:
+        async def work(_context: SchedulerContext, value: int) -> int:
             order.append(value)
             if value == 0:
                 started.set()
@@ -43,23 +42,14 @@ def test_scheduler_allows_one_active_and_two_queued_per_direction() -> None:
 
         try:
             identities = [
-                scheduler.open_utterance(session_id, uuid4())
-                for _ in range(4)
+                scheduler.open_utterance(session_id, uuid4()) for _ in range(4)
             ]
-            first = scheduler.submit(
-                identities[0], lambda context: work(context, 0)
-            )
+            first = scheduler.submit(identities[0], lambda context: work(context, 0))
             await asyncio.wait_for(started.wait(), timeout=1)
-            second = scheduler.submit(
-                identities[1], lambda context: work(context, 1)
-            )
-            third = scheduler.submit(
-                identities[2], lambda context: work(context, 2)
-            )
+            second = scheduler.submit(identities[1], lambda context: work(context, 1))
+            third = scheduler.submit(identities[2], lambda context: work(context, 2))
             with pytest.raises(SchedulerOverflow, match="queue"):
-                scheduler.submit(
-                    identities[3], lambda context: work(context, 3)
-                )
+                scheduler.submit(identities[3], lambda context: work(context, 3))
             release.set()
             assert await asyncio.gather(first, second, third) == [0, 1, 2]
             assert order == [0, 1, 2]
@@ -77,9 +67,7 @@ def test_scheduler_capacity_is_independent_per_direction() -> None:
             AudioDirection.MICROPHONE: asyncio.Event(),
             AudioDirection.SPEAKER: asyncio.Event(),
         }
-        sessions = {
-            direction: uuid4() for direction in AudioDirection
-        }
+        sessions = {direction: uuid4() for direction in AudioDirection}
         for direction, session_id in sessions.items():
             scheduler.open_session(session_id, direction)
 
@@ -90,16 +78,12 @@ def test_scheduler_capacity_is_independent_per_direction() -> None:
 
         try:
             futures = []
-            for direction, session_id in sessions.items():
+            for _direction, session_id in sessions.items():
                 for _ in range(3):
-                    identity = scheduler.open_utterance(
-                        session_id, uuid4()
-                    )
+                    identity = scheduler.open_utterance(session_id, uuid4())
                     futures.append(scheduler.submit(identity, work))
             await asyncio.wait_for(
-                asyncio.gather(
-                    *(event.wait() for event in started.values())
-                ),
+                asyncio.gather(*(event.wait() for event in started.values())),
                 timeout=1,
             )
             release.set()
@@ -115,9 +99,7 @@ def test_scheduler_capacity_is_independent_per_direction() -> None:
 def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
     async def scenario() -> None:
         scheduler = InferenceScheduler()
-        sessions = {
-            direction: uuid4() for direction in AudioDirection
-        }
+        sessions = {direction: uuid4() for direction in AudioDirection}
         for direction, session_id in sessions.items():
             scheduler.open_session(session_id, direction)
         active = 0
@@ -150,9 +132,7 @@ def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
         async def work(context: SchedulerContext) -> str:
             if context.identity.direction is AudioDirection.SPEAKER:
                 speaker_gpu_attempt.set()
-            return await context.run_gpu(
-                lambda: native(context.identity.direction)
-            )
+            return await context.run_gpu(lambda: native(context.identity.direction))
 
         try:
             microphone = [
@@ -166,9 +146,7 @@ def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
             ]
             assert await asyncio.to_thread(first_entered.wait, 1)
             speaker = scheduler.submit(
-                scheduler.open_utterance(
-                    sessions[AudioDirection.SPEAKER], uuid4()
-                ),
+                scheduler.open_utterance(sessions[AudioDirection.SPEAKER], uuid4()),
                 work,
             )
             await asyncio.wait_for(speaker_gpu_attempt.wait(), timeout=1)
@@ -199,9 +177,7 @@ def test_gpu_work_is_single_worker_and_round_robin_across_directions() -> None:
 def test_tts_workers_are_limited_to_two() -> None:
     async def scenario() -> None:
         scheduler = InferenceScheduler()
-        sessions = {
-            direction: uuid4() for direction in AudioDirection
-        }
+        sessions = {direction: uuid4() for direction in AudioDirection}
         for direction, session_id in sessions.items():
             scheduler.open_session(session_id, direction)
         active = 0
@@ -258,16 +234,12 @@ def test_tts_workers_are_limited_to_two() -> None:
                     microphone_work,
                 ),
                 scheduler.submit(
-                    scheduler.open_utterance(
-                        sessions[AudioDirection.SPEAKER], uuid4()
-                    ),
+                    scheduler.open_utterance(sessions[AudioDirection.SPEAKER], uuid4()),
                     speaker_work,
                 ),
             ]
             await asyncio.wait_for(all_attempted.wait(), timeout=1)
-            assert await asyncio.to_thread(
-                both_entered.wait, 1
-            )
+            assert await asyncio.to_thread(both_entered.wait, 1)
             assert active == 2
             release.set()
             assert await asyncio.gather(*futures) == [2, 1]
@@ -304,9 +276,7 @@ def test_tts_bridge_applies_1200ms_backpressure() -> None:
         async def work(context: SchedulerContext) -> int:
             nonlocal observed_high_water
             consumed = 0
-            stream = context.stream_tts(
-                frames, frame_duration_ms=100
-            )
+            stream = context.stream_tts(frames, frame_duration_ms=100)
             try:
                 async for _frame in stream:
                     consumed += 1
@@ -380,9 +350,7 @@ def test_generation_change_purges_tts_bridge_and_stops_producer(
                 producer_finalized.set()
 
         async def work(context: SchedulerContext) -> None:
-            stream = context.stream_tts(
-                frames, frame_duration_ms=100
-            )
+            stream = context.stream_tts(frames, frame_duration_ms=100)
             try:
                 delivered.append(await anext(stream))
                 first_delivered.set()
@@ -429,12 +397,8 @@ def test_close_session_does_not_invalidate_survivor_session() -> None:
         scheduler = InferenceScheduler()
         target_session = uuid4()
         survivor_session = uuid4()
-        scheduler.open_session(
-            target_session, AudioDirection.MICROPHONE
-        )
-        scheduler.open_session(
-            survivor_session, AudioDirection.SPEAKER
-        )
+        scheduler.open_session(target_session, AudioDirection.MICROPHONE)
+        scheduler.open_session(survivor_session, AudioDirection.SPEAKER)
         target_entered = ThreadEvent()
         release_target = ThreadEvent()
         survivor_attempt = asyncio.Event()
@@ -574,9 +538,7 @@ def test_cancel_purges_queued_job_without_running_it() -> None:
             )
             await asyncio.wait_for(first_started.wait(), timeout=1)
             queued_id = uuid4()
-            queued_identity = scheduler.open_utterance(
-                session_id, queued_id
-            )
+            queued_identity = scheduler.open_utterance(session_id, queued_id)
             queued = scheduler.submit(
                 queued_identity,
                 queued_work,
@@ -624,17 +586,13 @@ def test_scheduler_sanitizes_tts_producer_failure_and_logs(
             yield b""  # pragma: no cover
 
         async def work(context: SchedulerContext) -> None:
-            async for _frame in context.stream_tts(
-                frames, frame_duration_ms=20
-            ):
+            async for _frame in context.stream_tts(frames, frame_duration_ms=20):
                 pass
 
         try:
             identity = scheduler.open_utterance(session_id, uuid4())
             future = scheduler.submit(identity, work)
-            with pytest.raises(
-                SchedulerUnavailable, match="unavailable"
-            ) as raised:
+            with pytest.raises(SchedulerUnavailable, match="unavailable") as raised:
                 await future
             rendered = "".join(
                 traceback.format_exception(
@@ -673,9 +631,7 @@ def test_scheduler_sanitizes_native_failure_and_logs(
         try:
             identity = scheduler.open_utterance(session_id, uuid4())
             future = scheduler.submit(identity, work)
-            with pytest.raises(
-                SchedulerUnavailable, match="unavailable"
-            ) as raised:
+            with pytest.raises(SchedulerUnavailable, match="unavailable") as raised:
                 await future
             rendered = "".join(
                 traceback.format_exception(
@@ -780,9 +736,7 @@ def test_closed_sessions_use_global_generation_without_tombstones() -> None:
     async def scenario() -> None:
         scheduler = InferenceScheduler()
         reused_id = uuid4()
-        first_generation = scheduler.open_session(
-            reused_id, AudioDirection.MICROPHONE
-        )
+        first_generation = scheduler.open_session(reused_id, AudioDirection.MICROPHONE)
         scheduler.close_session(reused_id)
 
         for _ in range(100):
@@ -790,9 +744,7 @@ def test_closed_sessions_use_global_generation_without_tombstones() -> None:
             scheduler.open_session(session_id, AudioDirection.SPEAKER)
             scheduler.close_session(session_id)
 
-        second_generation = scheduler.open_session(
-            reused_id, AudioDirection.MICROPHONE
-        )
+        second_generation = scheduler.open_session(reused_id, AudioDirection.MICROPHONE)
         assert second_generation > first_generation
         assert scheduler.tracked_session_count == 1
         await scheduler.shutdown()
@@ -844,9 +796,7 @@ def test_concurrent_cancelled_shutdown_waits_for_shared_cleanup() -> None:
         finally:
             release_work.set()
             tasks = [
-                task
-                for task in (first, second)
-                if task is not None and not task.done()
+                task for task in (first, second) if task is not None and not task.done()
             ]
             if tasks:
                 await asyncio.wait_for(
@@ -855,3 +805,321 @@ def test_concurrent_cancelled_shutdown_waits_for_shared_cleanup() -> None:
                 )
 
     run(scenario())
+
+
+class ShutdownFixture:
+    """Observe original executor effects; independently release and join fixtures."""
+
+    def __init__(self):
+        self.scheduler = InferenceScheduler()
+        self.executors = (
+            self.scheduler._gpu_executor,
+            self.scheduler._tts_executor,
+        )
+        self.original_shutdowns = tuple(item.shutdown for item in self.executors)
+        self.calls = []
+        self.failures = set()
+        self.threads = ()
+        self.release = ThreadEvent()
+        self.entered = ThreadEvent()
+        self.native_calls = 0
+        self.tasks = []
+        self.future = None
+        self.session_id = uuid4()
+        self.scheduler.open_session(self.session_id, AudioDirection.MICROPHONE)
+        self.identity = self.scheduler.open_utterance(self.session_id, uuid4())
+        for index, executor in enumerate(self.executors):
+
+            def shutdown(*, wait, cancel_futures, index=index):
+                self.calls.append((index, wait, cancel_futures))
+                if index in self.failures:
+                    raise RuntimeError("private-executor-shutdown-marker")
+                self.original_shutdowns[index](wait=wait, cancel_futures=cancel_futures)
+
+            executor.shutdown = shutdown
+
+    async def start_threads(self):
+        loop = asyncio.get_running_loop()
+        self.threads = tuple(
+            await asyncio.gather(
+                *(loop.run_in_executor(item, current_thread) for item in self.executors)
+            )
+        )
+        assert len(set(self.threads)) == 2
+        assert all(thread.is_alive() for thread in self.threads)
+
+    async def start_held_job(self):
+        def native():
+            self.native_calls += 1
+            self.entered.set()
+            if not self.release.wait(timeout=5):
+                raise AssertionError("fixture native release timed out")
+
+        async def work(context):
+            await context.run_gpu(native)
+
+        self.future = self.scheduler.submit(self.identity, work)
+        async with asyncio.timeout(1):
+            while not self.entered.is_set():
+                await asyncio.sleep(0)
+        assert len(self.scheduler._running_tasks) == 1
+        return next(iter(self.scheduler._running_tasks))
+
+    def closed_admission(self):
+        assert self.scheduler._closed
+        with pytest.raises(SchedulerUnavailable):
+            self.scheduler.open_session(uuid4(), AudioDirection.SPEAKER)
+        with pytest.raises(SchedulerStale):
+            self.scheduler.submit(self.identity, None)
+
+    async def cleanup(self):
+        self.release.set()
+        try:
+            owned = set(self.tasks) | set(self.scheduler._running_tasks)
+            owned.update(
+                task
+                for task in (self.scheduler._dispatcher, self.scheduler._shutdown_task)
+                if task is not None
+            )
+            if self.future is not None:
+                owned.add(self.future)
+            if owned:
+                async with asyncio.timeout(2):
+                    await asyncio.gather(*owned, return_exceptions=True)
+        finally:
+            for original in self.original_shutdowns:
+                original(wait=True, cancel_futures=True)
+            assert all(not thread.is_alive() for thread in self.threads)
+
+
+def assert_safe_shutdown_error(error):
+    assert isinstance(error, SchedulerUnavailable)
+    assert str(error) == "scheduler cleanup is unavailable"
+    rendered = "".join(traceback.format_exception(error))
+    assert "private-executor-shutdown-marker" not in rendered
+    assert "private-dispatcher-marker" not in rendered
+
+
+@pytest.mark.parametrize("failed", [{0}, {1}, {0, 1}], ids=["gpu", "tts", "both"])
+def test_shutdown_retries_failed_executors_with_one_shared_attempt(failed):
+    async def scenario():
+        fixture = ShutdownFixture()
+        scheduler = fixture.scheduler
+        retry_entered, retry_release = asyncio.Event(), asyncio.Event()
+        original_impl = scheduler._shutdown_impl
+        attempts = 0
+
+        async def observed_impl():
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                retry_entered.set()
+                await retry_release.wait()
+            await original_impl()
+
+        scheduler._shutdown_impl = observed_impl
+        try:
+            await fixture.start_threads()
+            fixture.failures = set(failed)
+            first_error = (
+                await asyncio.gather(scheduler.shutdown(), return_exceptions=True)
+            )[0]
+            first_task = scheduler._shutdown_task
+            fixture.closed_admission()
+            assert fixture.calls == [(0, True, True), (1, True, True)]
+            assert [thread.is_alive() for thread in fixture.threads] == [
+                index in failed for index in range(2)
+            ]
+            assert_safe_shutdown_error(first_error)
+            fixture.failures.clear()
+            callers_entered = 0
+            both_entered = asyncio.Event()
+
+            async def retry():
+                nonlocal callers_entered
+                callers_entered += 1
+                if callers_entered == 2:
+                    both_entered.set()
+                await scheduler.shutdown()
+
+            fixture.tasks = [asyncio.create_task(retry()) for _ in range(2)]
+            async with asyncio.timeout(1):
+                await retry_entered.wait()
+                await both_entered.wait()
+            shared = scheduler._shutdown_task
+            assert shared is not first_task and not shared.done()
+            assert attempts == 2 and all(not task.done() for task in fixture.tasks)
+            assert fixture.calls == [(0, True, True), (1, True, True)]
+            retry_release.set()
+            await asyncio.gather(*fixture.tasks)
+            assert scheduler._shutdown_task is shared
+            assert fixture.calls == [(0, True, True), (1, True, True)] * 2
+            assert all(not thread.is_alive() for thread in fixture.threads)
+            assert fixture.native_calls == 0
+            await scheduler.shutdown()
+            assert attempts == 2 and scheduler._shutdown_task is shared
+            assert len(fixture.calls) == 4
+        finally:
+            retry_release.set()
+            await fixture.cleanup()
+
+    run(asyncio.wait_for(scenario(), timeout=5))
+
+
+@pytest.mark.parametrize("cancel_dispatcher", [False, True], ids=["failure", "cancel"])
+def test_terminal_dispatcher_is_consumed_after_native_job_before_executor_retirement(
+    cancel_dispatcher,
+):
+    async def scenario():
+        fixture = ShutdownFixture()
+        scheduler = fixture.scheduler
+        original_dispatch = scheduler._dispatch_available
+        dispatch_calls = 0
+
+        def fail_after_admission():
+            nonlocal dispatch_calls
+            dispatch_calls += 1
+            original_dispatch()
+            if cancel_dispatcher:
+                raise asyncio.CancelledError("private-dispatcher-marker")
+            raise RuntimeError("private-dispatcher-marker")
+
+        scheduler._dispatch_available = fail_after_admission
+        try:
+            await fixture.start_threads()
+            job = await fixture.start_held_job()
+            dispatcher = scheduler._dispatcher
+            assert dispatcher.done()
+            shutdown = asyncio.create_task(scheduler.shutdown())
+            fixture.tasks.append(shutdown)
+            async with asyncio.timeout(1):
+                while scheduler._sessions:
+                    await asyncio.sleep(0)
+            fixture.closed_admission()
+            assert not shutdown.done() and not job.done() and not fixture.future.done()
+            assert scheduler._dispatcher is dispatcher
+            assert not fixture.calls and all(
+                thread.is_alive() for thread in fixture.threads
+            )
+            fixture.release.set()
+            result = (await asyncio.gather(shutdown, return_exceptions=True))[0]
+            assert job.done()
+            assert isinstance(fixture.future.exception(), SchedulerStale)
+            assert fixture.calls == [(0, True, True), (1, True, True)]
+            assert all(not thread.is_alive() for thread in fixture.threads)
+            assert scheduler._dispatcher is None
+            assert_safe_shutdown_error(result)
+            await scheduler.shutdown()
+            assert dispatch_calls == 1 and fixture.native_calls == 1
+            assert not scheduler._running_tasks and scheduler._dispatcher is None
+            assert len(fixture.calls) == 4
+            await scheduler.shutdown()
+            assert len(fixture.calls) == 4
+        finally:
+            await fixture.cleanup()
+
+    run(asyncio.wait_for(scenario(), timeout=5))
+
+
+def test_repeated_shutdown_caller_cancellation_joins_real_native_threads():
+    async def scenario():
+        fixture = ShutdownFixture()
+        scheduler = fixture.scheduler
+        try:
+            await fixture.start_threads()
+            job = await fixture.start_held_job()
+            fixture.tasks = [
+                asyncio.create_task(scheduler.shutdown()) for _ in range(2)
+            ]
+            async with asyncio.timeout(1):
+                while scheduler._sessions:
+                    await asyncio.sleep(0)
+            shared = scheduler._shutdown_task
+            for _ in range(3):
+                fixture.tasks[0].cancel()
+                await asyncio.sleep(0)
+                assert scheduler._shutdown_task is shared and not shared.done()
+                assert all(not task.done() for task in fixture.tasks)
+                assert not job.done() and not fixture.future.done()
+                assert not fixture.calls
+                assert all(thread.is_alive() for thread in fixture.threads)
+            fixture.closed_admission()
+            fixture.release.set()
+            results = await asyncio.gather(*fixture.tasks, return_exceptions=True)
+            assert isinstance(results[0], asyncio.CancelledError) and results[1] is None
+            assert job.done() and isinstance(fixture.future.exception(), SchedulerStale)
+            assert scheduler._shutdown_task is shared and shared.done()
+            assert fixture.calls == [(0, True, True), (1, True, True)]
+            assert all(not thread.is_alive() for thread in fixture.threads)
+            assert fixture.native_calls == 1
+            await scheduler.shutdown()
+            assert len(fixture.calls) == 2
+        finally:
+            await fixture.cleanup()
+
+    run(asyncio.wait_for(scenario(), timeout=5))
+
+
+@pytest.mark.parametrize("allocation", ["raise", "cancel"])
+def test_shutdown_allocation_failure_or_prestart_cancel_retains_explicit_retry(
+    monkeypatch,
+    allocation,
+):
+    async def scenario():
+        fixture = ShutdownFixture()
+        scheduler = fixture.scheduler
+        real_create = asyncio.create_task
+        coroutines, allocated = [], []
+
+        def create(coroutine, **kwargs):
+            if coroutine.cr_code is scheduler._shutdown_impl.__func__.__code__:
+                coroutines.append(coroutine)
+                if allocation == "raise":
+                    raise RuntimeError("fixture task allocation failure")
+                task = real_create(coroutine, **kwargs)
+                allocated.append(task)
+                task.cancel()
+                return task
+            return real_create(coroutine, **kwargs)
+
+        try:
+            await fixture.start_threads()
+            monkeypatch.setattr(asyncio, "create_task", create)
+            try:
+                await scheduler.shutdown()
+            except BaseException as error:
+                outcome = error
+            else:
+                outcome = None
+            monkeypatch.setattr(asyncio, "create_task", real_create)
+            fixture.closed_admission()
+            assert len(coroutines) == 1
+            assert inspect.getcoroutinestate(coroutines[0]) == inspect.CORO_CLOSED
+            assert not fixture.calls and all(
+                thread.is_alive() for thread in fixture.threads
+            )
+            if allocation == "raise":
+                assert (
+                    isinstance(outcome, RuntimeError)
+                    and scheduler._shutdown_task is None
+                )
+                assert not allocated
+            else:
+                assert isinstance(outcome, asyncio.CancelledError)
+                assert (
+                    scheduler._shutdown_task is allocated[0]
+                    and allocated[0].cancelled()
+                )
+            await scheduler.shutdown()
+            assert fixture.calls == [(0, True, True), (1, True, True)]
+            assert all(not thread.is_alive() for thread in fixture.threads)
+            await scheduler.shutdown()
+            assert len(fixture.calls) == 2
+        finally:
+            monkeypatch.setattr(asyncio, "create_task", real_create)
+            for coroutine in coroutines:
+                if inspect.getcoroutinestate(coroutine) == inspect.CORO_CREATED:
+                    coroutine.close()
+            await fixture.cleanup()
+
+    run(asyncio.wait_for(scenario(), timeout=5))

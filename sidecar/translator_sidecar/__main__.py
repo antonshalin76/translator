@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from uuid import UUID
 
+from .cleanup import finish_cleanup
 from .grpc_server import ProviderGrpcServer, SidecarServerConfig
 from .local.runtime import (
     build_local_provider,
@@ -50,23 +51,32 @@ async def _serve() -> None:
         loop.add_signal_handler(caught_signal, stopped.set)
 
     server = _build_server(config)
-    await server.start()
     try:
-        loaded_provider = await asyncio.to_thread(
-            build_local_provider,
-            now_ns=config.now_ns,
+        await server.start()
+        loading = asyncio.create_task(
+            asyncio.to_thread(
+                build_local_provider,
+                now_ns=config.now_ns,
+            )
         )
         try:
-            await server.replace_local_provider(loaded_provider)
+            loaded_provider = await finish_cleanup(loading)
+        except asyncio.CancelledError:
+            if not loading.cancelled() and loading.exception() is None:
+                await finish_cleanup(loading.result().shutdown())
+            raise
+        try:
+            server.install_local_provider(loaded_provider)
         except BaseException:
             try:
-                await loaded_provider.shutdown()
+                await finish_cleanup(loaded_provider.shutdown())
             except Exception:
                 pass
             raise
+        await server.providers.collect()
         await stopped.wait()
     finally:
-        await server.stop()
+        await finish_cleanup(server.stop())
 
 
 def main() -> None:

@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import hashlib
 import json
 import math
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol
 from uuid import UUID, uuid4
 
-from jiwer import wer
 import regex
+from jiwer import wer
 from sacrebleu.metrics import CHRF
 
 from translator_sidecar.provider_contract import Language, TranslationMode
-
 
 _SCHEMA_VERSION = "translator.quality-corpus.v4"
 _REQUIRED_SCENARIOS = frozenset({"short", "long", "duplex_overlap"})
@@ -181,7 +180,7 @@ class AsrBenchmarkReport:
     audio_throughput_x: float
     cpu_percent_peak: float
     rss_bytes_peak: int
-    gpu_percent_peak: float
+    gpu_percent_peak: float | None
     vram_mib_peak: int
 
 
@@ -202,7 +201,7 @@ class DuplexBenchmarkReport:
     en_to_ru_latency_ms: tuple[float, ...]
     cpu_percent_peak: float
     rss_bytes_peak: int
-    gpu_percent_peak: float
+    gpu_percent_peak: float | None
     vram_mib_peak: int
 
     @property
@@ -231,7 +230,7 @@ class AsrAdapter(Protocol):
     ) -> str: ...
 
 
-ResourceSample = tuple[float, int, float, int]
+ResourceSample = tuple[float, int, float | None, int]
 
 
 class _PeriodicResourceSampler:
@@ -556,9 +555,7 @@ def critical_review_content_sha256(
                     "reference": (
                         case.en if target_language is Language.EN else case.ru
                     ),
-                    "source": (
-                        case.ru if source_language is Language.RU else case.en
-                    ),
+                    "source": (case.ru if source_language is Language.RU else case.en),
                 }
             )
     canonical = json.dumps(
@@ -709,10 +706,11 @@ def _resource_peaks(
 ) -> ResourceSample:
     if not samples:
         raise CorpusError("resource samples are empty")
+    gpu_samples = [sample[2] for sample in samples if sample[2] is not None]
     return (
         max(sample[0] for sample in samples),
         max(sample[1] for sample in samples),
-        max(sample[2] for sample in samples),
+        max(gpu_samples) if gpu_samples else None,
         max(sample[3] for sample in samples),
     )
 
@@ -919,9 +917,7 @@ def _name_is_preserved(
         for token in output_tokens
     ):
         return False
-    conjunctions = (
-        {"and", "or"} if target_language is Language.EN else {"и", "или"}
-    )
+    conjunctions = {"and", "or"} if target_language is Language.EN else {"и", "или"}
     return all(
         (start == 0 or folded_tokens[start - 1] not in conjunctions)
         and (end == len(folded_tokens) or folded_tokens[end] not in conjunctions)

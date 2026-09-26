@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import builtins
+import json
 import os
-from pathlib import Path
+import subprocess
+import sys
 import traceback
+from pathlib import Path
 
 import pytest
+from test_model_lease import model_source
 
 from translator_sidecar.local.mt import (
     LocalTranslationError,
@@ -42,8 +46,18 @@ class LongSentencePiece(FakeSentencePiece):
         return [f"piece-{index}" for index in range(self._piece_count)]
 
 
+class SentenceEchoPiece:
+    def encode(self, text: str, *, out_type: type[str]) -> list[str]:
+        assert out_type is str
+        return [text]
+
+    def decode(self, tokens: list[str]) -> str:
+        return " ".join(tokens)
+
+
 class FakeResult:
-    hypotheses = [["eng_Latn", "translated", "output"]]
+    def __init__(self) -> None:
+        self.hypotheses = [["eng_Latn", "translated", "output"]]
 
 
 class FakeCTranslate2:
@@ -54,7 +68,60 @@ class FakeCTranslate2:
         self, source: list[list[str]], **kwargs: object
     ) -> list[FakeResult]:
         self.calls.append((source, kwargs))
-        return [FakeResult()]
+        return [FakeResult() for _ in source]
+
+
+_NATIVE_NLLB_SKIP = "missing_external_prerequisite:gpu_model_cache"
+
+
+def _native_nllb_available(device: str) -> bool:
+    return bool(
+        os.environ.get("TRANSLATOR_NATIVE_NLLB_MANIFEST")
+        and device in os.environ.get("TRANSLATOR_NATIVE_NLLB_DEVICES", "cpu").split(",")
+    )
+
+
+def _assert_native_nllb_boundary(device: str) -> None:
+    manifest = os.environ["TRANSLATOR_NATIVE_NLLB_MANIFEST"]
+    fixture = Path(__file__).parent / "fixtures/native_nllb_load.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(fixture),
+            "--manifest",
+            manifest,
+            "--device",
+            device,
+            "--model-id",
+            "nllb-200-distilled-600m-ct2-int8",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    translations = json.loads(result.stdout)
+    assert translations["ru_en"]
+    assert translations["en_ru"]
+    assert any(
+        phrase in translations["ru_en_multisentence"].lower()
+        for phrase in ("don't joke", "do not joke")
+    )
+    assert "holocaust" in translations["ru_en_multisentence"].lower()
+    assert "не шут" in translations["en_ru_multisentence"].lower()
+    assert "холокост" in translations["en_ru_multisentence"].lower()
+
+
+@pytest.mark.skipif(not _native_nllb_available("cpu"), reason=_NATIVE_NLLB_SKIP)
+def test_nllb_verified_boundary_loads_native_model_in_subprocess_cpu() -> None:
+    _assert_native_nllb_boundary("cpu")
+
+
+@pytest.mark.skipif(not _native_nllb_available("cuda"), reason=_NATIVE_NLLB_SKIP)
+def test_nllb_verified_boundary_loads_native_model_in_subprocess_cuda() -> None:
+    _assert_native_nllb_boundary("cuda")
 
 
 @pytest.mark.parametrize(
@@ -227,6 +294,163 @@ def test_nllb_uses_exact_language_and_eos_contract(
     assert tokenizer.decoded == ["translated", "output"]
 
 
+def test_nllb_translates_every_sentence_in_order(tmp_path: Path) -> None:
+    runtime = FakeCTranslate2()
+    translator = NllbTranslator(
+        tmp_path,
+        translator=runtime,
+        tokenizer=SentenceEchoPiece(),
+    )
+
+    result = translator.translate(
+        "Первое. Второе.",
+        source_language=Language.RU,
+        target_language=Language.EN,
+        mode=TranslationMode.QUALITY_FIRST,
+    )
+
+    assert result == "translated output translated output"
+    assert [call[0] for call in runtime.calls] == [
+        [
+            ["rus_Cyrl", "Первое.", "</s>"],
+            ["rus_Cyrl", "Второе.", "</s>"],
+        ]
+    ]
+
+
+def test_nllb_rejects_empty_translation_of_later_sentence(tmp_path: Path) -> None:
+    class EmptySecondRuntime(FakeCTranslate2):
+        def translate_batch(
+            self, source: list[list[str]], **kwargs: object
+        ) -> list[FakeResult]:
+            results = super().translate_batch(source, **kwargs)
+            if len(results) == 2:
+                results[1].hypotheses = [["eng_Latn", "</s>"]]
+            return results
+
+    translator = NllbTranslator(
+        tmp_path,
+        translator=EmptySecondRuntime(),
+        tokenizer=SentenceEchoPiece(),
+    )
+
+    with pytest.raises(LocalTranslationError, match="empty output"):
+        translator.translate(
+            "Первое. Второе.",
+            source_language=Language.RU,
+            target_language=Language.EN,
+            mode=TranslationMode.QUALITY_FIRST,
+        )
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "expected_sentences"),
+    [
+        (
+            "Г-н Иванов пришёл в 18:05. Он не опоздал.",
+            Language.RU,
+            ["Г-н Иванов пришёл в 18:05.", "Он не опоздал."],
+        ),
+        (
+            "Dr. House arrived at 5:30 p.m. He did not leave.",
+            Language.EN,
+            ["Dr. House arrived at 5:30 p.m.", "He did not leave."],
+        ),
+    ],
+)
+def test_nllb_keeps_abbreviations_and_times_in_their_sentences(
+    tmp_path: Path,
+    text: str,
+    language: Language,
+    expected_sentences: list[str],
+) -> None:
+    runtime = FakeCTranslate2()
+    translator = NllbTranslator(
+        tmp_path,
+        translator=runtime,
+        tokenizer=SentenceEchoPiece(),
+    )
+
+    translator.translate(
+        text,
+        source_language=language,
+        target_language=Language.EN if language is Language.RU else Language.RU,
+        mode=TranslationMode.QUALITY_FIRST,
+    )
+
+    assert [source[1] for source in runtime.calls[0][0]] == expected_sentences
+    assert len(runtime.calls) == 1
+
+
+def test_nllb_rejects_excessive_sentence_work_before_native_call(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeCTranslate2()
+    translator = NllbTranslator(
+        tmp_path,
+        translator=runtime,
+        tokenizer=SentenceEchoPiece(),
+    )
+
+    with pytest.raises(LocalTranslationError, match="work limit"):
+        translator.translate(
+            "Да. " * 17,
+            source_language=Language.RU,
+            target_language=Language.EN,
+            mode=TranslationMode.QUALITY_FIRST,
+        )
+
+    assert runtime.calls == []
+
+
+def test_nllb_rejects_excessive_token_work_before_native_call(
+    tmp_path: Path,
+) -> None:
+    class OverlongSentencePiece(SentenceEchoPiece):
+        def encode(self, text: str, *, out_type: type[str]) -> list[str]:
+            assert out_type is str
+            return ["piece"] * 513
+
+    runtime = FakeCTranslate2()
+    translator = NllbTranslator(
+        tmp_path,
+        translator=runtime,
+        tokenizer=OverlongSentencePiece(),
+    )
+
+    with pytest.raises(LocalTranslationError, match="work limit"):
+        translator.translate(
+            "Long source.",
+            source_language=Language.EN,
+            target_language=Language.RU,
+            mode=TranslationMode.QUALITY_FIRST,
+        )
+
+    assert runtime.calls == []
+
+
+def test_nllb_rejects_missing_batch_result(tmp_path: Path) -> None:
+    class IncompleteRuntime(FakeCTranslate2):
+        def translate_batch(
+            self, source: list[list[str]], **kwargs: object
+        ) -> list[FakeResult]:
+            return super().translate_batch(source, **kwargs)[:1]
+
+    translator = NllbTranslator(
+        tmp_path,
+        translator=IncompleteRuntime(),
+        tokenizer=SentenceEchoPiece(),
+    )
+
+    with pytest.raises(LocalTranslationError, match="incomplete output"):
+        translator.translate(
+            "Первое. Второе.",
+            source_language=Language.RU,
+            target_language=Language.EN,
+            mode=TranslationMode.QUALITY_FIRST,
+        )
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_max_decoding_length"),
     [
@@ -351,14 +575,16 @@ def test_nllb_factory_receives_offline_local_runtime_configuration(
         calls.append((path, kwargs))
         return FakeCTranslate2()
 
-    def tokenizer_factory(path: str) -> FakeSentencePiece:
-        calls.append((path, {}))
+    def tokenizer_factory(payload: bytes) -> FakeSentencePiece:
+        calls.append((payload, {}))
         return FakeSentencePiece()
 
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     translator = NllbTranslator.load(
-        tmp_path,
+        model_source(
+            tmp_path, {"model.bin": b"model", "sentencepiece.bpe.model": b"sp"}
+        ),
         device=device,
         translator_factory=translator_factory,
         tokenizer_factory=tokenizer_factory,
@@ -367,17 +593,24 @@ def test_nllb_factory_receives_offline_local_runtime_configuration(
     assert isinstance(translator, NllbTranslator)
     assert calls == [
         (
-            str(tmp_path),
+            str(translator.model_path),
             {
                 "device": device,
                 "compute_type": compute_type,
                 "inter_threads": 1,
+                "files": calls[0][1]["files"],
             },
         ),
-        (str(tmp_path / "sentencepiece.bpe.model"), {}),
+        (b"sp", {}),
     ]
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+    assert str(translator.model_path).startswith("/proc/self/fd/")
+    assert calls[0][1]["files"] == {
+        "model.bin": b"model",
+        "sentencepiece.bpe.model": b"sp",
+    }
+    translator.close()
 
 
 @pytest.mark.parametrize("missing_module", ["ctranslate2", "sentencepiece"])
@@ -411,7 +644,9 @@ def test_nllb_load_sanitizes_missing_dependency_traceback(
 
     with pytest.raises(LocalTranslationError, match="could not be loaded") as raised:
         NllbTranslator.load(
-            tmp_path,
+            model_source(
+                tmp_path, {"model.bin": b"model", "sentencepiece.bpe.model": b"sp"}
+            ),
             device="cpu",
             translator_factory=translator_factory,
             tokenizer_factory=tokenizer_factory,

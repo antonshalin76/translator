@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-import math
+from itertools import pairwise
 
 from translator_sidecar.provider_contract import TranslationMode
-
 
 _SCHEMA_VERSION = "translator.task7-benchmark.v1"
 _REQUIRED_WARMUPS = 10
@@ -52,16 +52,11 @@ class ProfileSpec:
                 self.duration_seconds,
                 "duration_seconds",
             )
-        if (
-            self.kind is BenchmarkProfile.SOAK_30_MINUTES
-            and (
-                self.duration_seconds is None
-                or self.duration_seconds < _THIRTY_MINUTES_SECONDS
-            )
+        if self.kind is BenchmarkProfile.SOAK_30_MINUTES and (
+            self.duration_seconds is None
+            or self.duration_seconds < _THIRTY_MINUTES_SECONDS
         ):
-            raise ValueError(
-                "soak_30_minutes duration_seconds must be at least 1800"
-            )
+            raise ValueError("soak_30_minutes duration_seconds must be at least 1800")
 
 
 @dataclass(frozen=True)
@@ -107,13 +102,9 @@ class PolicyThresholds:
 
     def first_audible_ms(self, mode: TranslationMode) -> float:
         return {
-            TranslationMode.QUALITY_FIRST: (
-                self.quality_first_first_audible_ms
-            ),
+            TranslationMode.QUALITY_FIRST: (self.quality_first_first_audible_ms),
             TranslationMode.BALANCED: self.balanced_first_audible_ms,
-            TranslationMode.STREAMING_FIRST: (
-                self.streaming_first_first_audible_ms
-            ),
+            TranslationMode.STREAMING_FIRST: (self.streaming_first_first_audible_ms),
         }[mode]
 
 
@@ -131,9 +122,7 @@ class BenchmarkConfig:
         if self.excluded_warmups != _REQUIRED_WARMUPS:
             raise ValueError("excluded_warmups must equal 10")
         if self.measured_count_per_direction < _MINIMUM_MEASURED_PER_DIRECTION:
-            raise ValueError(
-                "measured_count_per_direction must be at least 100"
-            )
+            raise ValueError("measured_count_per_direction must be at least 100")
         _require_finite_nonnegative(self.target_p95_ms, "target_p95_ms")
         _require_finite_nonnegative(
             self.usable_limit_p95_ms,
@@ -185,18 +174,15 @@ class BoundaryObservation:
             self.last_audio_ns,
             self.first_audible_ns,
         )
-        if not self.timed_out and not self.dropped and any(
-            value is None for value in timestamps
+        if (
+            not self.timed_out
+            and not self.dropped
+            and any(value is None for value in timestamps)
         ):
-            raise ValueError(
-                "successful observations require all output timestamps"
-            )
+            raise ValueError("successful observations require all output timestamps")
         if any(value is not None and value < 0 for value in timestamps):
             raise ValueError("output timestamps must be nonnegative")
-        if (
-            self.first_audio_ns is not None
-            and self.first_audio_ns < self.capture_ns
-        ):
+        if self.first_audio_ns is not None and self.first_audio_ns < self.capture_ns:
             raise ValueError("first_audio_ns must not precede capture_ns")
         if (
             self.first_audio_ns is not None
@@ -208,9 +194,7 @@ class BoundaryObservation:
             self.first_audible_ns is not None
             and self.first_audible_ns < self.speech_onset_ns
         ):
-            raise ValueError(
-                "first_audible_ns must not precede speech_onset_ns"
-            )
+            raise ValueError("first_audible_ns must not precede speech_onset_ns")
 
 
 @dataclass(frozen=True)
@@ -265,9 +249,7 @@ class MeasuredSample:
         return {
             "pair_index": self.pair_index,
             "mode": self.mode.value,
-            "speech_onset_to_first_audible_ms": (
-                self.speech_onset_to_first_audible_ms
-            ),
+            "speech_onset_to_first_audible_ms": (self.speech_onset_to_first_audible_ms),
             "capture_to_first_audio_ms": self.capture_to_first_audio_ms,
             "capture_to_last_audio_ms": self.capture_to_last_audio_ms,
             "queue_lag_ms": self.queue_lag_ms,
@@ -317,19 +299,13 @@ class DirectionReport:
         return {
             "direction": self.direction.value,
             "samples": [sample.to_dict() for sample in self.samples],
-            "transitions": [
-                transition.to_dict() for transition in self.transitions
-            ],
+            "transitions": [transition.to_dict() for transition in self.transitions],
             "final_mode": self.final_mode.value,
             "speech_onset_to_first_audible_ms": (
                 self.speech_onset_to_first_audible_ms.to_dict()
             ),
-            "capture_to_first_audio_ms": (
-                self.capture_to_first_audio_ms.to_dict()
-            ),
-            "capture_to_last_audio_ms": (
-                self.capture_to_last_audio_ms.to_dict()
-            ),
+            "capture_to_first_audio_ms": (self.capture_to_first_audio_ms.to_dict()),
+            "capture_to_last_audio_ms": (self.capture_to_last_audio_ms.to_dict()),
             "queue_lag_ms": self.queue_lag_ms.to_dict(),
             "provider_latency_ms": self.provider_latency_ms.to_dict(),
             "timeout_count": self.timeout_count,
@@ -382,9 +358,7 @@ class BenchmarkReport:
             },
             "simultaneous": self.simultaneous,
             "excluded_warmups": self.excluded_warmups,
-            "measured_count_per_direction": (
-                self.measured_count_per_direction
-            ),
+            "measured_count_per_direction": (self.measured_count_per_direction),
             "directions": {
                 BenchmarkDirection.RU_TO_EN.value: self.ru_to_en.to_dict(),
                 BenchmarkDirection.EN_TO_RU.value: self.en_to_ru.to_dict(),
@@ -412,10 +386,7 @@ class _ModePolicy:
             self._consecutive_breaches = 0
             return
         self._consecutive_breaches += 1
-        if (
-            self._consecutive_breaches
-            < self._thresholds.consecutive_breaches
-        ):
+        if self._consecutive_breaches < self._thresholds.consecutive_breaches:
             return
         next_mode = {
             TranslationMode.QUALITY_FIRST: TranslationMode.BALANCED,
@@ -448,9 +419,8 @@ class _ModePolicy:
             observation.speech_onset_ns,
             observation.first_audible_ns,
         )
-        if (
-            audible_ms is not None
-            and audible_ms > self._thresholds.first_audible_ms(self.mode)
+        if audible_ms is not None and audible_ms > self._thresholds.first_audible_ms(
+            self.mode
         ):
             return _TransitionReason.FIRST_AUDIBLE
         if observation.queue_lag_ms > self._thresholds.queue_lag_ms:
@@ -480,16 +450,13 @@ def run_task7_benchmark(
     sample_resources: Callable[[], ResourceSample],
 ) -> BenchmarkReport:
     policies = {
-        direction: _ModePolicy(config.policy)
-        for direction in BenchmarkDirection
+        direction: _ModePolicy(config.policy) for direction in BenchmarkDirection
     }
     measured: dict[BenchmarkDirection, list[MeasuredSample]] = {
         direction: [] for direction in BenchmarkDirection
     }
     resources: list[ResourceSample] = []
-    total_pairs = (
-        config.excluded_warmups + config.measured_count_per_direction
-    )
+    total_pairs = config.excluded_warmups + config.measured_count_per_direction
 
     with ThreadPoolExecutor(
         max_workers=2,
@@ -515,17 +482,14 @@ def run_task7_benchmark(
                 for direction, context in contexts.items()
             }
             observations = {
-                direction: future.result()
-                for direction, future in futures.items()
+                direction: future.result() for direction, future in futures.items()
             }
             resources.append(sample_resources())
             for direction, observation in observations.items():
                 context = contexts[direction]
                 policies[direction].observe(pair_index, observation)
                 if not is_warmup:
-                    measured[direction].append(
-                        _measured_sample(context, observation)
-                    )
+                    measured[direction].append(_measured_sample(context, observation))
 
     resource_report = _resource_report(
         tuple(resources),
@@ -536,9 +500,7 @@ def run_task7_benchmark(
         and resource_report.observed_duration_seconds
         < (config.profile.duration_seconds or _THIRTY_MINUTES_SECONDS)
     ):
-        raise ValueError(
-            "soak_30_minutes observed duration is shorter than declared"
-        )
+        raise ValueError("soak_30_minutes observed duration is shorter than declared")
 
     direction_reports = {
         direction: _direction_report(
@@ -548,9 +510,7 @@ def run_task7_benchmark(
         )
         for direction in BenchmarkDirection
     }
-    quality_passed = all(
-        report.quality_passed for report in direction_reports.values()
-    )
+    quality_passed = all(report.quality_passed for report in direction_reports.values())
     classification = _classify(
         config,
         direction_reports,
@@ -633,9 +593,7 @@ def _direction_report(
         capture_to_last_audio_ms=_percentiles(
             sample.capture_to_last_audio_ms for sample in samples
         ),
-        queue_lag_ms=_percentiles(
-            sample.queue_lag_ms for sample in samples
-        ),
+        queue_lag_ms=_percentiles(sample.queue_lag_ms for sample in samples),
         provider_latency_ms=_percentiles(
             sample.provider_latency_ms for sample in samples
         ),
@@ -666,7 +624,7 @@ def _resource_report(
         raise ValueError("resource samples must not be empty")
     if any(
         current.monotonic_ns < previous.monotonic_ns
-        for previous, current in zip(samples, samples[1:], strict=False)
+        for previous, current in pairwise(samples)
     ):
         raise ValueError("resource sample clock must not move backwards")
     first_ns = min(sample.monotonic_ns for sample in samples)

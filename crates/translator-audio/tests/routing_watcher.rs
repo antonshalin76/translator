@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 use translator_audio::{
@@ -8,6 +10,142 @@ use translator_audio::{
     RoutingErrorCode, RoutingProfile, RoutingWatcher, VirtualPeerCapability,
 };
 use uuid::Uuid;
+
+type RecordedRouteCalls = Arc<Mutex<Vec<(Vec<String>, Instant)>>>;
+
+#[derive(Clone)]
+struct DeadlineRouteRunner {
+    calls: RecordedRouteCalls,
+    delay_at: Option<usize>,
+    failure: Option<CommandRunError>,
+}
+
+impl CommandRunner for DeadlineRouteRunner {
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        deadline: Instant,
+    ) -> Result<CommandResult, CommandRunError> {
+        assert_eq!(program, "pactl");
+        let count = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((args.to_vec(), deadline));
+            calls.len()
+        };
+        assert_eq!(&args[..2], &["--format=json", "list"]);
+        assert_eq!(args.len(), 3);
+        assert!(matches!(
+            args[2].as_str(),
+            "sink-inputs" | "source-outputs" | "sources" | "sinks"
+        ));
+        if self.delay_at == Some(count) {
+            std::thread::sleep(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(5),
+            );
+        }
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
+        Ok(CommandResult::success(b"[]".to_vec()))
+    }
+}
+
+#[test]
+fn readonly_route_inspection_uses_one_deadline_and_preserves_loaded_ownership() {
+    let temp = tempdir().unwrap();
+    let journal = temp.path().join("routes.json");
+    let bytes = br#"{"schema_version":1,"active_route":{"stream_id":11,"application":"firefox","stable_app_key":"firefox:firefox","original_sink_id":55,"original_sink_name":"alsa_output.first","target_sink_name":"translator_remote_in","route_method":"pulse_move"}}"#;
+    std::fs::write(&journal, bytes).unwrap();
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let runner = DeadlineRouteRunner {
+        calls: Arc::default(),
+        delay_at: None,
+        failure: None,
+    };
+    let watcher = PulseRoutingWatcher::new_with_route_journal(
+        runner.clone(),
+        RoutingProfile::Production,
+        journal.clone(),
+    );
+    let before = watcher
+        .active_route()
+        .cloned()
+        .expect("fixture route must load");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let result = watcher.inspect_until(deadline).unwrap();
+    assert_eq!(result.active_route.as_ref(), Some(&before));
+    assert_eq!(watcher.active_route(), Some(&before));
+    assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&journal).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    let calls = runner.calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    assert!(calls.iter().all(|(_, observed)| *observed == deadline));
+}
+
+#[test]
+fn readonly_route_inspection_stops_after_each_expired_phase() {
+    for phase in 1..=4 {
+        let temp = tempdir().unwrap();
+        let parent = temp.path().join("absent");
+        let runner = DeadlineRouteRunner {
+            calls: Arc::default(),
+            delay_at: Some(phase),
+            failure: None,
+        };
+        let watcher = PulseRoutingWatcher::new_with_route_journal(
+            runner.clone(),
+            RoutingProfile::Production,
+            parent.join("routes.json"),
+        );
+        let deadline = Instant::now() + Duration::from_millis(30);
+        let error = watcher.inspect_until(deadline).unwrap_err();
+        assert_eq!(error.code(), RoutingErrorCode::DeadlineExpired);
+        assert!(!parent.exists());
+        assert!(watcher.active_route().is_none());
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), phase);
+        assert!(calls.iter().all(|(_, observed)| *observed == deadline));
+    }
+}
+
+#[test]
+fn readonly_route_inspection_distinguishes_outer_expiry_and_local_timeout() {
+    for (failure, expected) in [
+        (
+            CommandRunError::DeadlineExpired,
+            RoutingErrorCode::DeadlineExpired,
+        ),
+        (CommandRunError::TimedOut, RoutingErrorCode::DiscoveryFailed),
+    ] {
+        let runner = DeadlineRouteRunner {
+            calls: Arc::default(),
+            delay_at: None,
+            failure: Some(failure),
+        };
+        let watcher = PulseRoutingWatcher::new(runner.clone(), RoutingProfile::Production);
+        let error = watcher
+            .inspect_until(Instant::now() + Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(error.code(), expected);
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+    let runner = DeadlineRouteRunner {
+        calls: Arc::default(),
+        delay_at: None,
+        failure: None,
+    };
+    let watcher = PulseRoutingWatcher::new(runner.clone(), RoutingProfile::Production);
+    assert_eq!(
+        watcher.inspect_until(Instant::now()).unwrap_err().code(),
+        RoutingErrorCode::DeadlineExpired
+    );
+    assert!(runner.calls.lock().unwrap().is_empty());
+}
 
 #[derive(Clone)]
 struct FakeRunner {
@@ -33,7 +171,12 @@ impl FakeRunner {
 }
 
 impl CommandRunner for FakeRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<CommandResult, CommandRunError> {
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        _deadline: std::time::Instant,
+    ) -> Result<CommandResult, CommandRunError> {
         let expected = self
             .expected
             .lock()

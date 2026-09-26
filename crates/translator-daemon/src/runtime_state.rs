@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
-use translator_audio::{AudioGraphState, DeviceState, RouteCandidate, RoutingState};
+use translator_audio::{AudioGraphState, RouteCandidate, RoutingState};
 use translator_core::{
     AudioDirection, Language, LatencyPolicyState, ProviderId, TranslationMode, VoiceEngine,
     VoiceGender, VoiceProfile,
@@ -11,8 +11,8 @@ use translator_core::{
 
 use crate::{
     DebugCaptureSession, DebugCaptureStopReason, DebugCaptureStore, DebugTextBuffer,
-    DebugTextEvent, DebugTextStatus, DuplexLatencyPolicy, LatencySample, LatencyTransition,
-    RoundTripPreconditions, RoundTripStatus,
+    DebugTextEvent, DebugTextStatus, DeviceState, DuplexLatencyPolicy, LatencySample,
+    LatencyTransition, RoundTripPreconditions, RoundTripStatus,
 };
 
 const DEFAULT_EVENT_CAPACITY: usize = 64;
@@ -20,6 +20,8 @@ const DEFAULT_EVENT_CAPACITY: usize = 64;
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeSnapshot {
     pub translation_running: bool,
+    pub runtime_status: RuntimeStatus,
+    pub audio_mix_knowledge: AudioMixKnowledge,
     pub debug_text_enabled: bool,
     pub debug_capture_enabled: bool,
     pub directions: Vec<DirectionState>,
@@ -40,6 +42,8 @@ impl Default for RuntimeSnapshot {
     fn default() -> Self {
         Self {
             translation_running: false,
+            runtime_status: RuntimeStatus::Stopped,
+            audio_mix_knowledge: AudioMixKnowledge::Unapplied,
             debug_text_enabled: false,
             debug_capture_enabled: false,
             directions: vec![
@@ -59,6 +63,23 @@ impl Default for RuntimeSnapshot {
             self_test: RoundTripSelfTestState::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStatus {
+    Stopped,
+    Running,
+    Failed,
+    CleanupPending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioMixKnowledge {
+    Unapplied,
+    Known,
+    AudioMixStateUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -86,7 +107,25 @@ pub struct DirectionState {
     pub source_language: Language,
     pub target_language: Language,
     pub enabled: bool,
+    pub runtime_status: DirectionRuntimeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_failure: Option<DirectionRuntimeFailure>,
     pub voice_profile: VoiceProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectionRuntimeStatus {
+    Stopped,
+    Running,
+    Recovering,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectionRuntimeFailure {
+    RestartExhausted,
 }
 
 impl DirectionState {
@@ -100,6 +139,8 @@ impl DirectionState {
             source_language,
             target_language,
             enabled: true,
+            runtime_status: DirectionRuntimeStatus::Stopped,
+            runtime_failure: None,
             voice_profile: VoiceProfile {
                 language: target_language,
                 gender: VoiceGender::Male,
@@ -115,6 +156,7 @@ impl DirectionState {
 pub enum RuntimeMutationError {
     InvalidLanguagePair,
     VoiceLanguageMismatch,
+    VoiceProfileOverrideUnsupported,
     CloudProviderOptInRequired,
     DebugCaptureUnavailable,
     DebugCaptureStopped(DebugCaptureStopReason),
@@ -346,7 +388,10 @@ impl RuntimeStore {
         self.publish_snapshot_changed();
     }
 
-    pub fn set_direction(&self, patch: DirectionPatch) -> Result<(), RuntimeMutationError> {
+    pub(crate) fn direction_candidate(
+        &self,
+        patch: DirectionPatch,
+    ) -> Result<RuntimeSnapshot, RuntimeMutationError> {
         let language_pair = match (patch.source_language, patch.target_language) {
             (Some(source_language), Some(target_language))
                 if source_language != target_language =>
@@ -356,7 +401,7 @@ impl RuntimeStore {
             (None, None) => None,
             _ => return Err(RuntimeMutationError::InvalidLanguagePair),
         };
-        let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
+        let mut snapshot = self.snapshot();
         let direction = direction_mut(&mut snapshot, patch.direction_id);
         if let Some((source_language, target_language)) = language_pair {
             direction.source_language = source_language;
@@ -370,26 +415,21 @@ impl RuntimeStore {
         if let Some(enabled) = patch.enabled {
             direction.enabled = enabled;
         }
-        drop(snapshot);
-        self.publish_snapshot_changed();
-        Ok(())
+        Ok(snapshot)
     }
 
-    pub fn set_provider(&self, patch: ProviderPatch) -> Result<(), RuntimeMutationError> {
+    pub(crate) fn provider_candidate(
+        &self,
+        patch: ProviderPatch,
+    ) -> Result<RuntimeSnapshot, RuntimeMutationError> {
         if patch.provider_id == ProviderId::Openai && patch.cloud_opt_in != Some(true) {
             return Err(RuntimeMutationError::CloudProviderOptInRequired);
         }
-        let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
+        let mut snapshot = self.snapshot();
         snapshot.provider_id = patch.provider_id;
         snapshot.audio_leaves_machine = patch.provider_id == ProviderId::Openai;
         snapshot.self_test.status.debug_text = None;
-        drop(snapshot);
-        self.debug_text
-            .lock()
-            .expect("debug text mutex poisoned")
-            .clear_for_provider_switch();
-        self.publish_snapshot_changed();
-        Ok(())
+        Ok(snapshot)
     }
 
     pub fn set_latency_policy(&self, patch: LatencyPolicyPatch) {
@@ -403,22 +443,26 @@ impl RuntimeStore {
         }
     }
 
-    pub fn set_voice_profile(&self, patch: VoiceProfilePatch) -> Result<(), RuntimeMutationError> {
-        let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
+    pub(crate) fn voice_candidate(
+        &self,
+        patch: VoiceProfilePatch,
+    ) -> Result<RuntimeSnapshot, RuntimeMutationError> {
+        let mut snapshot = self.snapshot();
         let direction = direction_mut(&mut snapshot, patch.direction_id);
         if patch.voice_profile.language != direction.target_language {
             return Err(RuntimeMutationError::VoiceLanguageMismatch);
         }
+        if patch.voice_profile.has_overrides() {
+            return Err(RuntimeMutationError::VoiceProfileOverrideUnsupported);
+        }
         direction.voice_profile = patch.voice_profile;
-        drop(snapshot);
-        self.publish_snapshot_changed();
-        Ok(())
+        Ok(snapshot)
     }
 
-    pub fn set_audio_mix(
+    pub(crate) fn audio_mix_candidate(
         &self,
         patch: AudioMixPatch,
-    ) -> Result<AudioMixState, RuntimeMutationError> {
+    ) -> Result<RuntimeSnapshot, RuntimeMutationError> {
         if [
             patch.microphone_original_percent,
             patch.microphone_translation_percent,
@@ -432,7 +476,7 @@ impl RuntimeStore {
             return Err(RuntimeMutationError::InvalidAudioMixVolume);
         }
 
-        let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
+        let mut snapshot = self.snapshot();
         if let Some(value) = patch.microphone_original_percent {
             snapshot.audio_mix.microphone_original_percent = value;
         }
@@ -445,10 +489,7 @@ impl RuntimeStore {
         if let Some(value) = patch.speaker_translation_percent {
             snapshot.audio_mix.speaker_translation_percent = value;
         }
-        let state = snapshot.audio_mix;
-        drop(snapshot);
-        self.publish_snapshot_changed();
-        Ok(state)
+        Ok(snapshot)
     }
 
     pub fn audio_graph(&self) -> Option<AudioGraphState> {
@@ -478,19 +519,55 @@ impl RuntimeStore {
         self.events.subscribe()
     }
 
-    pub fn set_translation_running(&self, running: bool) {
+    pub(crate) fn commit_control(&self, candidate: RuntimeSnapshot) {
+        self.commit_control_projection(candidate, false);
+    }
+
+    pub(crate) fn commit_admitted_control(&self, candidate: RuntimeSnapshot) {
+        self.commit_control_projection(candidate, true);
+    }
+
+    fn commit_control_projection(&self, candidate: RuntimeSnapshot, admitted_facts: bool) {
         let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
-        snapshot.translation_running = running;
-        if !running {
-            snapshot.self_test.status.debug_text = None;
-            self.debug_text
-                .lock()
-                .expect("debug text mutex poisoned")
-                .clear_for_session_stop();
+        let provider_changed = snapshot.provider_id != candidate.provider_id;
+        let stopped = snapshot.translation_running && !candidate.translation_running;
+        snapshot.translation_running = candidate.translation_running;
+        snapshot.runtime_status = candidate.runtime_status;
+        snapshot.audio_mix_knowledge = candidate.audio_mix_knowledge;
+        snapshot.directions = candidate.directions;
+        snapshot.audio_mix = candidate.audio_mix;
+        snapshot.provider_id = candidate.provider_id;
+        snapshot.audio_leaves_machine = candidate.audio_leaves_machine;
+        if admitted_facts {
+            snapshot.devices = candidate.devices;
+            snapshot.audio_graph = candidate.audio_graph;
+            snapshot.routes = candidate.routes;
         }
+        let clear_debug = if stopped {
+            snapshot.self_test.status.debug_text = None;
+            Some(false)
+        } else if provider_changed {
+            snapshot.self_test.status.debug_text = None;
+            Some(true)
+        } else {
+            None
+        };
         drop(snapshot);
+        if let Some(provider_switch) = clear_debug {
+            let mut debug = self.debug_text.lock().expect("debug text mutex poisoned");
+            if provider_switch {
+                debug.clear_for_provider_switch();
+            } else {
+                debug.clear_for_session_stop();
+            }
+        }
         self.publish_snapshot_changed();
-        tracing::info!(event = "translation_state_changed", running);
+        tracing::info!(
+            event = "translation_state_changed",
+            running = candidate.translation_running,
+            status = ?candidate.runtime_status,
+            audio_mix_knowledge = ?candidate.audio_mix_knowledge,
+        );
     }
 
     pub fn set_debug_text_enabled(&self, enabled: bool) {
@@ -737,13 +814,175 @@ mod tests {
 
     use tokio::sync::broadcast::error::TryRecvError;
     use translator_audio::{
-        AcousticSafety, AecCapability, AudioGraphState, DeviceHealth, DeviceSelectionState,
-        DeviceState, GraphHealth, OutputMode, RouteResolution, RoutingState,
+        AecCapability, AudioGraphState, DeviceHealth, DeviceSelectionState, GraphHealth,
+        OutputMode, RouteResolution, RoutingState,
     };
 
-    use crate::{DebugCaptureLimits, DebugCaptureStore, RuntimeMutationError};
+    use crate::{
+        AcousticSafety, DebugCaptureLimits, DebugCaptureStore, DeviceState, RuntimeMutationError,
+    };
 
     use super::{RuntimeEvent, RuntimeStore};
+
+    #[test]
+    fn voice_override_candidates_reject_all_present_values_without_snapshot_or_events() {
+        let mut failures = Vec::new();
+        for provider in [super::ProviderId::Local, super::ProviderId::Openai] {
+            for value in ["unapproved-voice", "", " \t"] {
+                for (model, voice) in [(true, false), (false, true), (true, true)] {
+                    let store = RuntimeStore::default();
+                    let mut seeded = store.snapshot();
+                    seeded.provider_id = provider;
+                    seeded.audio_leaves_machine = provider == super::ProviderId::Openai;
+                    seeded.directions[1].enabled = false;
+                    store.commit_control(seeded);
+                    let before = serde_json::to_value(store.snapshot()).unwrap();
+                    let mut events = store.subscribe().unwrap();
+                    let mut profile = store.snapshot().directions[1].voice_profile.clone();
+                    profile.model_path = model.then(|| value.to_owned());
+                    profile.provider_voice_id = voice.then(|| value.to_owned());
+                    let result = store.voice_candidate(super::VoiceProfilePatch {
+                        direction_id: super::AudioDirection::Speaker,
+                        voice_profile: profile,
+                    });
+                    if result.is_ok() {
+                        failures.push((provider, model, voice, value.len()));
+                    }
+                    assert_eq!(serde_json::to_value(store.snapshot()).unwrap(), before);
+                    assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "unsupported candidates accepted: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn voice_override_language_priority_and_builtin_candidate_characterization() {
+        let store = RuntimeStore::default();
+        let mut events = store.subscribe().unwrap();
+        let before = serde_json::to_value(store.snapshot()).unwrap();
+        let mut profile = store.snapshot().directions[1].voice_profile.clone();
+        profile.language = super::Language::En;
+        profile.model_path = Some("unapproved.onnx".into());
+        assert!(matches!(
+            store.voice_candidate(super::VoiceProfilePatch {
+                direction_id: super::AudioDirection::Speaker,
+                voice_profile: profile,
+            }),
+            Err(RuntimeMutationError::VoiceLanguageMismatch)
+        ));
+        for literal in [
+            r#"{"direction_id":"speaker","voice_profile":{"language":"ru","gender":"female","engine":"piper"}}"#,
+            r#"{"direction_id":"speaker","voice_profile":{"language":"ru","gender":"female","engine":"piper","model_path":null,"provider_voice_id":null}}"#,
+        ] {
+            let patch = serde_json::from_str(literal).unwrap();
+            let candidate = store.voice_candidate(patch).unwrap();
+            assert_eq!(
+                candidate.directions[1].voice_profile.gender,
+                super::VoiceGender::Female
+            );
+            assert!(candidate.directions[1].voice_profile.model_path.is_none());
+            assert!(
+                candidate.directions[1]
+                    .voice_profile
+                    .provider_voice_id
+                    .is_none()
+            );
+        }
+        assert_eq!(serde_json::to_value(store.snapshot()).unwrap(), before);
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn admitted_control_commits_facts_once_without_overwriting_intervening_projection_updates() {
+        let store = RuntimeStore::default();
+        let mut candidate = store.snapshot();
+        candidate.translation_running = true;
+        candidate.runtime_status = super::RuntimeStatus::Running;
+        candidate.audio_graph = Some(AudioGraphState {
+            health: GraphHealth::Ready,
+            endpoints: Vec::new(),
+            owned_module_ids: vec![42],
+            safe_error: None,
+        });
+        candidate.routes = Some(RoutingState {
+            candidates: Vec::new(),
+            source_outputs: Vec::new(),
+            conflicting_stream_ids: Vec::new(),
+            active_route: None,
+            resolution: RouteResolution::NoCandidate,
+        });
+        let selection = DeviceSelectionState {
+            health: DeviceHealth::DeviceUnavailable,
+            selected: None,
+            pinned_name: None,
+            current_default: None,
+            pending_default: None,
+        };
+        candidate.devices = Some(DeviceState {
+            source: selection.clone(),
+            sink: selection,
+            acoustic: AcousticSafety {
+                mode: OutputMode::UnknownUnsafe,
+                aec_capability: AecCapability::Unavailable,
+                full_duplex_allowed: false,
+                warning: Some(crate::AcousticWarning::DeviceUnavailable),
+            },
+        });
+        let accepted_graph = candidate.audio_graph.clone();
+        let accepted_routes = candidate.routes.clone();
+        let accepted_devices = candidate.devices.clone();
+        store.set_debug_text_enabled(true);
+        let mut self_test = store.snapshot().self_test;
+        self_test.availability = "available";
+        store.set_self_test(self_test);
+        let before_self_test = serde_json::to_value(store.snapshot().self_test).unwrap();
+        let mut events = store.subscribe().unwrap();
+
+        store.commit_admitted_control(candidate);
+
+        let committed = store.snapshot();
+        assert!(committed.translation_running);
+        assert!(committed.debug_text_enabled);
+        assert_eq!(committed.audio_graph, accepted_graph);
+        assert_eq!(committed.routes, accepted_routes);
+        assert_eq!(committed.devices, accepted_devices);
+        assert_eq!(
+            serde_json::to_value(committed.self_test).unwrap(),
+            before_self_test
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(RuntimeEvent::SnapshotChanged)
+        ));
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn ordinary_control_commit_preserves_newer_audio_facts() {
+        let store = RuntimeStore::default();
+        let candidate = store.snapshot();
+        store.set_audio_graph(AudioGraphState {
+            health: GraphHealth::Ready,
+            endpoints: Vec::new(),
+            owned_module_ids: vec![42],
+            safe_error: None,
+        });
+        store.set_routes(RoutingState {
+            candidates: Vec::new(),
+            source_outputs: Vec::new(),
+            conflicting_stream_ids: Vec::new(),
+            active_route: None,
+            resolution: RouteResolution::NoCandidate,
+        });
+        let fresh = store.snapshot();
+        store.commit_control(candidate);
+        assert_eq!(store.snapshot().audio_graph, fresh.audio_graph);
+        assert_eq!(store.snapshot().routes, fresh.routes);
+    }
 
     #[test]
     fn graph_route_and_device_watch_updates_publish_only_on_change() {

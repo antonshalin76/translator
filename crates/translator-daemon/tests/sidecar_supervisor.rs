@@ -30,6 +30,9 @@ struct FakeRuntime {
     launches: Vec<SidecarLaunch>,
     probes: Vec<ProbeBehavior>,
     kill_failure: bool,
+    kill_results: Vec<Result<ChildState, SupervisorError>>,
+    cleanup_results: Vec<bool>,
+    cleanup_gate: Option<Arc<Notify>>,
     kill_gate: Option<Arc<Notify>>,
     start_results: Vec<bool>,
     retry_gate: Option<Arc<Notify>>,
@@ -46,6 +49,9 @@ impl Default for FakeRuntime {
             launches: vec![],
             probes: vec![ProbeBehavior::Matching; MAX_START_ATTEMPTS * 2],
             kill_failure: false,
+            kill_results: Vec::new(),
+            cleanup_results: Vec::new(),
+            cleanup_gate: None,
             kill_gate: None,
             start_results: vec![true; MAX_START_ATTEMPTS * 2],
             retry_gate: None,
@@ -92,6 +98,13 @@ impl SidecarRuntime for FakeRuntime {
         if let Some(gate) = &self.kill_gate {
             gate.notified().await;
         }
+        if !self.kill_results.is_empty() {
+            let result = self.kill_results.remove(0);
+            if result == Ok(ChildState::Reaped) {
+                self.child_running.store(false, Ordering::Release);
+            }
+            return result;
+        }
         if self.kill_failure {
             Err(SupervisorError::KillAndReapFailed)
         } else {
@@ -123,6 +136,12 @@ impl SidecarRuntime for FakeRuntime {
     ) -> Result<(), SupervisorError> {
         assert_eq!(child_state, ChildState::Reaped);
         self.events.push("remove_stale_socket".into());
+        if let Some(gate) = &self.cleanup_gate {
+            gate.notified().await;
+        }
+        if !self.cleanup_results.is_empty() && !self.cleanup_results.remove(0) {
+            return Err(SupervisorError::CleanupFailed);
+        }
         Ok(())
     }
 
@@ -229,6 +248,10 @@ async fn close_restarts_only_at_exact_two_second_deadline() {
     let (mut supervisor, result) = close.await.unwrap();
 
     assert_eq!(result.unwrap(), CloseOutcome::GenerationRestarted);
+    assert!(!supervisor.is_ready());
+    supervisor
+        .acknowledge_generation_retirement(original.generation_id)
+        .unwrap();
     assert!(supervisor.is_ready());
     assert!(supervisor.active_sessions().is_empty());
     let restarted = supervisor.launch().unwrap();
@@ -261,6 +284,7 @@ async fn supervisor_stays_unready_through_reap_and_restart_probe() {
     };
     let mut supervisor = SidecarSupervisor::new(runtime);
     supervisor.start().await.unwrap();
+    let original_generation = supervisor.launch().unwrap().generation_id;
     let session_id = Uuid::new_v4();
     supervisor.register_session(session_id).unwrap();
     let status = supervisor.status_handle();
@@ -280,6 +304,10 @@ async fn supervisor_stays_unready_through_reap_and_restart_probe() {
     probe_gate.notify_one();
     let (mut supervisor, result) = close.await.unwrap();
     assert_eq!(result.unwrap(), CloseOutcome::GenerationRestarted);
+    assert!(!supervisor.is_ready());
+    supervisor
+        .acknowledge_generation_retirement(original_generation)
+        .unwrap();
     assert!(supervisor.is_ready());
 }
 
@@ -398,6 +426,398 @@ async fn unexpected_child_exit_revokes_readiness_and_session_registration() {
     assert!(!supervisor.is_ready());
     assert_eq!(supervisor.status_handle().active_session_count(), 0);
     assert!(supervisor.active_sessions().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn explicit_restart_accepts_dead_or_unready_generation_without_close_wait() {
+    for poll_failed in [false, true] {
+        let runtime = FakeRuntime::default();
+        let child_running = runtime.child_running.clone();
+        let poll_failure = runtime.poll_failure.clone();
+        let mut supervisor = SidecarSupervisor::new(runtime);
+        supervisor.start().await.unwrap();
+        let original = supervisor.launch().unwrap().clone();
+        supervisor.register_session(Uuid::new_v4()).unwrap();
+        if poll_failed {
+            poll_failure.store(true, Ordering::Release);
+        } else {
+            child_running.store(false, Ordering::Release);
+        }
+        assert!(!supervisor.is_ready());
+        assert!(supervisor.active_sessions().is_empty());
+        poll_failure.store(false, Ordering::Release);
+        let before = tokio::time::Instant::now();
+        supervisor.restart_generation().await.unwrap();
+        assert_eq!(before.elapsed(), Duration::ZERO);
+        assert!(!supervisor.status_handle().close_wait_armed());
+        assert!(!supervisor.is_ready());
+        supervisor
+            .acknowledge_generation_retirement(original.generation_id)
+            .unwrap();
+        assert!(supervisor.is_ready());
+        assert!(supervisor.active_sessions().is_empty());
+        let replacement = supervisor.launch().unwrap();
+        assert_ne!(original.generation_id, replacement.generation_id);
+        assert!(original.token != replacement.token);
+        assert_eq!(
+            &supervisor.runtime().events[2..],
+            [
+                "kill_and_reap".to_owned(),
+                "remove_stale_socket".to_owned(),
+                format!("start:{}", replacement.generation_id),
+                format!("probe:{}", replacement.generation_id),
+            ]
+        );
+        supervisor.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn restart_without_an_owned_generation_has_no_effects() {
+    let mut supervisor = SidecarSupervisor::new(FakeRuntime::default());
+    let result = supervisor.restart_generation().await;
+    let absent = Uuid::new_v4();
+    let receipt = supervisor.generation_retirement(absent);
+    let ack = supervisor.acknowledge_generation_retirement(absent);
+    let effects = supervisor.runtime().events.clone();
+    supervisor.shutdown().await.unwrap();
+    assert_eq!(result, Err(SupervisorError::NotReady));
+    assert!(receipt.is_none());
+    assert_eq!(ack, Err(SupervisorError::GenerationMismatch));
+    assert!(effects.is_empty());
+}
+
+#[tokio::test]
+async fn restart_cannot_overwrite_unacknowledged_retirement_evidence() {
+    let mut supervisor = SidecarSupervisor::new(FakeRuntime::default());
+    supervisor.start().await.unwrap();
+    supervisor.restart_generation().await.unwrap();
+    let current = supervisor.launch().unwrap().generation_id;
+    let before = supervisor.runtime().events.len();
+    let result = supervisor.restart_generation().await;
+    let after = supervisor.runtime().events.len();
+    let observed = supervisor.launch().unwrap().generation_id;
+    supervisor.shutdown().await.unwrap();
+    assert_eq!(result, Err(SupervisorError::GenerationRetirementPending));
+    assert_eq!(after, before);
+    assert_eq!(observed, current);
+}
+
+#[tokio::test]
+async fn acknowledged_retirement_allows_only_the_next_exact_generation() {
+    let mut supervisor = SidecarSupervisor::new(FakeRuntime::default());
+    supervisor.start().await.unwrap();
+    let first = supervisor.launch().unwrap().generation_id;
+    supervisor.restart_generation().await.unwrap();
+    supervisor.acknowledge_generation_retirement(first).unwrap();
+    let second = supervisor.launch().unwrap().generation_id;
+    supervisor.restart_generation().await.unwrap();
+    let stale = supervisor.acknowledge_generation_retirement(first);
+    let receipt = supervisor.generation_retirement(second);
+    let third = supervisor.launch().unwrap().generation_id;
+    let ready_before = supervisor.is_ready();
+    let ack = supervisor.acknowledge_generation_retirement(second);
+    let ready_after = supervisor.is_ready();
+    supervisor.shutdown().await.unwrap();
+    assert_ne!(first, second);
+    assert_ne!(second, third);
+    assert_eq!(stale, Err(SupervisorError::GenerationMismatch));
+    assert_eq!(
+        receipt.map(|r| (r.generation_id, r.old_generation_reaped)),
+        Some((second, true))
+    );
+    assert_eq!(ack, Ok(()));
+    assert!(!ready_before && ready_after);
+}
+
+#[tokio::test]
+async fn retirement_blocks_committed_readiness_and_new_session_admission() {
+    let mut supervisor = SidecarSupervisor::new(FakeRuntime::default());
+    supervisor.start().await.unwrap();
+    supervisor.register_session(Uuid::new_v4()).unwrap();
+    let status = supervisor.status_handle();
+    supervisor.restart_generation().await.unwrap();
+    let ready = supervisor.is_ready();
+    let projected_ready = status.is_ready();
+    let admitted = supervisor.register_session(Uuid::new_v4());
+    let sessions = supervisor.active_sessions().len();
+    supervisor.shutdown().await.unwrap();
+    assert!(
+        !ready && !projected_ready,
+        "physical replacement is not committed readiness before retirement acknowledgement"
+    );
+    assert_eq!(admitted, Err(SupervisorError::GenerationRetirementPending));
+    assert_eq!(sessions, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retirement_receipt_survives_cancellation_before_and_after_reap() {
+    for phase in 0..3 {
+        let gate = Arc::new(Notify::new());
+        let runtime = FakeRuntime {
+            kill_gate: (phase == 0).then(|| gate.clone()),
+            cleanup_gate: (phase == 1).then(|| gate.clone()),
+            probes: if phase == 2 {
+                vec![
+                    ProbeBehavior::Matching,
+                    ProbeBehavior::Gated {
+                        gate: gate.clone(),
+                        started: Arc::new(AtomicBool::new(false)),
+                    },
+                ]
+            } else {
+                vec![ProbeBehavior::Matching; 2]
+            },
+            ..FakeRuntime::default()
+        };
+        let running = runtime.child_running.clone();
+        let mut supervisor = SidecarSupervisor::new(runtime);
+        supervisor.start().await.unwrap();
+        let old = supervisor.launch().unwrap().generation_id;
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(10), supervisor.restart_generation())
+                .await
+                .is_err();
+        let receipt = supervisor.generation_retirement(old);
+        let physical_running = running.load(Ordering::Acquire);
+        let projected = supervisor.status_handle().is_ready();
+        let before = supervisor.runtime().events.len();
+        let restart = supervisor.restart_generation().await;
+        let start = supervisor.start().await;
+        let after = supervisor.runtime().events.len();
+        let wrong = Uuid::new_v4();
+        let wrong_getter = supervisor.generation_retirement(wrong);
+        let wrong_ack = supervisor.acknowledge_generation_retirement(wrong);
+        let early_ack = (phase == 0).then(|| supervisor.acknowledge_generation_retirement(old));
+        let preserved = supervisor.generation_retirement(old);
+        gate.notify_one();
+        let shutdown = tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown()).await;
+        let after_shutdown = supervisor.generation_retirement(old);
+        let acknowledged = supervisor.acknowledge_generation_retirement(old);
+        let final_receipt = supervisor.generation_retirement(old);
+        let repeated_ack = supervisor.acknowledge_generation_retirement(old);
+
+        assert!(shutdown.unwrap().is_ok());
+        assert!(cancelled);
+        assert_eq!(
+            receipt.map(|r| (r.generation_id, r.old_generation_reaped)),
+            Some((old, phase != 0))
+        );
+        assert_eq!(physical_running, phase != 1);
+        assert!(!projected);
+        assert_eq!(restart, Err(SupervisorError::GenerationRetirementPending));
+        assert_eq!(start, Err(SupervisorError::GenerationRetirementPending));
+        assert_eq!(after, before);
+        assert!(wrong_getter.is_none());
+        assert_eq!(wrong_ack, Err(SupervisorError::GenerationMismatch));
+        if let Some(early) = early_ack {
+            assert_eq!(early, Err(SupervisorError::GenerationRetirementPending));
+        }
+        assert_eq!(preserved, receipt);
+        assert_eq!(
+            after_shutdown.map(|r| (r.generation_id, r.old_generation_reaped)),
+            Some((old, true))
+        );
+        assert_eq!(acknowledged, Ok(()));
+        assert!(final_receipt.is_none());
+        assert_eq!(repeated_ack, Err(SupervisorError::GenerationMismatch));
+        assert!(!supervisor.is_ready());
+        assert!(!running.load(Ordering::Acquire));
+    }
+}
+
+#[tokio::test]
+async fn retirement_reap_fact_is_independent_of_socket_cleanup_and_new_start_failure() {
+    for phase in 0..5 {
+        let runtime = FakeRuntime {
+            probes: if phase == 4 {
+                std::iter::once(ProbeBehavior::Matching)
+                    .chain((0..MAX_START_ATTEMPTS).map(|_| ProbeBehavior::Wrong(Uuid::new_v4())))
+                    .collect()
+            } else {
+                vec![ProbeBehavior::Matching; MAX_START_ATTEMPTS + 1]
+            },
+            kill_results: match phase {
+                0 => vec![Err(SupervisorError::KillAndReapFailed)],
+                1 => vec![Ok(ChildState::Running)],
+                _ => Vec::new(),
+            },
+            cleanup_results: if phase == 2 { vec![false] } else { Vec::new() },
+            start_results: if phase == 3 {
+                vec![true, false, false, false]
+            } else {
+                vec![true; MAX_START_ATTEMPTS + 1]
+            },
+            ..FakeRuntime::default()
+        };
+        let mut supervisor = SidecarSupervisor::new(runtime);
+        supervisor.start().await.unwrap();
+        let old = supervisor.launch().unwrap().generation_id;
+        let failure = supervisor.restart_generation().await;
+        let receipt = supervisor.generation_retirement(old);
+        let projected = supervisor.status_handle().is_ready();
+        let shutdown = supervisor.shutdown().await;
+        let confirmed = supervisor.generation_retirement(old);
+        let acknowledged = supervisor.acknowledge_generation_retirement(old);
+        assert_eq!(shutdown, Ok(()));
+        assert_eq!(
+            failure,
+            Err(match phase {
+                2 => SupervisorError::CleanupFailed,
+                3 => SupervisorError::StartFailed,
+                4 => SupervisorError::GenerationMismatch,
+                _ => SupervisorError::KillAndReapFailed,
+            })
+        );
+        assert_eq!(
+            receipt.map(|r| (r.generation_id, r.old_generation_reaped)),
+            Some((old, phase >= 2))
+        );
+        assert!(!projected);
+        assert_eq!(
+            confirmed.map(|r| (r.generation_id, r.old_generation_reaped)),
+            Some((old, true))
+        );
+        assert_eq!(acknowledged, Ok(()));
+        assert!(!supervisor.is_ready());
+    }
+}
+
+#[tokio::test]
+async fn retirement_acknowledgement_publishes_only_live_replacement_readiness() {
+    use std::future::Future;
+    for died in [false, true] {
+        let gate = Arc::new(Notify::new());
+        let started = Arc::new(AtomicBool::new(false));
+        let runtime = FakeRuntime {
+            probes: vec![
+                ProbeBehavior::Matching,
+                ProbeBehavior::Gated {
+                    gate: gate.clone(),
+                    started: started.clone(),
+                },
+            ],
+            ..FakeRuntime::default()
+        };
+        let running = runtime.child_running.clone();
+        let mut supervisor = SidecarSupervisor::new(runtime);
+        supervisor.start().await.unwrap();
+        let old = supervisor.launch().unwrap().generation_id;
+        let status = supervisor.status_handle();
+        let mut sampled = Vec::new();
+        let result = {
+            let restart = supervisor.restart_generation();
+            tokio::pin!(restart);
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                std::future::poll_fn(|context| {
+                    let result = restart.as_mut().poll(context);
+                    sampled.push(status.is_ready());
+                    if started.load(Ordering::Acquire) {
+                        gate.notify_one();
+                    }
+                    result
+                }),
+            )
+            .await
+        };
+        let before = supervisor.generation_retirement(old);
+        let rejected = supervisor.register_session(Uuid::new_v4());
+        if died {
+            running.store(false, Ordering::Release);
+        }
+        let ack = supervisor.acknowledge_generation_retirement(old);
+        let ready = supervisor.is_ready();
+        let projected = status.is_ready();
+        let registered = supervisor.register_session(Uuid::new_v4());
+        let shutdown = supervisor.shutdown().await;
+        assert_eq!(shutdown, Ok(()));
+        assert_eq!(result.unwrap(), Ok(()));
+        assert!(started.load(Ordering::Acquire));
+        assert!(sampled.len() >= 2 && sampled.iter().all(|ready| !ready));
+        assert_eq!(
+            before.map(|r| (r.generation_id, r.old_generation_reaped)),
+            Some((old, true))
+        );
+        assert_eq!(rejected, Err(SupervisorError::GenerationRetirementPending));
+        assert_eq!(ack, Ok(()));
+        assert_eq!((ready, projected), (!died, !died));
+        assert_eq!(
+            registered,
+            if died {
+                Err(SupervisorError::NotReady)
+            } else {
+                Ok(())
+            }
+        );
+        assert!(supervisor.generation_retirement(old).is_none());
+    }
+}
+
+#[tokio::test]
+async fn explicit_restart_retains_old_generation_until_cleanup_retry_succeeds() {
+    for failure in 0..3 {
+        let runtime = FakeRuntime {
+            kill_results: match failure {
+                0 => vec![Err(SupervisorError::KillAndReapFailed)],
+                1 => vec![Ok(ChildState::Running)],
+                _ => Vec::new(),
+            },
+            cleanup_results: if failure == 2 {
+                vec![false]
+            } else {
+                Vec::new()
+            },
+            ..FakeRuntime::default()
+        };
+        let mut supervisor = SidecarSupervisor::new(runtime);
+        supervisor.start().await.unwrap();
+        let original = supervisor.launch().unwrap().clone();
+        supervisor.register_session(Uuid::new_v4()).unwrap();
+        let expected = if failure == 2 {
+            SupervisorError::CleanupFailed
+        } else {
+            SupervisorError::KillAndReapFailed
+        };
+        assert_eq!(supervisor.restart_generation().await.unwrap_err(), expected);
+        assert!(!supervisor.is_ready());
+        assert_eq!(supervisor.status_handle().active_session_count(), 0);
+        assert!(supervisor.active_sessions().is_empty());
+        assert_eq!(supervisor.launch().unwrap(), &original);
+        assert_eq!(supervisor.runtime().launches.len(), 1);
+        let mut expected_events = vec!["kill_and_reap".to_owned()];
+        if failure == 2 {
+            expected_events.push("remove_stale_socket".to_owned());
+        }
+        assert_eq!(&supervisor.runtime().events[2..], expected_events);
+        assert_eq!(
+            supervisor.restart_generation().await,
+            Err(SupervisorError::GenerationRetirementPending)
+        );
+        supervisor.shutdown().await.unwrap();
+        supervisor
+            .acknowledge_generation_retirement(original.generation_id)
+            .unwrap();
+        supervisor.restart_generation().await.unwrap();
+        supervisor
+            .acknowledge_generation_retirement(original.generation_id)
+            .unwrap();
+        assert!(supervisor.is_ready());
+        let replacement = supervisor.launch().unwrap();
+        assert_ne!(original.generation_id, replacement.generation_id);
+        assert!(original.token != replacement.token);
+        let events = &supervisor.runtime().events;
+        assert_eq!(
+            &events[events.len() - 4..],
+            [
+                "kill_and_reap".to_owned(),
+                "remove_stale_socket".to_owned(),
+                format!("start:{}", replacement.generation_id),
+                format!("probe:{}", replacement.generation_id),
+            ]
+        );
+        supervisor.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -532,6 +952,7 @@ async fn retry_backoff_gates_initial_and_timeout_restart_attempts() {
     };
     let mut supervisor = SidecarSupervisor::new(restart_runtime);
     supervisor.start().await.unwrap();
+    let original_generation = supervisor.launch().unwrap().generation_id;
     let session_id = Uuid::new_v4();
     supervisor.register_session(session_id).unwrap();
     let status = supervisor.status_handle();
@@ -548,6 +969,10 @@ async fn retry_backoff_gates_initial_and_timeout_restart_attempts() {
     restart_gate.notify_one();
     let (mut restarted_supervisor, result) = restart.await.unwrap();
     assert_eq!(result.unwrap(), CloseOutcome::GenerationRestarted);
+    assert!(!restarted_supervisor.is_ready());
+    restarted_supervisor
+        .acknowledge_generation_retirement(original_generation)
+        .unwrap();
     assert!(restarted_supervisor.is_ready());
     assert_eq!(restart_start_count.load(Ordering::Acquire), 3);
 }

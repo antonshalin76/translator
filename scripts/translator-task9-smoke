@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash -p
 set -euo pipefail
 
 runtime_dir="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required for the user service}"

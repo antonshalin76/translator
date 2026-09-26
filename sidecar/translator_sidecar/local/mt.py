@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
+import weakref
+from pathlib import Path
 from typing import Any
+
+import pysbd
 
 from translator_sidecar.provider_contract import Language, TranslationMode
 
+from .model_lease import VerifiedModelSource
 
 _LANGUAGE_TOKENS = {
     Language.RU: "rus_Cyrl",
@@ -21,6 +25,8 @@ _BEAM_SIZE = {
 }
 _BASE_DECODING_LENGTH = 96
 _MAX_DECODING_LENGTH = 512
+_MAX_SENTENCES_PER_REQUEST = 16
+_MAX_SOURCE_PIECES_PER_REQUEST = 512
 _TIME_24_RE = re.compile(r"(?<!\d)(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?!\d)")
 _PURCHASE_ORDER_ID_RE = re.compile(
     r"\border[ \t]+(?:number|no\.?)\b[ \t]*(?:#[ \t]*)?(?P<identifier>\d+)\b",
@@ -36,6 +42,14 @@ _EN_DOCUMENT_ENTITY_RE = re.compile(
 
 class LocalTranslationError(RuntimeError):
     """The local translation request failed without exposing spoken text."""
+
+
+class LocalTranslationCleanupPending(LocalTranslationError):
+    """Transfer an unavailable adapter with retryable native cleanup to its owner."""
+
+    def __init__(self, translator: NllbTranslator) -> None:
+        self.translator = translator
+        super().__init__("local MT cleanup is incomplete")
 
 
 def _preserve_24_hour_times(source: str, translated: str) -> str:
@@ -133,17 +147,32 @@ class NllbTranslator:
         self.model_path = model_path
         self._translator = translator
         self._tokenizer = tokenizer
+        self.unavailable = False
+
+    def close(self) -> None:
+        self.unavailable = True
+        translator = self._translator
+        try:
+            unload = getattr(translator, "unload_model", None)
+            if callable(unload):
+                unload()
+        except Exception:
+            raise LocalTranslationError("local MT cleanup is incomplete") from None
+        self._translator = None
+        self._tokenizer = None
+        # A retained native object keeps its sealed files until it is destroyed.
+        del translator
 
     @classmethod
     def load(
         cls,
-        model_path: Path,
+        model_path: VerifiedModelSource,
         *,
         device: str,
         translator_factory: Any | None = None,
         tokenizer_factory: Any | None = None,
     ) -> NllbTranslator:
-        if not model_path.is_absolute() or not model_path.is_dir():
+        if not isinstance(model_path, VerifiedModelSource):
             raise LocalTranslationError("local MT model path is unavailable")
         os.environ.update(
             {
@@ -153,6 +182,10 @@ class NllbTranslator:
             }
         )
         compute_type = "int8_float16" if device == "cuda" else "int8"
+        lease = None
+        translator = None
+        attached = False
+        adapter = None
         try:
             if translator_factory is None:
                 from ctranslate2 import Translator
@@ -161,26 +194,44 @@ class NllbTranslator:
             if tokenizer_factory is None:
                 from sentencepiece import SentencePieceProcessor
 
-                def load_tokenizer(path: str) -> SentencePieceProcessor:
-                    return SentencePieceProcessor(model_file=path)
+                def load_tokenizer(payload: bytes) -> SentencePieceProcessor:
+                    return SentencePieceProcessor(model_proto=payload)
 
                 tokenizer_factory = load_tokenizer
+            lease = model_path.acquire()
+            verified_files = {name: lease.read_bytes(name) for name in lease.names}
             translator = translator_factory(
-                str(model_path),
+                lease.identifier,
                 device=device,
                 compute_type=compute_type,
                 inter_threads=1,
+                files=verified_files,
             )
-            tokenizer = tokenizer_factory(str(model_path / "sentencepiece.bpe.model"))
-        except Exception:
+            weakref.finalize(translator, lease.close)
+            attached = True
+            adapter = cls(
+                Path(lease.identifier),
+                translator=translator,
+                tokenizer=None,
+            )
+            adapter._tokenizer = tokenizer_factory(
+                verified_files["sentencepiece.bpe.model"]
+            )
+            return adapter
+        except BaseException as error:
+            if adapter is not None:
+                try:
+                    adapter.close()
+                except Exception:
+                    raise LocalTranslationCleanupPending(adapter) from None
+            translator = None
+            if lease is not None and not attached:
+                lease.close()
+            if not isinstance(error, Exception):
+                raise
             raise LocalTranslationError(
                 "local MT runtime could not be loaded"
             ) from None
-        return cls(
-            model_path,
-            translator=translator,
-            tokenizer=tokenizer,
-        )
 
     def translate(
         self,
@@ -190,6 +241,8 @@ class NllbTranslator:
         target_language: Language,
         mode: TranslationMode,
     ) -> str:
+        if self.unavailable:
+            raise LocalTranslationError("local MT is unavailable")
         normalized = text.strip()
         if not normalized:
             raise LocalTranslationError("source text is empty")
@@ -198,42 +251,65 @@ class NllbTranslator:
         source_token = _LANGUAGE_TOKENS[source_language]
         target_token = _LANGUAGE_TOKENS[target_language]
         try:
-            pieces = self._tokenizer.encode(normalized, out_type=str)
-            source = [source_token, *pieces, "</s>"]
+            segments = pysbd.Segmenter(
+                language=source_language.value, clean=False
+            ).segment(normalized)
+            if "".join(segments) != normalized:
+                raise ValueError("sentence segmentation changed source text")
+            sentences = [segment.strip() for segment in segments if segment.strip()]
+            if not sentences or len(sentences) > _MAX_SENTENCES_PER_REQUEST:
+                raise LocalTranslationError("local MT input exceeds work limit")
+            sources: list[list[str]] = []
+            piece_counts: list[int] = []
+            for sentence in sentences:
+                pieces = self._tokenizer.encode(sentence, out_type=str)
+                piece_counts.append(len(pieces))
+                sources.append([source_token, *pieces, "</s>"])
+            if sum(piece_counts) > _MAX_SOURCE_PIECES_PER_REQUEST:
+                raise LocalTranslationError("local MT input exceeds work limit")
             results = self._translator.translate_batch(
-                [source],
-                target_prefix=[[target_token]],
+                sources,
+                target_prefix=[[target_token] for _ in sources],
                 beam_size=_BEAM_SIZE[mode],
-                max_decoding_length=_decoding_length(len(pieces), mode),
+                max_decoding_length=_decoding_length(max(piece_counts), mode),
             )
-            tokens = list(results[0].hypotheses[0])
-            if tokens and tokens[0] == target_token:
-                tokens.pop(0)
-            if tokens and tokens[-1] == "</s>":
-                tokens.pop()
-            translated = _preserve_24_hour_times(
-                normalized,
-                self._tokenizer.decode(tokens).strip(),
-            )
-            translated = _preserve_purchase_order_identifiers(
-                normalized,
-                translated,
-                source_language=source_language,
-                target_language=target_language,
-            )
-            translated = _preserve_named_entity_roles(
-                normalized,
-                translated,
-                source_language=source_language,
-                target_language=target_language,
-            )
+            if len(results) != len(sentences):
+                raise LocalTranslationError("local MT returned incomplete output")
+            translated_parts: list[str] = []
+            for sentence, result in zip(sentences, results, strict=True):
+                tokens = list(result.hypotheses[0])
+                if tokens and tokens[0] == target_token:
+                    tokens.pop(0)
+                if tokens and tokens[-1] == "</s>":
+                    tokens.pop()
+                translated = _preserve_24_hour_times(
+                    sentence,
+                    self._tokenizer.decode(tokens).strip(),
+                )
+                translated = _preserve_purchase_order_identifiers(
+                    sentence,
+                    translated,
+                    source_language=source_language,
+                    target_language=target_language,
+                )
+                translated = _preserve_named_entity_roles(
+                    sentence,
+                    translated,
+                    source_language=source_language,
+                    target_language=target_language,
+                )
+                if not translated:
+                    raise LocalTranslationError("local MT returned empty output")
+                translated_parts.append(translated)
+        except LocalTranslationError:
+            raise
         except Exception:
             raise LocalTranslationError("local MT inference failed") from None
-        if not translated:
-            raise LocalTranslationError("local MT returned empty output")
-        return translated
+        return " ".join(translated_parts)
 
     def count_tokens(self, text: str) -> int:
+        if self.unavailable:
+            raise LocalTranslationError("local MT is unavailable")
         normalized = text.strip()
         if not normalized:
             return 0

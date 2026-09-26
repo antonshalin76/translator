@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict, deque
+import math
+import os
+import struct
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-import math
-import os
-import struct
 from typing import Any
 from uuid import UUID
 
+from translator_sidecar.cleanup import finish_cleanup
 from translator_sidecar.provider_contract import (
+    MAX_TERMINAL_UTTERANCES_PER_SESSION,
     SAFE_ERROR_MESSAGES,
     CancelUtterance,
-    CloseProviderSession,
+    CloseRequestReason,
     ComputeDevice,
     ModelHealth,
     ModelKind,
@@ -45,6 +47,7 @@ from translator_sidecar.provider_contract import (
     UpdateDebugText,
     UtteranceOutcome,
 )
+from translator_sidecar.provider_registry import SessionDrainReceipt
 
 from .inference_scheduler import (
     InferenceScheduler,
@@ -57,17 +60,14 @@ from .inference_scheduler import (
 from .source_commit import SourceCommit
 from .tts import TtsOutputLimit
 
-
 _BASE_SOURCE_UTTERANCE_MS: int = 12_000
 _MAX_SOURCE_UTTERANCE_MS: int = 30_000
 _BASE_TRANSLATION_CHARS = 128
 _BASE_TRANSLATION_TOKENS = 96
 _BASE_OUTPUT_MS = 12_000
 _MAX_OUTPUT_MS = 30_000
-_MAX_TERMINAL_IDS = 4096
 _MAX_PENDING_EVENTS = 64
 _TERMINAL_RESERVED_EVENTS = 3
-_MAX_RETIRED_SESSIONS = 64
 _PROVIDER_STALE_MESSAGE = "provider result is stale"
 _DEFAULT_CONTINUATION_TAIL_RMS = 300.0
 _CONTINUATION_TAIL_FRAMES = 3
@@ -127,7 +127,7 @@ def _pcm_rms(pcm: bytes) -> float:
     if sample_count == 0:
         return 0.0
     total = 0
-    for sample, in struct.iter_unpack("<h", pcm[: sample_count * 2]):
+    for (sample,) in struct.iter_unpack("<h", pcm[: sample_count * 2]):
         total += sample * sample
     return math.sqrt(total / sample_count)
 
@@ -221,6 +221,7 @@ class _Utterance:
 
 @dataclass(slots=True)
 class _Session:
+    owner: LocalProvider
     request: OpenProviderSession
     publish: PublishEvents
     debug_text_enabled: bool
@@ -247,6 +248,24 @@ class _Session:
     publication_space: asyncio.Event = field(default_factory=asyncio.Event)
     publication_idle: asyncio.Event = field(default_factory=asyncio.Event)
     publication_task: asyncio.Task[None] | None = None
+    futures: set[asyncio.Future[None]] = field(default_factory=set)
+    opened: bool = False
+    draining: bool = False
+    drain_task: asyncio.Task[SessionDrainReceipt] | None = None
+
+    async def open(self) -> tuple[ProviderSessionOpened, ProviderHealth]:
+        return await self.owner._open_session(self)
+
+    async def drain(self, reason: CloseRequestReason) -> SessionDrainReceipt:
+        self.draining = True
+        if self.drain_task is None or (
+            self.drain_task.done()
+            and (self.drain_task.cancelled() or self.drain_task.exception() is not None)
+        ):
+            self.drain_task = asyncio.create_task(
+                self.owner._drain_session(self, reason)
+            )
+        return await finish_cleanup(self.drain_task)
 
     def next_event_sequence(self) -> int:
         self.event_sequence += 1
@@ -281,7 +300,7 @@ class LocalProvider:
         self._mt_device = mt_device
         self._model_admission_probe = model_admission_probe
         self._sessions: dict[UUID, _Session] = {}
-        self._retired_sessions: OrderedDict[UUID, _Session] = OrderedDict()
+        self._retired_sessions: dict[UUID, _Session] = {}
         self._model_states: dict[
             tuple[ModelKind, str],
             ModelState,
@@ -291,31 +310,55 @@ class LocalProvider:
             tuple[ModelKind, str],
             asyncio.Lock,
         ] = {}
-        self._futures: set[asyncio.Future[None]] = set()
         self._closed = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._models_to_close = [asr, translator, tts]
 
-    async def open_session(
+    def reserve_session(
         self,
         request: OpenProviderSession,
         publish: PublishEvents,
-    ) -> tuple[ProviderSessionOpened, ProviderHealth]:
+    ) -> _Session:
         if self._closed:
             raise LocalProviderProtocolError("provider is closed")
         if request.provider_id is not ProviderId.LOCAL:
             raise LocalProviderProtocolError("unsupported provider")
-        if request.session_id in self._sessions:
+        if (
+            request.session_id in self._sessions
+            or request.session_id in self._retired_sessions
+        ):
             raise LocalProviderProtocolError("duplicate session")
-        self._retired_sessions.pop(request.session_id, None)
+        if self._retired_sessions or any(
+            session.closed or session.draining for session in self._sessions.values()
+        ):
+            raise LocalProviderProtocolError("provider cleanup is pending")
         self._validate_open(request)
-        self._scheduler.open_session(
-            request.session_id,
-            request.direction_id,
-        )
         session = _Session(
+            owner=self,
             request=request,
             publish=publish,
             debug_text_enabled=request.debug_text_enabled,
         )
+        self._sessions[request.session_id] = session
+        return session
+
+    async def _open_session(
+        self, session: _Session
+    ) -> tuple[ProviderSessionOpened, ProviderHealth]:
+        request = session.request
+        if (
+            self._closed
+            or session.closed
+            or session.draining
+            or session.opened
+            or self._sessions.get(request.session_id) is not session
+        ):
+            raise LocalProviderProtocolError("provider session is unavailable")
+        self._scheduler.open_session(
+            request.session_id,
+            request.direction_id,
+        )
+        session.opened = True
         initial_states = self._initial_model_states(request)
         session.model_keys = self._model_keys(request)
         for kind, key in session.model_keys.items():
@@ -326,7 +369,6 @@ class LocalProvider:
             self._model_gates.setdefault(key, asyncio.Lock())
         session.publication_space.set()
         session.publication_idle.set()
-        self._sessions[request.session_id] = session
         session.publication_task = asyncio.create_task(self._publication_loop(session))
         opened = ProviderSessionOpened(
             session_id=request.session_id,
@@ -458,16 +500,17 @@ class LocalProvider:
             if not request.enabled:
                 self._purge_debug_locked(session)
 
-    async def close_session(
+    async def _drain_session(
         self,
-        request: CloseProviderSession,
-    ) -> None:
-        session = self._active_session(request.session_id)
+        session: _Session,
+        reason: CloseRequestReason,
+    ) -> SessionDrainReceipt:
         async with session.lock:
+            publish_closed = session.opened and not session.closed
             session.closed = True
             session.debug_text_enabled = False
             try:
-                self._scheduler.close_session(request.session_id)
+                self._scheduler.close_session(session.request.session_id)
             except SchedulerStale:
                 pass
             for utterance in tuple(session.utterances.values()):
@@ -476,22 +519,45 @@ class LocalProvider:
             session.utterances.clear()
             session.collecting_id = None
             self._purge_publications_locked(session, None)
-            self._append_publication_locked(
-                session,
-                _Publication(
-                    kind=_PublicationKind.SESSION,
-                    event_count=1,
-                    build=lambda: (
-                        ProviderSessionClosed(
-                            session_id=request.session_id,
-                            direction_id=session.request.direction_id,
-                            event_sequence=session.next_event_sequence(),
-                            reason=SessionCloseReason(request.reason.value),
+            if publish_closed and session.publication_task is not None:
+                self._append_publication_locked(
+                    session,
+                    _Publication(
+                        kind=_PublicationKind.SESSION,
+                        event_count=1,
+                        build=lambda: (
+                            ProviderSessionClosed(
+                                session_id=session.request.session_id,
+                                direction_id=session.request.direction_id,
+                                event_sequence=session.next_event_sequence(),
+                                reason=SessionCloseReason(reason.value),
+                            ),
                         ),
                     ),
-                ),
-            )
-        await asyncio.sleep(0)
+                )
+            session.publication_signal.set()
+        if session.futures:
+            await asyncio.gather(*tuple(session.futures), return_exceptions=True)
+        if session.publication_task is not None:
+            await session.publication_task
+        receipt = SessionDrainReceipt(
+            session.request.session_id,
+            SafeErrorCode.PROVIDER_UNAVAILABLE
+            if session.publication_error is not None
+            else None,
+        )
+        for sessions in (self._sessions, self._retired_sessions):
+            if sessions.get(session.request.session_id) is session:
+                sessions.pop(session.request.session_id)
+        return receipt
+
+    @property
+    def _futures(self) -> set[asyncio.Future[None]]:
+        return {
+            future
+            for session in (*self._sessions.values(), *self._retired_sessions.values())
+            for future in session.futures
+        }
 
     async def wait_idle(self) -> None:
         while self._futures:
@@ -499,9 +565,6 @@ class LocalProvider:
             await asyncio.gather(
                 *pending,
                 return_exceptions=True,
-            )
-            self._futures.difference_update(
-                future for future in pending if future.done()
             )
             await asyncio.sleep(0)
         sessions = tuple(self._sessions.values())
@@ -513,50 +576,42 @@ class LocalProvider:
         if error is not None:
             raise error from None
 
-    async def wait_publications(self, session_id: UUID) -> None:
-        session = self._sessions.get(session_id) or self._retired_sessions.get(
-            session_id
-        )
-        if session is None:
-            raise LocalProviderProtocolError("provider session is unavailable")
-        await session.publication_idle.wait()
-        self._retired_sessions.pop(session_id, None)
-        if (
-            session.publication_error is not None
-            and not session.publication_error_consumed
-        ):
-            session.publication_error_consumed = True
-            raise session.publication_error from None
-
     async def shutdown(self) -> None:
-        if self._closed:
-            return
         self._closed = True
-        publication_tasks = []
-        for session in tuple(self._sessions.values()):
-            async with session.lock:
-                session.closed = True
-                session.debug_text_enabled = False
-                self._purge_publications_locked(session, None)
-                for utterance in tuple(session.utterances.values()):
-                    self._cancel_commit(utterance)
-                    utterance.purge_source()
-                session.utterances.clear()
-                session.collecting_id = None
-                session.publication_signal.set()
-                if session.publication_task is not None:
-                    publication_tasks.append(session.publication_task)
-        self._sessions.clear()
-        self._retired_sessions.clear()
-        await self._scheduler.shutdown()
-        for task in publication_tasks:
-            task.cancel()
-        if publication_tasks:
-            await asyncio.gather(
-                *publication_tasks,
-                return_exceptions=True,
+        if self._shutdown_task is None or (
+            self._shutdown_task.done()
+            and (
+                self._shutdown_task.cancelled()
+                or self._shutdown_task.exception() is not None
             )
-        self._futures.clear()
+        ):
+            self._shutdown_task = asyncio.create_task(self._shutdown_impl())
+        await finish_cleanup(self._shutdown_task)
+
+    async def _shutdown_impl(self) -> None:
+        self._closed = True
+        results = await asyncio.gather(
+            *(
+                session.drain(CloseRequestReason.DAEMON_SHUTDOWN)
+                for session in (
+                    *self._sessions.values(),
+                    *self._retired_sessions.values(),
+                )
+            ),
+            return_exceptions=True,
+        )
+        if any(isinstance(result, BaseException) for result in results):
+            raise RuntimeError("local_session_cleanup_failed")
+        await self._scheduler.shutdown()
+        failed = []
+        for model in self._models_to_close:
+            try:
+                model.close()
+            except Exception:
+                failed.append(model)
+        self._models_to_close = failed
+        if failed:
+            raise RuntimeError("local_model_cleanup_failed")
 
     async def _schedule_locked(
         self,
@@ -599,8 +654,10 @@ class LocalProvider:
                 code=SafeErrorCode.PROVIDER_UNAVAILABLE,
             )
             return
-        self._futures.add(future)
-        future.add_done_callback(self._future_done)
+        session.futures.add(future)
+        future.add_done_callback(
+            lambda completed: self._future_done(session, completed)
+        )
 
     async def _run_pipeline(
         self,
@@ -1574,7 +1631,10 @@ class LocalProvider:
         if session.collecting_id is None:
             if frame.utterance_id in session.utterances:
                 raise LocalProviderProtocolError("utterance already reached EOU")
-            if len(session.terminal_ids) + len(session.utterances) >= _MAX_TERMINAL_IDS:
+            if (
+                len(session.terminal_ids) + len(session.utterances)
+                >= MAX_TERMINAL_UTTERANCES_PER_SESSION
+            ):
                 self._fail_session_locked(session)
                 raise LocalProviderProtocolError("terminal identity capacity reached")
             utterance = _Utterance(
@@ -1602,6 +1662,8 @@ class LocalProvider:
             raise LocalProviderProtocolError("language pair is unsupported")
         if request.voice_profile.language is not request.target_language:
             raise LocalProviderProtocolError("voice language does not match target")
+        if request.voice_profile.has_overrides:
+            raise LocalProviderProtocolError("voice profile override is unsupported")
 
     def _validate_frame(
         self,
@@ -1659,7 +1721,7 @@ class LocalProvider:
 
     def _active_session(self, session_id: UUID) -> _Session:
         session = self._sessions.get(session_id)
-        if session is None or session.closed:
+        if session is None or session.closed or session.draining or not session.opened:
             raise LocalProviderProtocolError("provider session is unavailable")
         return session
 
@@ -1670,6 +1732,7 @@ class LocalProvider:
     ) -> bool:
         return (
             not session.closed
+            and not session.draining
             and session.utterances.get(utterance.utterance_id) is utterance
             and utterance.utterance_id not in session.terminal_ids
         )
@@ -1682,7 +1745,7 @@ class LocalProvider:
         utterance.purge_source()
         if (
             utterance.utterance_id not in session.terminal_ids
-            and len(session.terminal_ids) >= _MAX_TERMINAL_IDS
+            and len(session.terminal_ids) >= MAX_TERMINAL_UTTERANCES_PER_SESSION
         ):
             self._fail_session_locked(session)
             raise LocalProviderProtocolError("terminal identity capacity reached")
@@ -1734,9 +1797,6 @@ class LocalProvider:
         if self._sessions.get(session_id) is session:
             self._sessions.pop(session_id)
             self._retired_sessions[session_id] = session
-            self._retired_sessions.move_to_end(session_id)
-            while len(self._retired_sessions) > _MAX_RETIRED_SESSIONS:
-                self._retired_sessions.popitem(last=False)
 
     def _take_publication_error(
         self,
@@ -1756,9 +1816,9 @@ class LocalProvider:
     def _elapsed_ms(self, capture_onset_ns: int) -> int:
         return max(0, (self._now_ns() - capture_onset_ns) // 1_000_000)
 
-    def _future_done(self, future: asyncio.Future[None]) -> None:
+    def _future_done(self, session: _Session, future: asyncio.Future[None]) -> None:
         try:
             future.exception()
         except (asyncio.CancelledError, Exception):
             pass
-        self._futures.discard(future)
+        session.futures.discard(future)

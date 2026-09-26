@@ -140,7 +140,8 @@ where
             .map_err(|error| match error {
                 CommandRunError::NotFound
                 | CommandRunError::SpawnFailed
-                | CommandRunError::TimedOut => {
+                | CommandRunError::TimedOut
+                | CommandRunError::DeadlineExpired => {
                     VirtualPeerDiscoveryError::new(VirtualPeerDiscoveryErrorCode::DiscoveryFailed)
                 }
             })?;
