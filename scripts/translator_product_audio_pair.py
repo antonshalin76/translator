@@ -1,0 +1,712 @@
+"""Replay frozen MDC WAVs through both real local product chains, serially.
+
+This is a private, accelerated saved-audio diagnostic. It does not measure
+capture, acoustic admission, playback, or first audible sound.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import io
+import json
+import os
+import stat
+import subprocess
+import time
+import wave
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any, TextIO
+from uuid import uuid4
+
+import psutil
+from translator_mdc_asr_run import validate_manifest
+from translator_sidecar.cleanup import finish_cleanup
+from translator_sidecar.local.runtime import build_local_provider
+from translator_sidecar.provider_contract import (
+    AudioDirection,
+    CloseRequestReason,
+    Language,
+    OpenProviderSession,
+    PcmFormat,
+    PrivacySafeProviderError,
+    ProviderAudioDelta,
+    ProviderId,
+    ProviderInputFrame,
+    ProviderLatency,
+    ProviderState,
+    ProviderTranscriptDelta,
+    ProviderTranslationDelta,
+    ProviderUtteranceFinal,
+    SampleFormat,
+    TranslationMode,
+    UtteranceOutcome,
+    VoiceEngine,
+    VoiceGender,
+    VoiceProfile,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+HY_SERVER = Path("/usr/local/lib/ollama/llama-server")
+MANIFEST_SHA256 = "bc2d204c31dbe0cba78187975f02a8a4378cc09407573ca4912ba540bf44ca26"
+SCREEN_SHA256 = "005db22422ad98c9c70ecd3d01f578be571ea4bebca81398d5fff7cda86214ae"
+TURBO_SHA256 = "03ebba9576e14e2fd6adb909f25f806583845a185a7df941d0c64b3a6297ac91"
+PRODUCT_MANIFEST_SHA256 = (
+    "d8f73beb4e9bc2b403405e4b54b18373386ecf05de420702cb7cc9b391c758dc"
+)
+ASR_ID = "faster-whisper-large-v3-turbo"
+BACKENDS = {
+    "nllb": "nllb-200-distilled-600m-ct2-int8",
+    "hy": "hy-mt2-1.8b-gguf-q4-k-m",
+}
+FRAME_BYTES = 3200  # 100 ms of 16-kHz mono s16le input
+OUTPUT_FRAME_BYTES = 960  # 20 ms of 24-kHz mono s16le output
+SAFE_EVALUATION_REASONS = frozenset(
+    {
+        "provider event precedes saved-audio submission",
+        "provider returned a safe error",
+        "provider did not complete a text-and-audio utterance",
+        "provider emitted malformed product PCM",
+        "provider emitted silent product PCM",
+    }
+)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_pinned_json(path: Path, expected: str) -> dict[str, Any]:
+    if path.is_symlink() or sha256(path) != expected:
+        raise ValueError("frozen input hash or path changed")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _pcm_from_wav(path: Path, expected_sha256: str) -> bytes:
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        raise ValueError("frozen WAV symlink is forbidden")
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise ValueError("frozen WAV hash changed before submission")
+    try:
+        with wave.open(io.BytesIO(data), "rb") as source:
+            if (
+                source.getnchannels() != 1
+                or source.getsampwidth() != 2
+                or source.getframerate() != 16_000
+                or source.getcomptype() != "NONE"
+            ):
+                raise ValueError("frozen WAV format is unsupported")
+            pcm = source.readframes(source.getnframes())
+    except wave.Error as error:
+        raise ValueError("frozen WAV is malformed") from error
+    if len(pcm) < FRAME_BYTES or len(pcm) % 2:
+        raise ValueError("frozen WAV has no usable PCM")
+    return pcm
+
+
+def load_cases(
+    manifest_path: Path,
+    screen_path: Path,
+    turbo_path: Path,
+    *,
+    manifest_sha256: str = MANIFEST_SHA256,
+    screen_sha256: str = SCREEN_SHA256,
+    turbo_sha256: str = TURBO_SHA256,
+) -> list[dict[str, Any]]:
+    """Bind selected rows to one verified WAV and its frozen Turbo provenance."""
+    if manifest_path.is_symlink():
+        raise ValueError("frozen manifest symlink is forbidden")
+    samples = validate_manifest(manifest_path, manifest_sha256)
+    screen = _read_pinned_json(screen_path, screen_sha256)
+    turbo = _read_pinned_json(turbo_path, turbo_sha256)
+    if (
+        turbo.get("model_id") != "turbo"
+        or turbo.get("manifest_sha256") != manifest_sha256
+        or screen.get("turbo_report_sha256") != turbo_sha256
+    ):
+        raise ValueError("frozen Turbo provenance changed")
+
+    def index(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+        indexed: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (row["origin_id"], row["condition"])
+            if key in indexed:
+                raise ValueError("frozen selection contains duplicate cases")
+            indexed[key] = row
+        return indexed
+
+    sample_index = index(samples)
+    turbo_index = index(turbo["results"])
+    selected = index(screen["cases"])
+    if not selected:
+        raise ValueError("frozen selection is empty")
+    cases: list[dict[str, Any]] = []
+    for key in selected:
+        sample = sample_index.get(key)
+        saved = turbo_index.get(key)
+        if sample is None or saved is None:
+            raise ValueError("frozen selection is missing a selected case")
+        if (
+            key[1] != "clean"
+            or sample["language"] not in {"ru_ru", "en_us"}
+            or sample["language"] != saved.get("language")
+            or sample["audio_file"] != saved.get("audio_file")
+            or sample["speaker_id"] != saved.get("speaker_id")
+            or sample["reference"] != saved.get("reference")
+        ):
+            raise ValueError("frozen case provenance changed")
+        if (
+            saved.get("status") != "completed"
+            or not saved.get("transcript", "").strip()
+        ):
+            raise ValueError("frozen Turbo transcript is unusable")
+        relative = Path(sample["audio_file"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("frozen WAV path is outside the corpus")
+        wav = manifest_path.parent / relative
+        pcm = _pcm_from_wav(wav, sample["sha256"])
+        cases.append(
+            {
+                "origin_id": key[0],
+                "condition": key[1],
+                "language": sample["language"],
+                "speaker_id": sample["speaker_id"],
+                "critical_labels": sample.get("critical_labels", []),
+                "reference": sample["reference"],
+                "turbo_text": saved["transcript"],
+                "audio_file": sample["audio_file"],
+                "wav_sha256": sample["sha256"],
+                "pcm": pcm,
+            }
+        )
+    return cases
+
+
+def open_journal(path: Path) -> TextIO:
+    if (
+        not path.is_absolute()
+        or path.resolve().is_relative_to(ROOT)
+        or not path.parent.is_dir()
+        or any(parent.is_symlink() for parent in path.parents)
+        or stat.S_IMODE(path.parent.stat().st_mode) != 0o700
+    ):
+        raise ValueError("output must be new in a private directory outside Git")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
+def write_record(journal: TextIO, record: dict[str, Any]) -> None:
+    journal.write(json.dumps(record, ensure_ascii=False) + "\n")
+    journal.flush()
+    os.fsync(journal.fileno())
+
+
+def evaluate_events(
+    event_times: list[tuple[Any, int]], *, started_ns: int
+) -> dict[str, Any]:
+    if any(at < started_ns for _, at in event_times):
+        raise ValueError("provider event precedes saved-audio submission")
+    if any(isinstance(event, PrivacySafeProviderError) for event, _ in event_times):
+        raise ValueError("provider returned a safe error")
+    final = [
+        event for event, _ in event_times if isinstance(event, ProviderUtteranceFinal)
+    ]
+    asr = [
+        event.text
+        for event, _ in event_times
+        if isinstance(event, ProviderTranscriptDelta) and event.is_final
+    ]
+    mt = [
+        event.text
+        for event, _ in event_times
+        if isinstance(event, ProviderTranslationDelta) and event.is_final
+    ]
+    audio = [
+        (event, at)
+        for event, at in event_times
+        if isinstance(event, ProviderAudioDelta)
+    ]
+    if (
+        len(final) != 1
+        or final[0].outcome is not UtteranceOutcome.COMPLETED
+        or len(asr) != 1
+        or not asr[0].strip()
+        or len(mt) != 1
+        or not mt[0].strip()
+        or not audio
+        or len(audio) > 1500
+    ):
+        raise ValueError("provider did not complete a text-and-audio utterance")
+    digest = hashlib.sha256()
+    nonzero = False
+    for frame, _ in audio:
+        if (
+            frame.sample_rate_hz != 24_000
+            or frame.channels != 1
+            or frame.sample_format is not SampleFormat.S16LE
+            or frame.frame_duration_ms != 20
+            or len(frame.pcm) != OUTPUT_FRAME_BYTES
+        ):
+            raise ValueError("provider emitted malformed product PCM")
+        digest.update(frame.pcm)
+        nonzero |= any(frame.pcm)
+    if not nonzero:
+        raise ValueError("provider emitted silent product PCM")
+    latencies = [
+        event for event, _ in event_times if isinstance(event, ProviderLatency)
+    ]
+    return {
+        "status": "completed",
+        "asr_text": asr[0],
+        "mt_text": mt[0],
+        "first_pcm_ms": round((audio[0][1] - started_ns) / 1_000_000, 2),
+        "pcm_duration_ms": len(audio) * 20,
+        "pcm_sha256": digest.hexdigest(),
+        "provider_latency": latencies[-1].model_dump(mode="json")
+        if latencies
+        else None,
+    }
+
+
+def pair_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    indexed: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    for row in rows:
+        key = (row["origin_id"], row["condition"])
+        arm = indexed.setdefault(key, {})
+        if row["backend"] in arm:
+            raise ValueError("paired diagnostic contains duplicate backend")
+        arm[row["backend"]] = row
+    pairs = []
+    for (origin_id, condition), arm in indexed.items():
+        left, right = arm.get("nllb"), arm.get("hy")
+        complete = (
+            left is not None
+            and right is not None
+            and left["status"] == right["status"] == "completed"
+        )
+        if complete and (
+            left.get("wav_sha256") != right.get("wav_sha256")
+            or left.get("voice_gender") != right.get("voice_gender")
+        ):
+            raise ValueError("paired diagnostic input identity differs")
+        pairs.append(
+            {
+                "origin_id": origin_id,
+                "condition": condition,
+                "status": "complete" if complete else "incomplete",
+                "mt_confounded_by_asr": (
+                    left["asr_text"] != right["asr_text"] if complete else None
+                ),
+            }
+        )
+    return pairs
+
+
+def _request(language: str) -> OpenProviderSession:
+    source, target, direction = (
+        (Language.RU, Language.EN, AudioDirection.MICROPHONE)
+        if language == "ru_ru"
+        else (Language.EN, Language.RU, AudioDirection.SPEAKER)
+    )
+    return OpenProviderSession(
+        session_id=uuid4(),
+        provider_id=ProviderId.LOCAL,
+        direction_id=direction,
+        source_language=source,
+        target_language=target,
+        mode=TranslationMode.QUALITY_FIRST,
+        requested_input_format=PcmFormat(
+            sample_rate_hz=16_000,
+            channels=1,
+            sample_format=SampleFormat.S16LE,
+            frame_duration_ms=100,
+        ),
+        requested_output_format=PcmFormat(
+            sample_rate_hz=24_000,
+            channels=1,
+            sample_format=SampleFormat.S16LE,
+            frame_duration_ms=20,
+        ),
+        voice_profile=VoiceProfile(
+            language=target,
+            gender=VoiceGender.FEMALE,
+            engine=VoiceEngine.PIPER,
+        ),
+        debug_text_enabled=True,
+    )
+
+
+async def _run_case(provider: Any, case: dict[str, Any]) -> dict[str, Any]:
+    request = _request(case["language"])
+    event_times: list[tuple[Any, int]] = []
+
+    async def publish(batch: tuple[Any, ...], commit: Any) -> None:
+        at = time.monotonic_ns()
+        event_times.extend((event, at) for event in batch)
+        commit()
+
+    reservation = provider.reserve_session(request, publish)
+    error: BaseException | None = None
+    try:
+        _, health = await reservation.open()
+        if health.state is ProviderState.UNAVAILABLE:
+            raise RuntimeError("product provider is unavailable")
+        pcm = case["pcm"]
+        frames = [
+            pcm[offset : offset + FRAME_BYTES].ljust(FRAME_BYTES, b"\0")
+            for offset in range(0, len(pcm), FRAME_BYTES)
+        ]
+        started_ns = time.monotonic_ns()
+        stream_id, utterance_id = uuid4(), uuid4()
+        for sequence, frame in enumerate(frames):
+            await provider.submit_frame(
+                ProviderInputFrame(
+                    session_id=request.session_id,
+                    direction_id=request.direction_id,
+                    stream_id=stream_id,
+                    utterance_id=utterance_id,
+                    sequence=sequence,
+                    capture_monotonic_ns=started_ns,
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    sample_format=SampleFormat.S16LE,
+                    frame_duration_ms=100,
+                    source_language=request.source_language,
+                    target_language=request.target_language,
+                    mode=request.mode,
+                    pcm=frame,
+                    end_of_utterance=sequence == len(frames) - 1,
+                )
+            )
+        await asyncio.wait_for(provider.wait_idle(), timeout=90)
+        try:
+            return evaluate_events(event_times, started_ns=started_ns)
+        except ValueError as observation_error:
+            observation_error.safe_provider_codes = [
+                event.code.value
+                for event, _ in event_times
+                if isinstance(event, PrivacySafeProviderError)
+            ]
+            observation_error.outcomes = [
+                event.outcome.value
+                for event, _ in event_times
+                if isinstance(event, ProviderUtteranceFinal)
+            ]
+            raise
+    except BaseException as caught:
+        error = caught
+        raise
+    finally:
+        try:
+            receipt = await finish_cleanup(
+                reservation.drain(CloseRequestReason.USER_STOP)
+            )
+            if receipt.delivery_error is not None:
+                raise RuntimeError("product session delivery failed")
+        except BaseException as cleanup_error:
+            if error is not None:
+                raise error from cleanup_error
+            raise
+
+
+def _gpu_process_mib(pid: int | None) -> int | None:
+    if pid is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) == 2 and parts[0] == str(pid):
+                return int(parts[1])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+def _resources(provider: Any) -> dict[str, Any]:
+    child = getattr(getattr(provider, "_translator", None), "_process", None)
+    child_pid = child.pid if child is not None and child.poll() is None else None
+    current_pid = os.getpid()
+    return {
+        "runner_rss_mib": round(
+            psutil.Process(current_pid).memory_info().rss / 1048576, 1
+        ),
+        "runner_gpu_mib": _gpu_process_mib(current_pid),
+        "mt_child_pid": child_pid,
+        "mt_child_gpu_mib": _gpu_process_mib(child_pid),
+    }
+
+
+async def _run_arm(
+    backend: str,
+    cases: list[dict[str, Any]],
+    journal: TextIO,
+    rows: list[dict[str, Any]],
+) -> bool:
+    previous_asr = os.environ.get("TRANSLATOR_ASR_MODEL_ID")
+    previous_mt = os.environ.get("TRANSLATOR_MT_MODEL_ID")
+    os.environ["TRANSLATOR_ASR_MODEL_ID"] = ASR_ID
+    os.environ["TRANSLATOR_MT_MODEL_ID"] = BACKENDS[backend]
+    provider = None
+    failed = False
+    next_index = 0
+    built_ns = time.monotonic_ns()
+    try:
+        provider = build_local_provider(
+            now_ns=time.monotonic_ns, manifest_path=ROOT / "models/manifest.json"
+        )
+        if (
+            provider._asr_model_id != ASR_ID
+            or provider._mt_model_id != BACKENDS[backend]
+        ):
+            raise RuntimeError("product model selection changed")
+        write_record(
+            journal,
+            {
+                "type": "arm_start",
+                "backend": backend,
+                "build_ms": round((time.monotonic_ns() - built_ns) / 1_000_000, 2),
+                "resources": _resources(provider),
+            },
+        )
+        for index, case in enumerate(cases):
+            next_index = index + 1
+            row = {
+                "type": "attempt",
+                "backend": backend,
+                "origin_id": case["origin_id"],
+                "condition": case["condition"],
+                "language": case["language"],
+                "speaker_id": case["speaker_id"],
+                "wav_sha256": case["wav_sha256"],
+                "voice_gender": "female",
+                "reference": case["reference"],
+                "turbo_frozen_text": case["turbo_text"],
+                "critical_labels": case["critical_labels"],
+            }
+            try:
+                row.update(await _run_case(provider, case))
+            except Exception as error:  # noqa: BLE001 - retain the failed attempt
+                row.update(status="failed", error_type=type(error).__name__)
+                if str(error) in SAFE_EVALUATION_REASONS:
+                    row["safe_failure_reason"] = str(error)
+                if isinstance(error, ValueError) and hasattr(
+                    error, "safe_provider_codes"
+                ):
+                    row["safe_provider_codes"] = error.safe_provider_codes
+                    row["observed_outcomes"] = error.outcomes
+                failed = True
+            row["resources"] = _resources(provider)
+            rows.append(row)
+            write_record(journal, row)
+            if failed:
+                for remaining in cases[index + 1 :]:
+                    write_record(
+                        journal,
+                        {
+                            "type": "not_run",
+                            "backend": backend,
+                            "origin_id": remaining["origin_id"],
+                            "condition": remaining["condition"],
+                        },
+                    )
+                break
+    except Exception as error:  # noqa: BLE001 - retain build and journal failures
+        failed = True
+        write_record(
+            journal,
+            {
+                "type": "arm_error",
+                "backend": backend,
+                "error_type": type(error).__name__,
+            },
+        )
+        for remaining in cases[next_index:]:
+            write_record(
+                journal,
+                {
+                    "type": "not_run",
+                    "backend": backend,
+                    "origin_id": remaining["origin_id"],
+                    "condition": remaining["condition"],
+                },
+            )
+    finally:
+        if previous_asr is None:
+            os.environ.pop("TRANSLATOR_ASR_MODEL_ID", None)
+        else:
+            os.environ["TRANSLATOR_ASR_MODEL_ID"] = previous_asr
+        if previous_mt is None:
+            os.environ.pop("TRANSLATOR_MT_MODEL_ID", None)
+        else:
+            os.environ["TRANSLATOR_MT_MODEL_ID"] = previous_mt
+        if provider is not None:
+            try:
+                await provider.shutdown()
+            except Exception as error:  # noqa: BLE001 - retain cleanup failure
+                failed = True
+                write_record(
+                    journal,
+                    {
+                        "type": "cleanup_error",
+                        "backend": backend,
+                        "error_type": type(error).__name__,
+                    },
+                )
+        write_record(
+            journal,
+            {
+                "type": "arm_end",
+                "backend": backend,
+                "status": "failed" if failed else "complete",
+                "post_shutdown_resources": _resources(provider)
+                if provider is not None
+                else None,
+            },
+        )
+    return not failed
+
+
+async def run(args: argparse.Namespace) -> dict[str, Any]:
+    cases = load_cases(args.manifest, args.screen, args.turbo)
+    model_cache_root = os.environ.get("TRANSLATOR_MODEL_CACHE_ROOT")
+    if model_cache_root is None or not Path(model_cache_root).is_dir():
+        raise ValueError("an explicit existing evaluation model cache is required")
+    if sha256(ROOT / "models/manifest.json") != PRODUCT_MANIFEST_SHA256:
+        raise ValueError("product model manifest identity changed")
+    if len(cases) != 24 or {case["language"] for case in cases} != {"ru_ru", "en_us"}:
+        raise ValueError("frozen product screen is not 24 bidirectional cases")
+    if args.case_id is not None:
+        selected = [case for case in cases if case["origin_id"] == args.case_id]
+        if len(selected) != 1 or args.smoke:
+            raise ValueError("diagnostic case must be one frozen origin")
+        cases = selected
+    elif args.smoke:
+        cases = [
+            next(case for case in cases if case["language"] == language)
+            for language in ("ru_ru", "en_us")
+        ]
+    order = ("nllb", "hy") if args.order == "nllb-hy" else ("hy", "nllb")
+    rows: list[dict[str, Any]] = []
+    with open_journal(args.output) as journal:
+        write_record(
+            journal,
+            {
+                "type": "header",
+                "schema": "translator.product-audio-pair.v1",
+                "scope": "accelerated saved audio; no capture, playback, physical first audible, or English listening",
+                "screen_sha256": SCREEN_SHA256,
+                "manifest_sha256": MANIFEST_SHA256,
+                "turbo_sha256": TURBO_SHA256,
+                "product_manifest_sha256": PRODUCT_MANIFEST_SHA256,
+                "model_cache_root": str(Path(model_cache_root).resolve()),
+                "hy_server_sha256": sha256(HY_SERVER) if HY_SERVER.is_file() else None,
+                "runner_sha256": sha256(Path(__file__)),
+                "runtime_sha256": {
+                    name: sha256(ROOT / name)
+                    for name in (
+                        "sidecar/translator_sidecar/local/runtime.py",
+                        "sidecar/translator_sidecar/local/local_provider.py",
+                        "sidecar/translator_sidecar/local/asr.py",
+                        "sidecar/translator_sidecar/local/mt.py",
+                        "sidecar/translator_sidecar/local/hy_mt.py",
+                        "sidecar/translator_sidecar/local/tts.py",
+                    )
+                },
+                "source_head": (
+                    await asyncio.to_thread(
+                        subprocess.check_output,
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=ROOT,
+                        text=True,
+                    )
+                ).strip(),
+                "input_count": len(cases),
+                "smoke": args.smoke,
+                "diagnostic_case_id": args.case_id,
+                "order": order,
+                "mode": "quality_first",
+                "voice_gender": "female",
+                "input": "mono s16le 16000 Hz 100 ms, submitted as fast as possible",
+                "output": "mono s16le 24000 Hz 20 ms",
+                "cpu_affinity": sorted(os.sched_getaffinity(0)),
+            },
+        )
+        all_complete = True
+        for arm_index, backend in enumerate(order):
+            if not await _run_arm(backend, cases, journal, rows):
+                all_complete = False
+                for remaining_backend in order[arm_index + 1 :]:
+                    for case in cases:
+                        write_record(
+                            journal,
+                            {
+                                "type": "not_run",
+                                "backend": remaining_backend,
+                                "origin_id": case["origin_id"],
+                                "condition": case["condition"],
+                            },
+                        )
+                break
+        pairs = pair_rows(rows)
+        complete = (
+            all_complete
+            and len(pairs) == len(cases)
+            and all(pair["status"] == "complete" for pair in pairs)
+        )
+        write_record(
+            journal,
+            {
+                "type": "terminal",
+                "status": "complete" if complete else "failed",
+                "attempts": len(rows),
+                "pairs": pairs,
+            },
+        )
+    return {
+        "status": "complete" if complete else "failed",
+        "attempts": len(rows),
+        "pairs": len(pairs),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--screen", type=Path, required=True)
+    parser.add_argument("--turbo", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument(
+        "--case-id", help="one frozen origin for failure diagnosis only"
+    )
+    parser.add_argument("--order", choices=("nllb-hy", "hy-nllb"), default="nllb-hy")
+    args = parser.parse_args()
+    try:
+        result = asyncio.run(run(args))
+    except Exception as error:  # noqa: BLE001 - stdout must remain text-free
+        print(json.dumps({"status": "failed", "error_type": type(error).__name__}))
+        return 2
+    print(json.dumps(result))
+    return 0 if result["status"] == "complete" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -7,7 +7,18 @@ The untouched comparison baseline is
 earlier `codex/stabilization-20260904` branch is retained as history, not the
 current implementation branch.
 
-## Current recovery checkpoint (2026-09-23)
+## Current product checkpoint (2026-09-27)
+
+The [paired saved-audio product diagnostic](product-audio-paired-20260927.md)
+ran Turbo→NLLB/Piper and Turbo→Hy/Piper on the same 24 frozen RU/EN recordings.
+Three full runs completed; one reverse-order run retained a Hy-side failure.
+Independent text review favored Hy's critical-fact fidelity, but identified
+remaining translation errors and unstable numerical ASR on one recording.
+The current fork is still not release-ready: the failure cause, Task 7's
+physical first-audible debt, acoustic admission and playback remain open.
+Production and the default model are unchanged.
+
+## Recovery baseline (2026-09-23)
 
 The last code commit is `b239b9a1be094a4f2c1f53132e49a664bbf020fa`
 (tree `bf37345df5cad1e0d35bebd71d14e6260198e1f4`). It passed the complete

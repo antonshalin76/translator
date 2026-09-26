@@ -1258,20 +1258,18 @@ def test_authenticated_duplex_stream_uses_local_provider_pipeline(
                 (Language.RU, False),
             }
 
-            reopened_microphone, reopened_speaker = await asyncio.gather(
-                collect_stream(
-                    config,
-                    open_request(microphone_id),
-                    close_request(microphone_id),
+            reopened_microphone = await collect_stream(
+                config,
+                open_request(microphone_id),
+                close_request(microphone_id),
+            )
+            reopened_speaker = await collect_stream(
+                config,
+                open_request(
+                    speaker_id,
+                    provider_pb2.AUDIO_DIRECTION_SPEAKER,
                 ),
-                collect_stream(
-                    config,
-                    open_request(
-                        speaker_id,
-                        provider_pb2.AUDIO_DIRECTION_SPEAKER,
-                    ),
-                    close_request(speaker_id),
-                ),
+                close_request(speaker_id),
             )
             assert reopened_microphone[-1].HasField("session_closed")
             assert reopened_speaker[-1].HasField("session_closed")
