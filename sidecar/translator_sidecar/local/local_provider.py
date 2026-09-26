@@ -54,6 +54,7 @@ from .inference_scheduler import (
     JobIdentity,
     SchedulerContext,
     SchedulerOverflow,
+    SchedulerRequestRejected,
     SchedulerStale,
     SchedulerUnavailable,
 )
@@ -804,6 +805,15 @@ class LocalProvider:
                 mt_ms=mt_ms,
                 tts_ms=tts_ms,
             )
+        except SchedulerRequestRejected:
+            await self._drop(
+                session,
+                utterance,
+                code=SafeErrorCode.PROVIDER_UNAVAILABLE,
+                asr_ms=asr_ms,
+                mt_ms=mt_ms,
+                tts_ms=tts_ms,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -935,7 +945,13 @@ class LocalProvider:
             if session.closed:
                 raise SchedulerStale(_PROVIDER_STALE_MESSAGE)
             async with self._model_lock:
-                if self._model_states[session.model_keys[kind]] is ModelState.FAILED:
+                if self._model_states[
+                    session.model_keys[kind]
+                ] is ModelState.FAILED or (
+                    kind is ModelKind.MT
+                    and bool(getattr(self._translator, "unavailable", False))
+                ):
+                    self._model_states[session.model_keys[kind]] = ModelState.FAILED
                     raise SchedulerUnavailable("shared model is unavailable")
 
     @asynccontextmanager
@@ -954,6 +970,7 @@ class LocalProvider:
                 yield
             except (
                 asyncio.CancelledError,
+                SchedulerRequestRejected,
                 SchedulerOverflow,
                 SchedulerStale,
             ):
@@ -1606,6 +1623,10 @@ class LocalProvider:
         session: _Session,
         kind: ModelKind,
     ) -> ModelState:
+        if kind is ModelKind.MT and bool(
+            getattr(self._translator, "unavailable", False)
+        ):
+            return ModelState.FAILED
         return self._model_states[session.model_keys[kind]]
 
     @staticmethod

@@ -1001,3 +1001,59 @@ def test_fetch_all_filters_reused_assets_in_mixed_manifest(
     assert installed == ((tmp_path / "cache" / "model.bin").resolve(),)
     assert len(transport.requests) == 1
     assert "owner/model" in transport.requests[0][0]
+
+
+def test_fetch_all_skips_optional_download_but_explicit_fetch_installs_it(
+    tmp_path: Path,
+) -> None:
+    path = _manifest(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["models"][0]["auto_fetch"] = False
+    path.write_text(json.dumps(document), encoding="utf-8")
+    manifest = load_manifest(path)
+    transport = FakeTransport(
+        [FakeResponse(status=200, headers={"Content-Length": "7"}, payload=b"payload")]
+    )
+    fetcher = ModelFetcher(
+        manifest, downloader=ModelDownloader(manifest), transport=transport
+    )
+
+    assert fetcher.fetch_all() == ()
+    assert transport.requests == []
+    assert (
+        fetcher.fetch("selected-mt", "model.bin")
+        == (tmp_path / "cache" / "model.bin").resolve()
+    )
+    assert len(transport.requests) == 1
+
+
+def test_default_download_space_reservation_excludes_optional_model(
+    tmp_path: Path,
+) -> None:
+    path = _manifest(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    optional = json.loads(json.dumps(document["models"][0]))
+    optional["id"] = "optional-mt"
+    optional["cache_path"] = str(tmp_path / "optional-cache")
+    optional["auto_fetch"] = False
+    document["models"].append(optional)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    manifest = load_manifest(path)
+    downloader = ModelDownloader(manifest)
+
+    assert manifest.planned_download_bytes == 7
+    assert downloader._remaining_download_bytes("selected-mt") == 7
+    assert downloader._remaining_download_bytes("optional-mt") == 14
+
+
+@pytest.mark.parametrize("invalid", [0, "false", None])
+def test_manifest_rejects_non_boolean_auto_fetch(
+    tmp_path: Path, invalid: object
+) -> None:
+    path = _manifest(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["models"][0]["auto_fetch"] = invalid
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="auto_fetch"):
+        load_manifest(path)

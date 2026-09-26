@@ -522,6 +522,7 @@ def test_repository_manifest_matches_approved_runtime_inventory(
         "piper-ru-dmitri-medium",
         "piper-en-ryan-medium",
         "nllb-200-distilled-600m-ct2-int8",
+        "hy-mt2-1.8b-gguf-q4-k-m",
         "piper-ru-irina-medium",
         "piper-en-hfc-female-medium",
     }
@@ -584,6 +585,14 @@ def test_repository_manifest_matches_approved_runtime_inventory(
             ("ru", "en"),
             str(model_root / "nllb-200-distilled-600M-ct2-int8"),
         ),
+        "hy-mt2-1.8b-gguf-q4-k-m": (
+            "mt",
+            "download",
+            "tencent/Hy-MT2-1.8B-GGUF",
+            "a0c709d9fac510f2c807aa3af52872340dc37a4a",
+            ("ru", "en"),
+            str(model_root / "hy-mt2-1.8b-gguf-q4-k-m"),
+        ),
         "piper-ru-irina-medium": (
             "tts",
             "download",
@@ -624,6 +633,7 @@ def test_repository_manifest_matches_approved_runtime_inventory(
             None,
             None,
         ),
+        "hy-mt2-1.8b-gguf-q4-k-m": ("Apache-2.0", None, None),
         "piper-ru-irina-medium": (
             "MIT",
             "Unknown",
@@ -644,6 +654,17 @@ def test_repository_manifest_matches_approved_runtime_inventory(
         for model in manifest.models.values()
     } == approved_licenses
     approved_downloads = {
+        (
+            "hy-mt2-1.8b-gguf-q4-k-m",
+            "tencent/Hy-MT2-1.8B-GGUF",
+            "a0c709d9fac510f2c807aa3af52872340dc37a4a",
+            str(model_root / "hy-mt2-1.8b-gguf-q4-k-m"),
+        ): {
+            "Hy-MT2-1.8B-Q4_K_M.gguf": (
+                1_133_080_448,
+                "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699",
+            ),
+        },
         (
             "nllb-200-distilled-600m-ct2-int8",
             "mijuanlo/nllb-200-distilled-600M-ct2-int8",
@@ -714,6 +735,13 @@ def test_repository_manifest_matches_approved_runtime_inventory(
 
     assert observed_downloads == approved_downloads
     approved_source_urls = {
+        (
+            "hy-mt2-1.8b-gguf-q4-k-m",
+            "Hy-MT2-1.8B-Q4_K_M.gguf",
+        ): (
+            "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/"
+            "a0c709d9fac510f2c807aa3af52872340dc37a4a/Hy-MT2-1.8B-Q4_K_M.gguf"
+        ),
         (
             "nllb-200-distilled-600m-ct2-int8",
             "config.json",
@@ -789,6 +817,10 @@ def test_repository_manifest_matches_approved_runtime_inventory(
     }
     assert observed_source_urls == approved_source_urls
     approved_source_paths = {
+        (
+            "hy-mt2-1.8b-gguf-q4-k-m",
+            "Hy-MT2-1.8B-Q4_K_M.gguf",
+        ): "Hy-MT2-1.8B-Q4_K_M.gguf",
         (
             "nllb-200-distilled-600m-ct2-int8",
             "config.json",
@@ -1229,6 +1261,7 @@ def test_unapproved_primary_license_variants_fail_closed(
     ("license_id", "dataset_license"),
     [
         ("MIT", None),
+        ("Apache-2.0", None),
         ("MIT", "CC0"),
         ("MIT", "CC-BY-NC-SA-4.0"),
         ("CC-BY-NC-4.0", None),

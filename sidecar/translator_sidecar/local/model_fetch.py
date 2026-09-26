@@ -154,7 +154,7 @@ class ModelFetcher:
         resolved: dict[tuple[str, str], Path] = {}
         missing: list[tuple[str, ModelFile]] = []
         for model in self.manifest.models.values():
-            if model.acquisition != "download":
+            if model.acquisition != "download" or not model.auto_fetch:
                 continue
             for model_file in model.files:
                 identity = (model.id, model_file.path)
@@ -174,7 +174,7 @@ class ModelFetcher:
         return tuple(
             resolved[(model.id, model_file.path)]
             for model in self.manifest.models.values()
-            if model.acquisition == "download"
+            if model.acquisition == "download" and model.auto_fetch
             for model_file in model.files
         )
 

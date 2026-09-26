@@ -27,6 +27,7 @@ _ROLES = {"asr", "mt", "tts"}
 _ACQUISITIONS = {"reuse", "download"}
 _APPROVED_LICENSES = {
     "MIT",
+    "Apache-2.0",
     "CC0",
     "CC-BY-NC-4.0",
     "CC-BY-NC-SA-4.0",
@@ -120,6 +121,7 @@ class ModelEntry:
     cache_path: Path
     acquisition: str
     files: tuple[ModelFile, ...]
+    auto_fetch: bool = True
 
 
 class RuntimeFileOps:
@@ -668,7 +670,7 @@ class ModelDownloader:
                 raise ManifestError("free space probe failed") from error
             DownloadLedger.check_free_space(
                 free_bytes=free_bytes,
-                remaining_download_bytes=self._remaining_download_bytes(),
+                remaining_download_bytes=self._remaining_download_bytes(model.id),
                 floor_bytes=self.manifest.policy.post_download_free_floor_bytes,
             )
 
@@ -759,10 +761,12 @@ class ModelDownloader:
             self.filesystem.close_directory(target_fd)
             self.filesystem.close_directory(staging_fd)
 
-    def _remaining_download_bytes(self) -> int:
+    def _remaining_download_bytes(self, selected_model_id: str) -> int:
         total = 0
         for model in self.manifest.models.values():
-            if model.acquisition != "download":
+            if model.acquisition != "download" or not (
+                model.auto_fetch or model.id == selected_model_id
+            ):
                 continue
             for model_file in model.files:
                 identity = (model.id, model_file.path)
@@ -800,7 +804,7 @@ def load_manifest(path: Path) -> ModelManifest:
     planned = sum(
         model_file.size_bytes
         for model in models.values()
-        if model.acquisition == "download"
+        if model.acquisition == "download" and model.auto_fetch
         for model_file in model.files
     )
     if planned > policy.download_budget_bytes:
@@ -942,6 +946,11 @@ def _parse_model(
         raise ManifestError("model id is invalid")
     if role not in _ROLES or acquisition not in _ACQUISITIONS:
         raise ManifestError("model role or acquisition is invalid")
+    auto_fetch = raw.get("auto_fetch", True)
+    if not isinstance(auto_fetch, bool):
+        raise ManifestError("model auto_fetch is invalid")
+    if acquisition != "download" and not auto_fetch:
+        raise ManifestError("only downloadable models may disable auto_fetch")
     if (
         not isinstance(languages, list)
         or not languages
@@ -962,6 +971,7 @@ def _parse_model(
         cache_path=cache_path,
         acquisition=acquisition,
         files=files,
+        auto_fetch=auto_fetch,
     )
     _validate_license_waiver(model, policy)
     return model

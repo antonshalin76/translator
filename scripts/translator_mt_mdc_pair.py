@@ -12,9 +12,10 @@ from pathlib import Path
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 import psutil
+from translator_sidecar.local.hy_mt import HyMtTranslator
 from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.local.model_manifest import load_manifest
-from translator_sidecar.local.mt import NllbTranslator
+from translator_sidecar.local.mt import LocalTranslationRequestError, NllbTranslator
 from translator_sidecar.provider_contract import Language, TranslationMode
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,7 +114,9 @@ def main() -> None:
     parser.add_argument("--screen-sha256", default=SCREEN_SHA256)
     parser.add_argument("--case-count", type=int, default=12)
     parser.add_argument("--turbo", type=Path, required=True)
-    parser.add_argument("--backend", choices=("nllb", "hy_mt2"), required=True)
+    parser.add_argument(
+        "--backend", choices=("nllb", "hy_mt2", "hy_product"), required=True
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--hy-model", type=Path)
     parser.add_argument("--hy-server-pid", type=int)
@@ -122,8 +125,8 @@ def main() -> None:
 
     if args.hy_gpu_layers < 0:
         raise ValueError("Hy GPU layers must be nonnegative")
-    if args.backend == "nllb" and args.hy_gpu_layers != 0:
-        raise ValueError("Hy GPU layers are not valid for NLLB")
+    if args.backend in {"nllb", "hy_product"} and args.hy_gpu_layers != 0:
+        raise ValueError("external Hy GPU layers are not valid for this backend")
     if (
         not args.output.is_absolute()
         or args.output.resolve().is_relative_to(ROOT)
@@ -188,13 +191,17 @@ def main() -> None:
 
     manifest_path = ROOT / "models/manifest.json"
     translator = None
-    if args.backend == "nllb":
-        translator = NllbTranslator.load(
-            VerifiedModelSource(
-                load_manifest(manifest_path), "nllb-200-distilled-600m-ct2-int8"
-            ),
-            device="cpu",
-        )
+    if args.backend in {"nllb", "hy_product"}:
+        manifest = load_manifest(manifest_path)
+        if args.backend == "nllb":
+            translator = NllbTranslator.load(
+                VerifiedModelSource(manifest, "nllb-200-distilled-600m-ct2-int8"),
+                device="cpu",
+            )
+        else:
+            translator = HyMtTranslator.load(
+                VerifiedModelSource(manifest, "hy-mt2-1.8b-gguf-q4-k-m")
+            )
     rows = []
     try:
         for source, warmup in (
@@ -215,17 +222,37 @@ def main() -> None:
             source = Language.RU if case["language"] == "ru_ru" else Language.EN
             target = Language.EN if source is Language.RU else Language.RU
             started = time.monotonic_ns()
-            if translator is None:
-                output = hy_translate(case["transcript"], target, pid, server_started)
-                finish_reason = "stop"
-            else:
-                output = translator.translate(
-                    case["transcript"],
-                    source_language=source,
-                    target_language=target,
-                    mode=TranslationMode.QUALITY_FIRST,
+            try:
+                if translator is None:
+                    output = hy_translate(
+                        case["transcript"], target, pid, server_started
+                    )
+                    finish_reason = "stop"
+                else:
+                    output = translator.translate(
+                        case["transcript"],
+                        source_language=source,
+                        target_language=target,
+                        mode=TranslationMode.QUALITY_FIRST,
+                    )
+                    finish_reason = None
+            except Exception as error:
+                print(
+                    json.dumps(
+                        {
+                            "backend": args.backend,
+                            "status": "failed",
+                            "origin_id": case["origin_id"],
+                            "condition": case["condition"],
+                            "error_type": type(error).__name__,
+                            "reason": str(error)
+                            if isinstance(error, LocalTranslationRequestError)
+                            else None,
+                        }
+                    ),
+                    flush=True,
                 )
-                finish_reason = None
+                raise
             rows.append(
                 {
                     "origin_id": case["origin_id"],
@@ -254,16 +281,19 @@ def main() -> None:
             name: sha256(ROOT / name)
             for name in (
                 "sidecar/translator_sidecar/local/mt.py",
+                "sidecar/translator_sidecar/local/hy_mt.py",
                 "sidecar/translator_sidecar/local/model_lease.py",
                 "sidecar/translator_sidecar/local/model_manifest.py",
                 "sidecar/translator_sidecar/provider_contract.py",
             )
         },
         "runner_cpu_affinity": sorted(os.sched_getaffinity(0)),
-        "hy_gguf_sha256": HY_GGUF_SHA256 if server_started is not None else None,
+        "hy_gguf_sha256": HY_GGUF_SHA256
+        if server_started is not None or args.backend == "hy_product"
+        else None,
         "hy_server_pid": pid if server_started is not None else None,
         "hy_server_binary_sha256": sha256(HY_SERVER)
-        if server_started is not None
+        if server_started is not None or args.backend == "hy_product"
         else None,
         "hy_server_command": command,
         "hy_server_cpu_affinity": server_affinity,

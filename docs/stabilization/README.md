@@ -75,8 +75,11 @@ intervals include zero and its sentences are not product-domain dialogue.
 The [prospective Turbo-text MT comparison](mt-mdc-pair-20260926.md) uses 24 new
 clean MDC origins: Hy-MT2 retained more critical facts than NLLB on the saved
 ASR text, and GPU offload reduced warm MT latency on this machine. One garbled
-ASR case still fails, the output path is not integrated, and this is not a
-live-audio or release result.
+ASR case still fails; this is not a live-audio or release result.
+The [opt-in Hy-MT2 product adapter](hy-mt2-product-20260927.md) now runs through
+the local provider and Piper on two fixed recordings, with request-scoped
+failure isolation and a 24-text regression against the earlier GPU run. It is
+not the default model or a release decision.
 The [RU/EN voice pilot](tts-voice-pilot-20260924.md) compares pinned Piper and
 Supertonic 3 on 16 WAVs. Piper remains the product baseline: Supertonic's
 nonstreaming CPU path is slower to first PCM and critical-number pronunciation

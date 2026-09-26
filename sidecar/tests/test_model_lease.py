@@ -84,6 +84,29 @@ def test_snapshot_remains_verified_after_cache_mutation(tmp_path: Path, mutation
                 os.write(writer.fileno(), b"x")
 
 
+def test_snapshot_descriptor_can_be_inherited_without_unsealing(tmp_path: Path) -> None:
+    source = model_source(tmp_path, {"model.bin": b"approved"})
+    with source.acquire() as lease:
+        descriptor = lease.descriptor("model.bin")
+        assert lease.path("model.bin") == f"/proc/self/fd/{descriptor}"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_bytes().decode())",
+                lease.path("model.bin"),
+            ],
+            pass_fds=(descriptor,),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.strip() == "approved"
+        assert fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & fcntl.F_SEAL_WRITE
+    with pytest.raises(ManifestError):
+        lease.descriptor("model.bin")
+
+
 def test_sealed_directory_ignores_cache_replacement_and_closes_with_lease(
     tmp_path: Path,
 ) -> None:

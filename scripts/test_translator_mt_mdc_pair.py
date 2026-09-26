@@ -153,6 +153,38 @@ class MtMdcPairTests(unittest.TestCase):
                 self.assertEqual(report["hy_server_command"], self.command(str(layers)))
                 self.assertEqual(report["hy_server_cpu_affinity"], [0, 1])
 
+    def test_product_backend_owns_adapter_without_external_listener(self) -> None:
+        output = self.root / "product.json"
+        adapter = SimpleNamespace(
+            translate=lambda *_args, **_kwargs: "translated",
+            close=lambda: None,
+        )
+        argv = [
+            "runner",
+            "--screen",
+            str(self.screen),
+            "--screen-sha256",
+            pair.sha256(self.screen),
+            "--turbo",
+            str(self.turbo),
+            "--backend",
+            "hy_product",
+            "--output",
+            str(output),
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(pair.HyMtTranslator, "load", return_value=adapter) as load,
+            patch.object(pair.OPENER, "open") as external_http,
+        ):
+            pair.main()
+        self.assertEqual(load.call_count, 1)
+        external_http.assert_not_called()
+        report = json.loads(output.read_text())
+        self.assertEqual(report["backend"], "hy_product")
+        self.assertEqual(len(report["cases"]), 12)
+        self.assertEqual(report["hy_gguf_sha256"], pair.HY_GGUF_SHA256)
+
     def test_mismatched_ambiguous_or_missing_command_rejects_before_http(self) -> None:
         bad = [
             (self.command("0"), "99"),

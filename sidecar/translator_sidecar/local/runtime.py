@@ -6,6 +6,7 @@ import gc
 import os
 from collections.abc import Callable
 from contextlib import ExitStack
+from ctypes import CDLL, POINTER, byref, c_int
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from translator_sidecar.local.asr import (
     AsrUnavailable,
 )
 from translator_sidecar.local.cuda_runtime import configure_cuda_runtime
+from translator_sidecar.local.hy_mt import HyMtTranslator
 from translator_sidecar.local.inference_scheduler import InferenceScheduler
 from translator_sidecar.local.local_provider import LocalProvider
 from translator_sidecar.local.model_lease import VerifiedModelSource
@@ -45,6 +47,7 @@ _ASR_MODELS = {
 }
 _DEFAULT_ASR_MODEL_ID = "faster-whisper-small"
 _MT_MODEL_ID = "nllb-200-distilled-600m-ct2-int8"
+_HY_MT_MODEL_ID = "hy-mt2-1.8b-gguf-q4-k-m"
 _TTS_MODEL_ID = "piper-medium"
 _MT_SMOKE_CASES = (
     ("Проверка перевода.", Language.RU, Language.EN),
@@ -117,6 +120,23 @@ def _cuda_available() -> bool:
         return False
 
 
+def _hy_cuda_available() -> bool:
+    try:
+        driver = CDLL("libcuda.so.1")
+        driver.cuInit.argtypes = [c_int]
+        driver.cuInit.restype = c_int
+        driver.cuDeviceGetCount.argtypes = [POINTER(c_int)]
+        driver.cuDeviceGetCount.restype = c_int
+        count = c_int()
+        return (
+            driver.cuInit(0) == 0
+            and driver.cuDeviceGetCount(byref(count)) == 0
+            and count.value > 0
+        )
+    except (AttributeError, OSError):
+        return False
+
+
 def _default_manifest_path() -> Path:
     return Path(__file__).resolve().parents[3] / "models" / "manifest.json"
 
@@ -158,6 +178,7 @@ def _unavailable_provider(
     *,
     now_ns: Callable[[], int],
     asr_model_id: str,
+    mt_model_id: str = _MT_MODEL_ID,
     failed_components: dict[str, Any] | None = None,
 ) -> LocalProvider:
     failed = failed_components or {}
@@ -168,7 +189,7 @@ def _unavailable_provider(
         scheduler=InferenceScheduler(),
         now_ns=now_ns,
         asr_model_id=asr_model_id,
-        mt_model_id=_MT_MODEL_ID,
+        mt_model_id=mt_model_id,
         tts_model_id=_TTS_MODEL_ID,
         mt_device=ComputeDevice.CPU,
     )
@@ -191,9 +212,11 @@ def build_unavailable_local_provider(
         "TRANSLATOR_ASR_MODEL_ID",
         _DEFAULT_ASR_MODEL_ID,
     )
+    selected_mt_id = os.environ.get("TRANSLATOR_MT_MODEL_ID", _MT_MODEL_ID)
     return _unavailable_provider(
         now_ns=now_ns,
         asr_model_id=selected_asr_id,
+        mt_model_id=selected_mt_id,
     )
 
 
@@ -208,12 +231,17 @@ def build_local_provider(
         "TRANSLATOR_ASR_MODEL_ID",
         _DEFAULT_ASR_MODEL_ID,
     )
+    selected_mt_id = os.environ.get("TRANSLATOR_MT_MODEL_ID", _MT_MODEL_ID)
     if os.environ.get("TRANSLATOR_LOCAL_RUNTIME_MODE") == "unavailable":
         return build_unavailable_local_provider(now_ns=now_ns)
-    if selected_asr_id not in _ASR_MODELS:
+    if selected_asr_id not in _ASR_MODELS or selected_mt_id not in {
+        _MT_MODEL_ID,
+        _HY_MT_MODEL_ID,
+    }:
         return _unavailable_provider(
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
+            mt_model_id=selected_mt_id,
         )
 
     path = manifest_path or _default_manifest_path()
@@ -226,7 +254,7 @@ def build_local_provider(
                 if selected_asr_id != _DEFAULT_ASR_MODEL_ID
                 else ()
             ),
-            _MT_MODEL_ID,
+            selected_mt_id,
             *_VOICE_MODELS.values(),
         )
         for model_id in required_model_ids:
@@ -244,28 +272,38 @@ def build_local_provider(
         return _unavailable_provider(
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
+            mt_model_id=selected_mt_id,
         )
 
     asr_device = "cuda" if _cuda_available() else "cpu"
-    mt_device = asr_device
-    try:
-        translator = _load_verified_translator(
-            model_sources[_MT_MODEL_ID],
-            device=mt_device,
-        )
-    except LocalTranslationCleanupPending as error:
-        return _unavailable_provider(
-            now_ns=now_ns,
-            asr_model_id=selected_asr_id,
-            failed_components={"translator": error.translator},
-        )
-    except Exception:
+    mt_device = (
+        ("cuda" if _hy_cuda_available() else "cpu")
+        if selected_mt_id == _HY_MT_MODEL_ID
+        else asr_device
+    )
+    if selected_mt_id == _HY_MT_MODEL_ID:
         if mt_device != "cuda":
             return _unavailable_provider(
                 now_ns=now_ns,
                 asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
             )
-        mt_device = "cpu"
+        try:
+            translator = HyMtTranslator.load(model_sources[selected_mt_id])
+        except LocalTranslationCleanupPending as error:
+            return _unavailable_provider(
+                now_ns=now_ns,
+                asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
+                failed_components={"translator": error.translator},
+            )
+        except Exception:
+            return _unavailable_provider(
+                now_ns=now_ns,
+                asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
+            )
+    else:
         try:
             translator = _load_verified_translator(
                 model_sources[_MT_MODEL_ID],
@@ -275,13 +313,35 @@ def build_local_provider(
             return _unavailable_provider(
                 now_ns=now_ns,
                 asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
                 failed_components={"translator": error.translator},
             )
         except Exception:
-            return _unavailable_provider(
-                now_ns=now_ns,
-                asr_model_id=selected_asr_id,
-            )
+            if mt_device != "cuda":
+                return _unavailable_provider(
+                    now_ns=now_ns,
+                    asr_model_id=selected_asr_id,
+                    mt_model_id=selected_mt_id,
+                )
+            mt_device = "cpu"
+            try:
+                translator = _load_verified_translator(
+                    model_sources[_MT_MODEL_ID],
+                    device=mt_device,
+                )
+            except LocalTranslationCleanupPending as error:
+                return _unavailable_provider(
+                    now_ns=now_ns,
+                    asr_model_id=selected_asr_id,
+                    mt_model_id=selected_mt_id,
+                    failed_components={"translator": error.translator},
+                )
+            except Exception:
+                return _unavailable_provider(
+                    now_ns=now_ns,
+                    asr_model_id=selected_asr_id,
+                    mt_model_id=selected_mt_id,
+                )
 
     resources = ExitStack()
     failed: dict[str, Any] = {}
@@ -323,7 +383,7 @@ def build_local_provider(
             scheduler=InferenceScheduler(),
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
-            mt_model_id=_MT_MODEL_ID,
+            mt_model_id=selected_mt_id,
             tts_model_id=_TTS_MODEL_ID,
             mt_device=ComputeDevice(mt_device),
         )
@@ -334,6 +394,7 @@ def build_local_provider(
         return _unavailable_provider(
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
+            mt_model_id=selected_mt_id,
             failed_components=failed,
         )
     finally:

@@ -35,6 +35,14 @@ class SchedulerUnavailable(RuntimeError):
     """Native inference failed without exposing private payloads."""
 
 
+class RequestScopedInferenceError(RuntimeError):
+    """A native request failed without invalidating its resident model."""
+
+
+class SchedulerRequestRejected(RuntimeError):
+    """Sanitized request-scoped native failure."""
+
+
 @dataclass(frozen=True, slots=True)
 class JobIdentity:
     session_id: UUID
@@ -63,6 +71,7 @@ class _Job:
 class _NativeOutcome:
     ok: bool
     value: Any = None
+    request_rejected: bool = False
 
 
 class SchedulerContext:
@@ -102,6 +111,8 @@ class SchedulerContext:
         )
         self.ensure_current()
         if not outcome.ok:
+            if outcome.request_rejected:
+                raise SchedulerRequestRejected("native request was rejected")
             raise SchedulerUnavailable("native inference is unavailable")
         return outcome.value
 
@@ -160,6 +171,8 @@ class SchedulerContext:
     ) -> _NativeOutcome:
         try:
             return _NativeOutcome(ok=True, value=operation())
+        except RequestScopedInferenceError:
+            return _NativeOutcome(ok=False, request_rejected=True)
         except Exception:
             return _NativeOutcome(ok=False)
 
@@ -456,6 +469,12 @@ class InferenceScheduler:
         except SchedulerStale:
             self._terminalize(job.identity)
             self._set_stale(job.future)
+        except SchedulerRequestRejected:
+            self._terminalize(job.identity)
+            if not job.future.done():
+                job.future.set_exception(
+                    SchedulerRequestRejected("scheduler request rejected")
+                )
         except (SchedulerUnavailable, SchedulerOverflow):
             self._terminalize(job.identity)
             if not job.future.done():

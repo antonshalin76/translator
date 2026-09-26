@@ -20,6 +20,7 @@ from translator_sidecar.local.local_provider import (
     LocalProviderProtocolError,
     LocalProviderPublicationError,
 )
+from translator_sidecar.local.mt import LocalTranslationRequestError
 from translator_sidecar.local.tts import TtsOutputLimit
 from translator_sidecar.provider_contract import (
     AudioDirection,
@@ -1622,6 +1623,52 @@ def test_runtime_model_failure_has_partial_latency_and_no_private_leak(
     run(scenario())
 
 
+def test_request_scoped_mt_failure_keeps_model_ready_for_next_utterance() -> None:
+    async def scenario() -> None:
+        translator = FakeTranslator(
+            failure=LocalTranslationRequestError("private incomplete translation")
+        )
+        provider, _, _, tts = build_provider(translator=translator)
+        session = request(AudioDirection.MICROPHONE)
+        collector = Collector()
+        try:
+            await provider.reserve_session(session, collector.publish).open()
+            await provider.submit_frame(
+                input_frame(
+                    session, sequence=0, utterance_id=uuid4(), end_of_utterance=True
+                )
+            )
+            await provider.wait_idle()
+            failed = await provider.health(session.session_id)
+            assert failed.state is ProviderState.READY
+            assert failed.models[1].state is ModelState.READY
+            assert tts.calls == []
+            assert any(
+                isinstance(event, ProviderUtteranceFinal)
+                and event.outcome is UtteranceOutcome.DROPPED
+                for event in collector.events
+            )
+            assert "private incomplete translation" not in repr(collector.events)
+
+            translator.failure = None
+            await provider.submit_frame(
+                input_frame(
+                    session, sequence=1, utterance_id=uuid4(), end_of_utterance=True
+                )
+            )
+            await provider.wait_idle()
+            assert any(
+                isinstance(event, ProviderUtteranceFinal)
+                and event.outcome is UtteranceOutcome.COMPLETED
+                for event in collector.events
+            )
+            assert len(tts.calls) == 1
+        finally:
+            await provider.shutdown()
+
+    run(scenario())
+
+
 @pytest.mark.parametrize(
     (
         "asr_device",
@@ -1724,6 +1771,26 @@ def test_health_has_separate_models_and_runtime_state(
                 assert health.safe_error is None
             assert "final source" not in repr(health)
             assert "final translation" not in repr(health)
+        finally:
+            await provider.shutdown()
+
+    run(scenario())
+
+
+def test_health_reflects_translator_process_death_after_open() -> None:
+    async def scenario() -> None:
+        translator = FakeTranslator()
+        provider, _, _, _ = build_provider(translator=translator)
+        session = request(AudioDirection.MICROPHONE)
+        try:
+            _, initial = await provider.reserve_session(
+                session, Collector().publish
+            ).open()
+            assert initial.state is ProviderState.READY
+            translator.unavailable = True
+            after_death = await provider.health(session.session_id)
+            assert after_death.state is ProviderState.UNAVAILABLE
+            assert after_death.models[1].state is ModelState.FAILED
         finally:
             await provider.shutdown()
 

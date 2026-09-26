@@ -12,8 +12,10 @@ import pytest
 
 from translator_sidecar.local.inference_scheduler import (
     InferenceScheduler,
+    RequestScopedInferenceError,
     SchedulerContext,
     SchedulerOverflow,
+    SchedulerRequestRejected,
     SchedulerStale,
     SchedulerUnavailable,
 )
@@ -645,6 +647,34 @@ def test_scheduler_sanitizes_native_failure_and_logs(
             assert scheduler.tracked_utterance_count(session_id) == 0
             with pytest.raises(SchedulerStale, match="stale"):
                 scheduler.submit(identity, work)
+        finally:
+            await scheduler.shutdown()
+
+    run(scenario())
+
+
+def test_request_scoped_native_failure_does_not_poison_next_job() -> None:
+    async def scenario() -> None:
+        scheduler = InferenceScheduler()
+        session_id = uuid4()
+        scheduler.open_session(session_id, AudioDirection.MICROPHONE)
+
+        def rejected() -> str:
+            raise RequestScopedInferenceError("private request marker")
+
+        try:
+            identity = scheduler.open_utterance(session_id, uuid4())
+            future = scheduler.submit(
+                identity, lambda context: context.run_gpu(rejected)
+            )
+            with pytest.raises(SchedulerRequestRejected, match="rejected") as raised:
+                await future
+            assert "private request marker" not in repr(raised.value)
+            next_identity = scheduler.open_utterance(session_id, uuid4())
+            next_future = scheduler.submit(
+                next_identity, lambda context: context.run_gpu(lambda: "ok")
+            )
+            assert await next_future == "ok"
         finally:
             await scheduler.shutdown()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -64,6 +65,90 @@ class FakeManifest:
                 "piper-en-hfc-female-medium",
             )
         }
+
+
+def test_selected_hy_missing_manifest_reports_selected_backend_as_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRANSLATOR_MT_MODEL_ID", "hy-mt2-1.8b-gguf-q4-k-m")
+    monkeypatch.setattr(
+        runtime_module, "load_manifest", lambda *_args: FakeManifest(tmp_path)
+    )
+
+    provider = build_local_provider(now_ns=lambda: 0, manifest_path=tmp_path)
+
+    assert provider._mt_model_id == "hy-mt2-1.8b-gguf-q4-k-m"
+    assert provider._translator.unavailable
+
+
+@pytest.mark.parametrize(
+    ("cuda_available", "hy_cuda_available"),
+    [(True, True), (False, False), (False, True), (True, False)],
+)
+def test_selected_hy_reports_own_identity_and_never_uses_nllb_or_cpu(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cuda_available: bool,
+    hy_cuda_available: bool,
+) -> None:
+    model_id = "hy-mt2-1.8b-gguf-q4-k-m"
+    monkeypatch.setenv("TRANSLATOR_MT_MODEL_ID", model_id)
+    manifest = FakeManifest(tmp_path)
+    manifest.models[model_id] = FakeModel(
+        tmp_path / model_id, (FakeFile("model.gguf"),)
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeHy(Closable):
+        unavailable = False
+
+        @classmethod
+        def load(cls, source):
+            captured["hy_source"] = source
+            return cls()
+
+        def translate(self, *_args, **_kwargs):
+            return "translated"
+
+    class FakeAsr(Closable):
+        def __init__(self, **_kwargs):
+            pass
+
+        def prepare(self):
+            pass
+
+    class FakeRegistry(Closable):
+        def __init__(self, _paths):
+            pass
+
+        def prepare(self):
+            pass
+
+    class FakeTts(Closable):
+        def __init__(self, _registry):
+            pass
+
+    monkeypatch.setattr(runtime_module, "load_manifest", lambda *_a: manifest)
+    monkeypatch.setattr(runtime_module, "_cuda_available", lambda: cuda_available)
+    monkeypatch.setattr(runtime_module, "_hy_cuda_available", lambda: hy_cuda_available)
+    monkeypatch.setattr(runtime_module, "HyMtTranslator", FakeHy)
+    monkeypatch.setattr(
+        runtime_module,
+        "NllbTranslator",
+        type("NoNllb", (), {"load": lambda *_a, **_kw: pytest.fail("NLLB loaded")}),
+    )
+    monkeypatch.setattr(runtime_module, "AsrModelManager", FakeAsr)
+    monkeypatch.setattr(runtime_module, "PiperVoiceRegistry", FakeRegistry)
+    monkeypatch.setattr(runtime_module, "PiperTts", FakeTts)
+
+    provider = build_local_provider(now_ns=lambda: 0, manifest_path=tmp_path)
+
+    assert provider._mt_model_id == model_id
+    assert provider._mt_device is (
+        ComputeDevice.CUDA if hy_cuda_available else ComputeDevice.CPU
+    )
+    assert provider._translator.unavailable is (not hy_cuda_available)
+    assert ("hy_source" in captured) is hy_cuda_available
 
 
 class Closable:

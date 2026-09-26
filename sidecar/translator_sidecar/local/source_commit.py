@@ -11,6 +11,8 @@ from enum import Enum
 from threading import Lock
 from uuid import UUID
 
+from .inference_scheduler import SchedulerRequestRejected
+
 
 class SourceCommitProtocolError(RuntimeError):
     """The caller attempted an invalid source-commit transition."""
@@ -119,6 +121,9 @@ class SourceCommit:
 
         try:
             translation = (await translate(source_text)).strip()
+        except SchedulerRequestRejected:
+            self._fail_if_in_progress(_State.FINALIZING)
+            raise SchedulerRequestRejected("source commit request rejected") from None
         except Exception:
             self._fail_if_in_progress(_State.FINALIZING)
             raise SourceCommitUnavailable(_SOURCE_COMMIT_UNAVAILABLE_MESSAGE) from None

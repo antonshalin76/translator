@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from translator_sidecar.local.inference_scheduler import SchedulerRequestRejected
 from translator_sidecar.local.source_commit import (
     SourceCommit,
     SourceCommitProtocolError,
@@ -329,6 +330,26 @@ def test_async_callbacks_are_owned_exactly_once_by_commit_boundary() -> None:
         ):
             async for _frame in commit.stream_once(synthesize):
                 pass
+
+    asyncio.run(scenario())
+
+
+def test_async_commit_preserves_sanitized_request_rejection_and_fails_closed() -> None:
+    async def scenario() -> None:
+        commit = SourceCommit(uuid4())
+
+        async def rejected(_source: str) -> str:
+            raise SchedulerRequestRejected("private request marker")
+
+        with pytest.raises(SchedulerRequestRejected, match="rejected") as raised:
+            await commit.finalize_async(
+                "private source", end_of_utterance=True, translate=rejected
+            )
+        assert "private request marker" not in repr(raised.value)
+        with pytest.raises(SourceCommitProtocolError, match="failed"):
+            await commit.finalize_async(
+                "private source", end_of_utterance=True, translate=rejected
+            )
 
     asyncio.run(scenario())
 

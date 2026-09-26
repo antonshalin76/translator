@@ -92,13 +92,16 @@ class VerifiedModelLease:
         return self.path(next(iter(self._snapshots)))
 
     def path(self, name: str) -> str:
+        return f"/proc/self/fd/{self.descriptor(name)}"
+
+    def descriptor(self, name: str) -> int:
         try:
             descriptor = self._snapshots[name]
         except KeyError:
             raise ManifestError(
                 "model lease is closed or file is not declared"
             ) from None
-        return f"/proc/self/fd/{descriptor}"
+        return descriptor
 
     def files(self) -> dict[str, BinaryIO]:
         if not self._snapshots:

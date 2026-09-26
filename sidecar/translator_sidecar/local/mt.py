@@ -12,6 +12,7 @@ import pysbd
 
 from translator_sidecar.provider_contract import Language, TranslationMode
 
+from .inference_scheduler import RequestScopedInferenceError
 from .model_lease import VerifiedModelSource
 
 _LANGUAGE_TOKENS = {
@@ -42,6 +43,10 @@ _EN_DOCUMENT_ENTITY_RE = re.compile(
 
 class LocalTranslationError(RuntimeError):
     """The local translation request failed without exposing spoken text."""
+
+
+class LocalTranslationRequestError(LocalTranslationError, RequestScopedInferenceError):
+    """This utterance failed while the translator remains usable."""
 
 
 class LocalTranslationCleanupPending(LocalTranslationError):
