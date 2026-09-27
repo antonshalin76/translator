@@ -466,10 +466,77 @@ fn direction_session_exposes_privacy_safe_provider_latency() {
         effects.as_slice(),
         [DirectionEffect::Latency {
             utterance_id: Some(observed),
+            asr_first_text_ms: Some(100),
+            asr_final_text_ms: Some(200),
+            mt_first_text_ms: Some(300),
             tts_first_audio_ms: Some(400),
             provider_total_ms: Some(500),
         }] if *observed == utterance_id
     ));
+}
+
+#[test]
+fn direction_session_preserves_partial_provider_latency() {
+    let cases = [
+        (None, None, None, None, Some(1)),
+        (Some(0), Some(0), None, None, Some(10)),
+        (Some(0), Some(10), Some(20), None, Some(30)),
+    ];
+    for (
+        asr_first_text_ms,
+        asr_final_text_ms,
+        mt_first_text_ms,
+        tts_first_audio_ms,
+        provider_total_ms,
+    ) in cases
+    {
+        let mut session = DirectionSession::new(config());
+        session.handle_provider_event(&opened(&session), 0).unwrap();
+        let utterance_id = Uuid::new_v4();
+        session
+            .handle_capture(CaptureEvent::SpeechStarted {
+                stream_id: session.stream_id(),
+                utterance_id,
+                capture_monotonic_ns: 500_000_000,
+            })
+            .unwrap();
+        session
+            .handle_capture(CaptureEvent::Frame {
+                stream_id: session.stream_id(),
+                utterance_id,
+                frame: frame(0),
+                end_of_utterance: true,
+            })
+            .unwrap();
+        let event = ProviderEvent {
+            event: Some(provider_event::Event::Latency(ProviderLatency {
+                schema_version: "translator.provider.latency.v1".into(),
+                session_id: session.session_id().to_string(),
+                direction_id: ProviderDirection::Microphone.into(),
+                stream_id: session.stream_id().to_string(),
+                event_sequence: 2,
+                utterance_id: Some(utterance_id.to_string()),
+                asr_first_text_ms,
+                asr_final_text_ms,
+                mt_first_text_ms,
+                tts_first_audio_ms,
+                provider_total_ms,
+            })),
+        };
+        assert_eq!(
+            session
+                .handle_provider_event(&event, 1_000_000_000)
+                .unwrap(),
+            vec![DirectionEffect::Latency {
+                utterance_id: Some(utterance_id),
+                asr_first_text_ms,
+                asr_final_text_ms,
+                mt_first_text_ms,
+                tts_first_audio_ms,
+                provider_total_ms,
+            }]
+        );
+    }
 }
 
 #[test]

@@ -89,6 +89,9 @@ fn runtime_wire_contract(event: DuplexRuntimeEvent) -> (Value, Option<u64>) {
         DuplexRuntimeEvent::ProviderLatency {
             direction,
             utterance_id,
+            asr_first_text_ms,
+            asr_final_text_ms,
+            mt_first_text_ms,
             tts_first_audio_ms,
             provider_total_ms,
         } => {
@@ -96,6 +99,15 @@ fn runtime_wire_contract(event: DuplexRuntimeEvent) -> (Value, Option<u64>) {
                 json!({"event":"provider_latency", "direction":direction_name(direction)});
             if let Some(id) = utterance_id {
                 expected["utterance_id"] = json!(id.to_string());
+            }
+            if let Some(ms) = asr_first_text_ms {
+                expected["asr_first_text_ms"] = json!(ms);
+            }
+            if let Some(ms) = asr_final_text_ms {
+                expected["asr_final_text_ms"] = json!(ms);
+            }
+            if let Some(ms) = mt_first_text_ms {
+                expected["mt_first_text_ms"] = json!(ms);
             }
             if let Some(ms) = tts_first_audio_ms {
                 expected["tts_first_audio_ms"] = json!(ms);
@@ -217,6 +229,9 @@ fn all_runtime_cases() -> Vec<DuplexRuntimeEvent> {
                     events.push(DuplexRuntimeEvent::ProviderLatency {
                         direction,
                         utterance_id,
+                        asr_first_text_ms: utterance_id.map(|_| 0),
+                        asr_final_text_ms: utterance_id.map(|_| 10),
+                        mt_first_text_ms: utterance_id.map(|_| 20),
                         tts_first_audio_ms,
                         provider_total_ms,
                     });
@@ -418,6 +433,9 @@ fn bridge_runtime_events_serialize_only_privacy_safe_metadata() {
         DuplexRuntimeEvent::ProviderLatency {
             direction: AudioDirection::Microphone,
             utterance_id: Some(utterance_id),
+            asr_first_text_ms: Some(100),
+            asr_final_text_ms: Some(150),
+            mt_first_text_ms: Some(175),
             tts_first_audio_ms: Some(200),
             provider_total_ms: Some(400),
         },

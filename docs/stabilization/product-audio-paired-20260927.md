@@ -41,8 +41,12 @@ completed RU attempts; the remaining 35 attempts were `NOT_RUN`.
 This is a retained product-path failure, not a successful all-mode gate.
 The runner now retains at most one matching, sanitized `ProviderLatency`
 record on a failed attempt to distinguish request stages without recording
-speech, raw errors, or audio. The failed run predates this field; its cause
-is still unknown. No physical microphone, speaker, or headphone was used.
+speech, raw errors, or audio. The daemon's Task7 bridge also carries the
+existing optional ASR, MT, TTS, and total millisecond milestones through its
+runtime observer without adding speech content; zero remains distinct from an
+absent value. These are diagnostic fields, not a fix for the failed attempt.
+The failed run predates this evidence and its cause is still unknown. No
+physical microphone, speaker, or headphone was used.
 
 ## Observed runs
 

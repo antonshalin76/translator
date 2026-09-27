@@ -74,6 +74,9 @@ pub enum DirectionEffect {
     },
     Latency {
         utterance_id: Option<Uuid>,
+        asr_first_text_ms: Option<u32>,
+        asr_final_text_ms: Option<u32>,
+        mt_first_text_ms: Option<u32>,
         tts_first_audio_ms: Option<u32>,
         provider_total_ms: Option<u32>,
     },
@@ -341,6 +344,9 @@ impl DirectionSession {
                     .as_deref()
                     .map(parse_utterance)
                     .transpose()?,
+                asr_first_text_ms: value.asr_first_text_ms,
+                asr_final_text_ms: value.asr_final_text_ms,
+                mt_first_text_ms: value.mt_first_text_ms,
                 tts_first_audio_ms: value.tts_first_audio_ms,
                 provider_total_ms: value.provider_total_ms,
             }]),

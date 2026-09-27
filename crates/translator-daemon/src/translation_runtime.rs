@@ -211,6 +211,12 @@ pub enum DuplexRuntimeEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         utterance_id: Option<uuid::Uuid>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        asr_first_text_ms: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        asr_final_text_ms: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mt_first_text_ms: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tts_first_audio_ms: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_total_ms: Option<u32>,
@@ -3165,6 +3171,33 @@ fn observe_capture_event(
     }
 }
 
+fn observe_latency_effect(
+    direction: AudioDirection,
+    effect: &DirectionEffect,
+    observer: &dyn DuplexRuntimeObserver,
+) {
+    let DirectionEffect::Latency {
+        utterance_id,
+        asr_first_text_ms,
+        asr_final_text_ms,
+        mt_first_text_ms,
+        tts_first_audio_ms,
+        provider_total_ms,
+    } = effect
+    else {
+        return;
+    };
+    observer.observe(DuplexRuntimeEvent::ProviderLatency {
+        direction,
+        utterance_id: *utterance_id,
+        asr_first_text_ms: *asr_first_text_ms,
+        asr_final_text_ms: *asr_final_text_ms,
+        mt_first_text_ms: *mt_first_text_ms,
+        tts_first_audio_ms: *tts_first_audio_ms,
+        provider_total_ms: *provider_total_ms,
+    });
+}
+
 enum PlaybackWrite {
     Completed(u64),
     Stopped(WorkerStop),
@@ -3305,17 +3338,12 @@ async fn run_direction_loop(
                                 utterance_id,
                             });
                         }
-                        DirectionEffect::Latency {
-                            utterance_id,
-                            tts_first_audio_ms,
-                            provider_total_ms,
-                        } => {
-                            observer.observe(DuplexRuntimeEvent::ProviderLatency {
-                                direction: direction.launch.runtime.direction,
-                                utterance_id,
-                                tts_first_audio_ms,
-                                provider_total_ms,
-                            });
+                        latency @ DirectionEffect::Latency { .. } => {
+                            observe_latency_effect(
+                                direction.launch.runtime.direction,
+                                &latency,
+                                observer.as_ref(),
+                            );
                         }
                         DirectionEffect::ProviderError {
                             utterance_id,
@@ -3915,6 +3943,63 @@ pub(crate) mod tests {
         assert_eq!(completed.runtime_generation, generation);
         assert!(observer.internal_events.lock().unwrap().is_empty());
         assert!(observer.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_latency_effect_reaches_runtime_observer_with_all_milestones() {
+        let observer = RecordingObserver::default();
+        let utterance_id = Uuid::new_v4();
+        let effect = DirectionEffect::Latency {
+            utterance_id: Some(utterance_id),
+            asr_first_text_ms: Some(100),
+            asr_final_text_ms: Some(200),
+            mt_first_text_ms: Some(300),
+            tts_first_audio_ms: Some(400),
+            provider_total_ms: Some(500),
+        };
+
+        observe_latency_effect(AudioDirection::Speaker, &effect, &observer);
+
+        assert_eq!(
+            observer.events.lock().unwrap().as_slice(),
+            &[DuplexRuntimeEvent::ProviderLatency {
+                direction: AudioDirection::Speaker,
+                utterance_id: Some(utterance_id),
+                asr_first_text_ms: Some(100),
+                asr_final_text_ms: Some(200),
+                mt_first_text_ms: Some(300),
+                tts_first_audio_ms: Some(400),
+                provider_total_ms: Some(500),
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_latency_effect_keeps_zero_distinct_from_missing() {
+        let observer = RecordingObserver::default();
+        let effect = DirectionEffect::Latency {
+            utterance_id: None,
+            asr_first_text_ms: Some(0),
+            asr_final_text_ms: None,
+            mt_first_text_ms: None,
+            tts_first_audio_ms: None,
+            provider_total_ms: Some(0),
+        };
+
+        observe_latency_effect(AudioDirection::Microphone, &effect, &observer);
+
+        assert_eq!(
+            observer.events.lock().unwrap().as_slice(),
+            &[DuplexRuntimeEvent::ProviderLatency {
+                direction: AudioDirection::Microphone,
+                utterance_id: None,
+                asr_first_text_ms: Some(0),
+                asr_final_text_ms: None,
+                mt_first_text_ms: None,
+                tts_first_audio_ms: None,
+                provider_total_ms: Some(0),
+            }]
+        );
     }
 
     #[test]
