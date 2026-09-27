@@ -275,9 +275,13 @@ def evaluate_events(
     }
 
 
-def pair_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def pair_rows(
+    rows: list[dict[str, Any]], requested_mode: TranslationMode
+) -> list[dict[str, Any]]:
     indexed: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
     for row in rows:
+        if row.get("mode") != requested_mode.value:
+            raise ValueError("paired diagnostic mode differs from requested mode")
         key = (row["origin_id"], row["condition"])
         arm = indexed.setdefault(key, {})
         if row["backend"] in arm:
@@ -300,6 +304,7 @@ def pair_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "origin_id": origin_id,
                 "condition": condition,
+                "mode": requested_mode.value,
                 "status": "complete" if complete else "incomplete",
                 "mt_confounded_by_asr": (
                     left["asr_text"] != right["asr_text"] if complete else None
@@ -309,7 +314,7 @@ def pair_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return pairs
 
 
-def _request(language: str) -> OpenProviderSession:
+def _request(language: str, mode: TranslationMode) -> OpenProviderSession:
     source, target, direction = (
         (Language.RU, Language.EN, AudioDirection.MICROPHONE)
         if language == "ru_ru"
@@ -321,7 +326,7 @@ def _request(language: str) -> OpenProviderSession:
         direction_id=direction,
         source_language=source,
         target_language=target,
-        mode=TranslationMode.QUALITY_FIRST,
+        mode=mode,
         requested_input_format=PcmFormat(
             sample_rate_hz=16_000,
             channels=1,
@@ -343,8 +348,10 @@ def _request(language: str) -> OpenProviderSession:
     )
 
 
-async def _run_case(provider: Any, case: dict[str, Any]) -> dict[str, Any]:
-    request = _request(case["language"])
+async def _run_case(
+    provider: Any, case: dict[str, Any], mode: TranslationMode
+) -> dict[str, Any]:
+    request = _request(case["language"], mode)
     event_times: list[tuple[Any, int]] = []
 
     async def publish(batch: tuple[Any, ...], commit: Any) -> None:
@@ -459,6 +466,7 @@ async def _run_arm(
     cases: list[dict[str, Any]],
     journal: TextIO,
     rows: list[dict[str, Any]],
+    mode: TranslationMode,
 ) -> bool:
     previous_asr = os.environ.get("TRANSLATOR_ASR_MODEL_ID")
     previous_mt = os.environ.get("TRANSLATOR_MT_MODEL_ID")
@@ -482,6 +490,7 @@ async def _run_arm(
             {
                 "type": "arm_start",
                 "backend": backend,
+                "mode": mode.value,
                 "build_ms": round((time.monotonic_ns() - built_ns) / 1_000_000, 2),
                 "resources": _resources(provider),
             },
@@ -491,6 +500,7 @@ async def _run_arm(
             row = {
                 "type": "attempt",
                 "backend": backend,
+                "mode": mode.value,
                 "origin_id": case["origin_id"],
                 "condition": case["condition"],
                 "language": case["language"],
@@ -502,7 +512,7 @@ async def _run_arm(
                 "critical_labels": case["critical_labels"],
             }
             try:
-                row.update(await _run_case(provider, case))
+                row.update(await _run_case(provider, case, mode))
             except Exception as error:  # noqa: BLE001 - retain the failed attempt
                 row.update(status="failed", error_type=type(error).__name__)
                 if str(error) in SAFE_EVALUATION_REASONS:
@@ -523,6 +533,7 @@ async def _run_arm(
                         {
                             "type": "not_run",
                             "backend": backend,
+                            "mode": mode.value,
                             "origin_id": remaining["origin_id"],
                             "condition": remaining["condition"],
                         },
@@ -535,6 +546,7 @@ async def _run_arm(
             {
                 "type": "arm_error",
                 "backend": backend,
+                "mode": mode.value,
                 "error_type": type(error).__name__,
             },
         )
@@ -544,6 +556,7 @@ async def _run_arm(
                 {
                     "type": "not_run",
                     "backend": backend,
+                    "mode": mode.value,
                     "origin_id": remaining["origin_id"],
                     "condition": remaining["condition"],
                 },
@@ -567,6 +580,7 @@ async def _run_arm(
                     {
                         "type": "cleanup_error",
                         "backend": backend,
+                        "mode": mode.value,
                         "error_type": type(error).__name__,
                     },
                 )
@@ -575,6 +589,7 @@ async def _run_arm(
             {
                 "type": "arm_end",
                 "backend": backend,
+                "mode": mode.value,
                 "status": "failed" if failed else "complete",
                 "post_shutdown_resources": _resources(provider)
                 if provider is not None
@@ -585,6 +600,9 @@ async def _run_arm(
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
+    mode = args.mode
+    if not isinstance(mode, TranslationMode):
+        raise TypeError("product mode is invalid")
     cases = load_cases(args.manifest, args.screen, args.turbo)
     model_cache_root = os.environ.get("TRANSLATOR_MODEL_CACHE_ROOT")
     if model_cache_root is None or not Path(model_cache_root).is_dir():
@@ -642,7 +660,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 "smoke": args.smoke,
                 "diagnostic_case_id": args.case_id,
                 "order": order,
-                "mode": "quality_first",
+                "mode": mode.value,
                 "voice_gender": "female",
                 "input": "mono s16le 16000 Hz 100 ms, submitted as fast as possible",
                 "output": "mono s16le 24000 Hz 20 ms",
@@ -651,7 +669,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         all_complete = True
         for arm_index, backend in enumerate(order):
-            if not await _run_arm(backend, cases, journal, rows):
+            if not await _run_arm(backend, cases, journal, rows, mode):
                 all_complete = False
                 for remaining_backend in order[arm_index + 1 :]:
                     for case in cases:
@@ -660,12 +678,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                             {
                                 "type": "not_run",
                                 "backend": remaining_backend,
+                                "mode": mode.value,
                                 "origin_id": case["origin_id"],
                                 "condition": case["condition"],
                             },
                         )
                 break
-        pairs = pair_rows(rows)
+        pairs = pair_rows(rows, mode)
         complete = (
             all_complete
             and len(pairs) == len(cases)
@@ -675,6 +694,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             journal,
             {
                 "type": "terminal",
+                "mode": mode.value,
                 "status": "complete" if complete else "failed",
                 "attempts": len(rows),
                 "pairs": pairs,
@@ -698,7 +718,13 @@ def main() -> int:
         "--case-id", help="one frozen origin for failure diagnosis only"
     )
     parser.add_argument("--order", choices=("nllb-hy", "hy-nllb"), default="nllb-hy")
+    parser.add_argument(
+        "--mode",
+        choices=tuple(mode.value for mode in TranslationMode),
+        default=TranslationMode.QUALITY_FIRST.value,
+    )
     args = parser.parse_args()
+    args.mode = TranslationMode(args.mode)
     try:
         result = asyncio.run(run(args))
     except Exception as error:  # noqa: BLE001 - stdout must remain text-free

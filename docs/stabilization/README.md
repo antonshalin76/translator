@@ -31,6 +31,11 @@ input sink. Persistent cleanup failures terminate with no success report;
 foreign module IDs are not unloaded. This is harness safety evidence only, not
 a new physical Task 7 result or a release gate pass.
 
+The paired saved-audio runner also accepts all three provider modes with mode
+identity checked from CLI through session, input frames, and failure journals.
+This is deterministic software coverage; real all-mode provider smoke and
+physical bidirectional E2E remain separate gates.
+
 ## Recovery baseline (2026-09-23)
 
 The last code commit is `b239b9a1be094a4f2c1f53132e49a664bbf020fa`

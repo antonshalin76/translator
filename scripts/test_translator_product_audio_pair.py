@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import stat
+import sys
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import translator_product_audio_pair as product_audio_pair
 from translator_product_audio_pair import (
     evaluate_events,
     load_cases,
@@ -19,10 +24,12 @@ from translator_product_audio_pair import (
 from translator_sidecar.provider_contract import (
     PrivacySafeProviderError,
     ProviderAudioDelta,
+    ProviderState,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
     ProviderUtteranceFinal,
     SampleFormat,
+    TranslationMode,
     UtteranceOutcome,
 )
 
@@ -236,6 +243,7 @@ def test_pair_flags_asr_divergence() -> None:
             "origin_id": "ru-1",
             "condition": "clean",
             "backend": "nllb",
+            "mode": "quality_first",
             "asr_text": "a",
             "status": "completed",
         },
@@ -243,14 +251,20 @@ def test_pair_flags_asr_divergence() -> None:
             "origin_id": "ru-1",
             "condition": "clean",
             "backend": "hy",
+            "mode": "quality_first",
             "asr_text": "b",
             "status": "completed",
         },
     ]
-    assert pair_rows(rows)[0]["mt_confounded_by_asr"] is True
-    assert pair_rows(rows[:1])[0]["status"] == "incomplete"
+    assert (
+        pair_rows(rows, TranslationMode.QUALITY_FIRST)[0]["mt_confounded_by_asr"]
+        is True
+    )
+    assert (
+        pair_rows(rows[:1], TranslationMode.QUALITY_FIRST)[0]["status"] == "incomplete"
+    )
     with pytest.raises(ValueError, match="duplicate"):
-        pair_rows(rows + [rows[0]])
+        pair_rows(rows + [rows[0]], TranslationMode.QUALITY_FIRST)
 
 
 def test_journal_is_private_exclusive_and_durable(tmp_path: Path) -> None:
@@ -267,3 +281,236 @@ def test_journal_is_private_exclusive_and_durable(tmp_path: Path) -> None:
     public.mkdir(mode=0o755)
     with pytest.raises(ValueError, match="private"):
         open_journal(public / "attempts.jsonl")
+
+
+@pytest.mark.parametrize("mode", list(TranslationMode))
+@pytest.mark.parametrize("language", ["ru_ru", "en_us"])
+def test_selected_mode_reaches_session_and_every_frame(
+    monkeypatch, mode, language
+) -> None:
+    sessions = []
+    frames = []
+
+    class Reservation:
+        async def open(self):
+            return None, SimpleNamespace(state=ProviderState.READY)
+
+        def drain(self, reason):
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            sessions.append(request)
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            frames.append(frame)
+
+        async def wait_idle(self):
+            return None
+
+    async def finish_cleanup(_pending):
+        return SimpleNamespace(delivery_error=None)
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    monkeypatch.setattr(
+        product_audio_pair,
+        "evaluate_events",
+        lambda events, *, started_ns: {"status": "completed"},
+    )
+    result = asyncio.run(
+        product_audio_pair._run_case(
+            Provider(),
+            {"language": language, "pcm": b"\x01\x02" * 3200},
+            mode,
+        )
+    )
+    assert result["status"] == "completed"
+    assert len(sessions) == 1
+    assert sessions[0].mode is mode
+    assert len(frames) == 2
+    assert all(frame.mode is mode for frame in frames)
+    assert all(frame.direction_id is sessions[0].direction_id for frame in frames)
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        ([], TranslationMode.QUALITY_FIRST),
+        (["--mode", "balanced"], TranslationMode.BALANCED),
+        (["--mode", "streaming_first"], TranslationMode.STREAMING_FIRST),
+    ],
+)
+def test_cli_selects_mode_with_compatible_default(
+    monkeypatch, capsys, option, expected
+) -> None:
+    observed = []
+
+    async def fake_run(arguments):
+        observed.append(arguments.mode)
+        return {"status": "complete"}
+
+    monkeypatch.setattr(product_audio_pair, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "translator_product_audio_pair.py",
+            "--manifest",
+            "/tmp/manifest",
+            "--screen",
+            "/tmp/screen",
+            "--turbo",
+            "/tmp/turbo",
+            "--output",
+            "/tmp/private-result",
+            *option,
+        ],
+    )
+    assert product_audio_pair.main() == 0
+    assert observed == [expected]
+    assert '"status": "complete"' in capsys.readouterr().out
+
+
+def test_invalid_cli_mode_exits_before_corpus_or_model_access(
+    tmp_path, monkeypatch
+) -> None:
+    output = tmp_path / "journal.jsonl"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid mode reached corpus or model access")
+
+    monkeypatch.setattr(product_audio_pair, "load_cases", forbidden)
+    monkeypatch.setattr(product_audio_pair, "build_local_provider", forbidden)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "translator_product_audio_pair.py",
+            "--manifest",
+            "/tmp/manifest",
+            "--screen",
+            "/tmp/screen",
+            "--turbo",
+            "/tmp/turbo",
+            "--output",
+            str(output),
+            "--mode",
+            "invalid",
+        ],
+    )
+    with pytest.raises(SystemExit) as exit_result:
+        product_audio_pair.main()
+    assert exit_result.value.code == 2
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
+@pytest.mark.parametrize("invalid_mode", [None, "quality_first"])
+def test_pair_rejects_missing_or_wrong_mode_relative_to_requested(
+    status, invalid_mode
+) -> None:
+    rows = [
+        {
+            "origin_id": "ru-1",
+            "condition": "clean",
+            "backend": backend,
+            "asr_text": "source",
+            "status": status,
+            "mode": invalid_mode,
+            "wav_sha256": "same",
+            "voice_gender": "female",
+        }
+        for backend in ("nllb", "hy")
+    ]
+    with pytest.raises(ValueError, match="mode"):
+        pair_rows(rows, TranslationMode.BALANCED)
+
+
+@pytest.mark.parametrize("failure_stage", ["complete", "build", "attempt", "shutdown"])
+def test_run_journal_binds_mode_to_success_and_failure_paths(
+    tmp_path, monkeypatch, failure_stage
+) -> None:
+    cases = [
+        {
+            "origin_id": f"{language}-{index}",
+            "condition": "clean",
+            "language": language,
+            "speaker_id": f"speaker-{index}",
+            "wav_sha256": f"{index:064x}",
+            "reference": "reference",
+            "turbo_text": "source",
+            "critical_labels": [],
+        }
+        for language in ("ru_ru", "en_us")
+        for index in range(12)
+    ]
+    monkeypatch.setattr(product_audio_pair, "load_cases", lambda *args: cases)
+    monkeypatch.setattr(product_audio_pair, "_resources", lambda provider: {})
+    monkeypatch.setattr(product_audio_pair, "HY_SERVER", tmp_path / "not-installed")
+    monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(tmp_path))
+    requested = TranslationMode.BALANCED
+
+    class Provider:
+        _asr_model_id = product_audio_pair.ASR_ID
+
+        def __init__(self):
+            self._mt_model_id = os.environ["TRANSLATOR_MT_MODEL_ID"]
+
+        async def shutdown(self):
+            if failure_stage == "shutdown":
+                raise RuntimeError("synthetic shutdown failure")
+
+    def build_provider(**kwargs):
+        if failure_stage == "build":
+            raise RuntimeError("synthetic build failure")
+        return Provider()
+
+    async def run_case(provider, case, mode):
+        if failure_stage == "attempt":
+            raise RuntimeError("synthetic case failure")
+        return {
+            "status": "completed",
+            "asr_text": "source",
+            "mt_text": "target",
+        }
+
+    monkeypatch.setattr(product_audio_pair, "build_local_provider", build_provider)
+    monkeypatch.setattr(product_audio_pair, "_run_case", run_case)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    output = private / "attempts.jsonl"
+    arguments = SimpleNamespace(
+        manifest=tmp_path / "manifest",
+        screen=tmp_path / "screen",
+        turbo=tmp_path / "turbo",
+        output=output,
+        case_id=None,
+        smoke=True,
+        order="nllb-hy",
+        mode=requested,
+    )
+    result = asyncio.run(product_audio_pair.run(arguments))
+    records = [
+        json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records
+    assert result["status"] == ("complete" if failure_stage == "complete" else "failed")
+    assert all(record.get("mode") == requested.value for record in records)
+    assert records[0]["type"] == "header"
+    assert records[-1]["type"] == "terminal"
+    assert records[-1]["status"] == (
+        "complete" if failure_stage == "complete" else "failed"
+    )
+    if failure_stage == "build":
+        assert {"arm_error", "not_run", "arm_end"} <= {
+            record["type"] for record in records
+        }
+    if failure_stage == "attempt":
+        assert {"attempt", "not_run", "arm_end"} <= {
+            record["type"] for record in records
+        }
+        assert len([record for record in records if record["type"] == "not_run"]) == 3
+    if failure_stage == "shutdown":
+        assert {"cleanup_error", "arm_end"} <= {record["type"] for record in records}

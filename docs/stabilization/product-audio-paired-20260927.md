@@ -26,6 +26,13 @@ The screen contains only two name, three number and eight negation-candidate
 labels, all on clean audio; it does not establish critical-case coverage under
 noise or across speakers and domains.
 
+The runner now accepts an explicit `--mode` (`quality_first`, `balanced`, or
+`streaming_first`) and binds it to each session, input frame and journal
+record. All historical receipts below remain `quality_first`; selecting
+`streaming_first` on a complete saved WAV tests provider policy, not streaming
+capture or audible output. Hy-MT and Piper currently ignore this mode argument,
+while Turbo ASR and NLLB use it. New mode smoke evidence is separate.
+
 ## Observed runs
 
 | Private receipt | SHA-256 | Result |
