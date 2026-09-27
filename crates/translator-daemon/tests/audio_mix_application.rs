@@ -55,10 +55,10 @@ fn sink_input(
     index: u32,
     application_name: &str,
     media_name: &str,
-    target_object: &str,
+    sink_name: &str,
     module_id: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut input = serde_json::json!({
         "index": index,
         "channel_map": "front-right,front-left",
         "volume": {
@@ -68,10 +68,18 @@ fn sink_input(
         "properties": {
             "application.name": application_name,
             "media.name": media_name,
-            "target.object": target_object,
-            "pulse.module.id": module_id,
         },
-    })
+    });
+    if !module_id.is_empty() {
+        input["owner_module"] = module_id.into();
+        input["sink"] = match sink_name {
+            "alsa_output.headphones" => 0.into(),
+            "translator_mic_out" => 1.into(),
+            other => panic!("unexpected sink {other}"),
+        };
+        input["properties"]["translator.owner"] = "true".into();
+    }
+    input
 }
 
 #[test]
@@ -153,12 +161,17 @@ fn missing_prior_channel_volume_rejects_before_any_set() {
     assert!(runner.calls().iter().all(|args| args[0] == "--format=json"));
 }
 
-fn source_output(media_name: &str, target_object: &str, module_id: &str) -> serde_json::Value {
+fn source_output(media_name: &str, source_name: &str, module_id: &str) -> serde_json::Value {
     serde_json::json!({
+        "owner_module": module_id,
+        "source": match source_name {
+            "translator_remote_in.monitor" => 1,
+            "alsa_input.usb" => 0,
+            other => panic!("unexpected source {other}"),
+        },
         "properties": {
             "media.name": media_name,
-            "target.object": target_object,
-            "pulse.module.id": module_id,
+            "translator.owner": "true",
         },
     })
 }
@@ -341,11 +354,17 @@ fn four_target_discovery() -> Vec<CommandResult> {
         sink_input(
             41,
             "",
-            "loopback-1 output",
+            "loopback-speaker-original",
             "alsa_output.headphones",
             "9001"
         ),
-        sink_input(42, "", "loopback-2 output", "translator_mic_out", "9002"),
+        sink_input(
+            42,
+            "",
+            "loopback-microphone-original",
+            "translator_mic_out",
+            "9002"
+        ),
         sink_input(
             43,
             "translator-daemon",
@@ -369,12 +388,30 @@ fn four_target_discovery() -> Vec<CommandResult> {
         ),
     ]);
     let source_outputs = serde_json::json!([
-        source_output("loopback-1 input", "translator_remote_in", "9001"),
-        source_output("loopback-2 input", "alsa_input.usb", "9002"),
+        source_output(
+            "loopback-speaker-original",
+            "translator_remote_in.monitor",
+            "9001"
+        ),
+        source_output("loopback-microphone-original", "alsa_input.usb", "9002"),
     ]);
     vec![
         CommandResult::success(serde_json::to_vec(&sink_inputs).unwrap()),
         CommandResult::success(serde_json::to_vec(&source_outputs).unwrap()),
+        CommandResult::success(
+            serde_json::to_vec(&serde_json::json!([
+                {"index": 0, "name": "alsa_input.usb"},
+                {"index": 1, "name": "translator_remote_in.monitor"}
+            ]))
+            .unwrap(),
+        ),
+        CommandResult::success(
+            serde_json::to_vec(&serde_json::json!([
+                {"index": 0, "name": "alsa_output.headphones"},
+                {"index": 1, "name": "translator_mic_out"}
+            ]))
+            .unwrap(),
+        ),
     ]
 }
 
@@ -403,6 +440,8 @@ fn applies_independent_mix_volumes_to_current_pulse_streams() {
         vec![
             vec!["--format=json", "list", "sink-inputs"],
             vec!["--format=json", "list", "source-outputs"],
+            vec!["--format=json", "list", "sources"],
+            vec!["--format=json", "list", "sinks"],
             vec!["set-sink-input-volume", "41", "33%"],
             vec!["set-sink-input-volume", "42", "31%"],
             vec!["set-sink-input-volume", "43", "32%"],

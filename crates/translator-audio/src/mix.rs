@@ -7,6 +7,8 @@ use crate::{CommandRunError, CommandRunner, MIC_OUT_SINK, REMOTE_IN_SINK, System
 
 pub const OUTGOING_TRANSLATION_STREAM: &str = "translator-outgoing-playback";
 pub const INCOMING_TRANSLATION_STREAM: &str = "translator-incoming-playback";
+const MICROPHONE_ORIGINAL_STREAM: &str = "loopback-microphone-original";
+const SPEAKER_ORIGINAL_STREAM: &str = "loopback-speaker-original";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioMixVolumes {
@@ -122,13 +124,28 @@ where
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
         let source_outputs: Vec<RawSourceOutput> =
             self.run_json(&["--format=json", "list", "source-outputs"])?;
-        let remote_loopback_modules = remote_loopback_modules(&source_outputs);
+        let original_pairs = owned_original_pairs(&sink_inputs, &source_outputs)?;
+        let original_targets = if original_pairs.is_empty() {
+            HashMap::new()
+        } else {
+            let sources: Vec<RawEndpoint> = self.run_json(&["--format=json", "list", "sources"])?;
+            let sinks: Vec<RawEndpoint> = self.run_json(&["--format=json", "list", "sinks"])?;
+            classify_original_pairs(&original_pairs, &sources, &sinks)?
+        };
         let mut entries = Vec::new();
+        let mut seen_indices = HashSet::new();
 
         for input in sink_inputs {
-            let Some(target) = classify_sink_input(&input, &remote_loopback_modules) else {
+            let Some(target) = original_targets
+                .get(&input.index)
+                .copied()
+                .or_else(|| classify_translation_stream(&input))
+            else {
                 continue;
             };
+            if !seen_indices.insert(input.index) {
+                return Err(discovery_failed());
+            }
             let channels: Vec<_> = input.channel_map.split(',').collect();
             let unique: HashSet<_> = channels.iter().copied().collect();
             if channels.is_empty()
@@ -214,42 +231,133 @@ fn map_apply_error(error: CommandRunError) -> AudioMixError {
     }
 }
 
-fn classify_sink_input(
-    input: &RawSinkInput,
-    remote_loopback_modules: &HashSet<String>,
-) -> Option<AudioMixTarget> {
+fn classify_translation_stream(input: &RawSinkInput) -> Option<AudioMixTarget> {
     let media_name = property(&input.properties, "media.name")?;
     let application_name = property(&input.properties, "application.name");
     if application_name == Some("translator-daemon") {
-        return match media_name {
+        match media_name {
             OUTGOING_TRANSLATION_STREAM => Some(AudioMixTarget::MicrophoneTranslation),
             INCOMING_TRANSLATION_STREAM => Some(AudioMixTarget::SpeakerTranslation),
             _ => None,
-        };
+        }
+    } else {
+        None
     }
-
-    if !media_name.starts_with("loopback-") {
-        return None;
-    }
-    let target_object = property(&input.properties, "target.object");
-    if target_object == Some(MIC_OUT_SINK) {
-        return Some(AudioMixTarget::MicrophoneOriginal);
-    }
-    property(&input.properties, "pulse.module.id")
-        .filter(|module_id| remote_loopback_modules.contains(*module_id))
-        .map(|_| AudioMixTarget::SpeakerOriginal)
 }
 
-fn remote_loopback_modules(source_outputs: &[RawSourceOutput]) -> HashSet<String> {
-    source_outputs
-        .iter()
-        .filter(|output| {
-            property(&output.properties, "media.name")
-                .is_some_and(|name| name.starts_with("loopback-"))
-                && property(&output.properties, "target.object") == Some(REMOTE_IN_SINK)
-        })
-        .filter_map(|output| property(&output.properties, "pulse.module.id").map(str::to_owned))
-        .collect()
+struct OriginalPair {
+    input_index: u32,
+    target: AudioMixTarget,
+    sink_index: u32,
+    source_index: u32,
+}
+
+fn owned_original_pairs(
+    inputs: &[RawSinkInput],
+    outputs: &[RawSourceOutput],
+) -> Result<Vec<OriginalPair>, AudioMixError> {
+    let mut owned_inputs = HashMap::new();
+    let mut owned_outputs = HashMap::new();
+    for input in inputs {
+        if let Some(target) = owned_original_target(&input.properties) {
+            let module = canonical_module_id(input.owner_module.as_ref())?;
+            let sink = input.sink.ok_or_else(discovery_failed)?;
+            if owned_inputs
+                .insert(module, (input.index, target, sink))
+                .is_some()
+            {
+                return Err(discovery_failed());
+            }
+        }
+    }
+    for output in outputs {
+        if let Some(target) = owned_original_target(&output.properties) {
+            let module = canonical_module_id(output.owner_module.as_ref())?;
+            let source = output.source.ok_or_else(discovery_failed)?;
+            if owned_outputs.insert(module, (target, source)).is_some() {
+                return Err(discovery_failed());
+            }
+        }
+    }
+    if owned_inputs.len() != owned_outputs.len() {
+        return Err(discovery_failed());
+    }
+    let mut pairs = Vec::new();
+    let mut seen_targets = Vec::new();
+    for (module, (input_index, target, sink_index)) in owned_inputs {
+        let (output_target, source_index) =
+            owned_outputs.get(&module).ok_or_else(discovery_failed)?;
+        if *output_target != target || seen_targets.contains(&target) {
+            return Err(discovery_failed());
+        }
+        seen_targets.push(target);
+        pairs.push(OriginalPair {
+            input_index,
+            target,
+            sink_index,
+            source_index: *source_index,
+        });
+    }
+    Ok(pairs)
+}
+
+fn classify_original_pairs(
+    pairs: &[OriginalPair],
+    sources: &[RawEndpoint],
+    sinks: &[RawEndpoint],
+) -> Result<HashMap<u32, AudioMixTarget>, AudioMixError> {
+    let mut targets = HashMap::new();
+    for pair in pairs {
+        let source = endpoint_name(sources, pair.source_index)?;
+        let sink = endpoint_name(sinks, pair.sink_index)?;
+        let valid = match pair.target {
+            AudioMixTarget::MicrophoneOriginal => sink == MIC_OUT_SINK,
+            AudioMixTarget::SpeakerOriginal => source == format!("{REMOTE_IN_SINK}.monitor"),
+            _ => false,
+        };
+        if !valid || targets.insert(pair.input_index, pair.target).is_some() {
+            return Err(discovery_failed());
+        }
+    }
+    Ok(targets)
+}
+
+fn endpoint_name(endpoints: &[RawEndpoint], index: u32) -> Result<&str, AudioMixError> {
+    let mut names = endpoints.iter().filter(|endpoint| endpoint.index == index);
+    let name = names.next().ok_or_else(discovery_failed)?.name.as_str();
+    if name.is_empty() || names.next().is_some() {
+        return Err(discovery_failed());
+    }
+    Ok(name)
+}
+
+fn owned_original_target(properties: &HashMap<String, String>) -> Option<AudioMixTarget> {
+    if property(properties, "translator.owner") != Some("true") {
+        return None;
+    }
+    match property(properties, "media.name") {
+        Some(MICROPHONE_ORIGINAL_STREAM) => Some(AudioMixTarget::MicrophoneOriginal),
+        Some(SPEAKER_ORIGINAL_STREAM) => Some(AudioMixTarget::SpeakerOriginal),
+        _ => None,
+    }
+}
+
+fn canonical_module_id(id: Option<&RawModuleId>) -> Result<String, AudioMixError> {
+    match id.ok_or_else(discovery_failed)? {
+        RawModuleId::Number(value) => Ok(value.to_string()),
+        RawModuleId::Text(value)
+            if value
+                .parse::<u32>()
+                .is_ok_and(|parsed| parsed.to_string() == *value) =>
+        {
+            Ok(value.clone())
+        }
+        RawModuleId::Text(_) => Err(discovery_failed()),
+    }
+}
+
+fn discovery_failed() -> AudioMixError {
+    AudioMixError::new(AudioMixErrorCode::DiscoveryFailed)
 }
 
 fn property<'a>(properties: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
@@ -259,6 +367,8 @@ fn property<'a>(properties: &'a HashMap<String, String>, key: &str) -> Option<&'
 #[derive(Debug, Deserialize)]
 struct RawSinkInput {
     index: u32,
+    owner_module: Option<RawModuleId>,
+    sink: Option<u32>,
     #[serde(default)]
     channel_map: String,
     #[serde(default)]
@@ -274,6 +384,21 @@ struct RawVolume {
 
 #[derive(Debug, Deserialize)]
 struct RawSourceOutput {
+    owner_module: Option<RawModuleId>,
+    source: Option<u32>,
     #[serde(default)]
     properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawModuleId {
+    Text(String),
+    Number(u32),
+}
+
+#[derive(Debug, Deserialize)]
+struct RawEndpoint {
+    index: u32,
+    name: String,
 }
