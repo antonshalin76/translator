@@ -2,8 +2,10 @@
 
 This fork-only diagnostic feeds the same 24 frozen MDC test WAVs (12 Russian,
 12 English) into the real `LocalProvider` twice: Turbo → NLLB → Piper and
-Turbo → Hy-MT2 → Piper. It selects the two verified female Piper voices,
-`QUALITY_FIRST`, 16-kHz mono input, and 24-kHz mono output. The
+Turbo → Hy-MT2 → Piper. The original paired runs selected the two verified
+female Piper voices and `QUALITY_FIRST`; the runner now explicitly selects
+male or female voices and any of the three modes. Input is 16-kHz mono and
+output is 24-kHz mono. The
 [runner](../../scripts/translator_product_audio_pair.py) checks the corpus,
 screen, Turbo report, selected WAV bytes and product manifest before starting
 models. It records private `0600` JSONL attempts outside Git, including
@@ -62,6 +64,40 @@ physical microphone, speaker, or headphone was used.
 | `full-balanced.jsonl` | `e573c01f18d6e9e9ca393a7d789e1b696c81dd2cbcb280ba2bd72dff260ed5f6` | 48/48 completed, 24/24 pairs |
 | `full-streaming-first.jsonl` | `e62a2354db27005ad857fe1e4b32673572c2e000f4929863831347a0b51d7ff8` | 13/48 attempted; 12 completed, first EN case `en-78643` failed, 35 `NOT_RUN` |
 | `replay-streaming-first-en-78643.jsonl` | `77efb12cbc8314624ef2e8ad43bca6d15e3d4753feef2c23a48d564d24c46792` | One frozen-case replay: Hy and NLLB completed; original failure remains unresolved |
+
+A single bounded Hy-only replay then used the exact original sequence of 12
+Russian WAVs followed by `en-78643`, one provider and no retry. All 13 attempts
+completed; the final English case produced its first provider PCM at 508 ms and
+the Hy child was gone after shutdown. The private
+`hy-original-prefix-20260927.jsonl` receipt has SHA-256
+`cb3474edb98495811886a9dbc114992f7b971b9659ed7d930368ec564038dd70`.
+Its short one-off driver was SHA-256
+`c75028b827c063f8293592116018b704d54ddea64c9533cac2f71ba57e28c4f9`.
+This non-reproduction does not erase the prior failed attempt or estimate a
+drop rate. There will be no further blind repeat of this sequence.
+
+The pinned Dmitri and Ryan male voice files were already present in the
+isolated evaluation cache and matched all four manifest file hashes. No model
+was downloaded or changed in production. With explicit `--voice-gender male`,
+the real Turbo → MT → Piper saved-audio chain completed the same two-case
+RU/EN smoke in all three modes, with NLLB and Hy run serially (4/4 attempts
+per mode, 12/12 total). Each arm released its Hy child where applicable. The
+three private receipts are:
+
+| Male-voice smoke | SHA-256 | Result |
+| --- | --- | --- |
+| `smoke-male-quality-first.jsonl` | `a4a50849eff3914db5d249f2a7b55e2e6bb6d64437a0ab170700f5cc927f8f8d` | 4/4 completed |
+| `smoke-male-balanced.jsonl` | `cfb9b82a4b1b071c3b795cb1964a9936bf1d2ac7f37201feb07226f21303bded` | 4/4 completed |
+| `smoke-male-streaming-first.jsonl` | `f89d887a0f92514dd9054cd880ae6fb1bc7c2f78da7ce9cae03ef34bdd7f567a` | 4/4 completed |
+
+The male-smoke runner SHA-256 is
+`cd969c91b523d41a6497aabbe90276f53b3f7880df5af2f158e37ed386f4e996`;
+all three receipts bind the same pinned product manifest and original 24-case
+screen. The first-provider-PCM range was 319–1176 ms across these twelve
+attempts. This is accelerated saved audio with no playback or independent
+transcription of the synthesized PCM. It proves neither the 1-second
+physical `STREAMING_FIRST` target nor audible semantic quality; the full
+male-voice cells and installed production cache remain unvalidated.
 
 The streaming-first failed attempt retained safe code
 `provider_unavailable`, terminal outcome `dropped`, a live Hy child, and
@@ -170,5 +206,8 @@ acceptable for Hy's factual gains, but the unexplained failed attempt and
 critical ASR/MT cases prevent default activation. Do not merge or release.
 Next, isolate the failure category without repeating broad benchmarks, test
 critical numerical ASR stability, then obtain a true physical first-audible
-and acoustic-admission path when hardware allows. No English human listening
-or physical microphone/headphone result is claimed here.
+and acoustic-admission path after a safe physical-audio test is authorized.
+No English human listening
+or physical microphone/headphone result is claimed here. The new male-voice
+smokes and successful failure-prefix replay are bounded diagnostics, not
+permission to activate Hy, open-speaker capture, merge, or release.

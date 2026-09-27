@@ -23,6 +23,7 @@ from translator_product_audio_pair import (
     write_record,
 )
 from translator_sidecar.provider_contract import (
+    Language,
     PrivacySafeProviderError,
     ProviderAudioDelta,
     ProviderLatency,
@@ -34,6 +35,7 @@ from translator_sidecar.provider_contract import (
     SampleFormat,
     TranslationMode,
     UtteranceOutcome,
+    VoiceGender,
 )
 
 
@@ -288,8 +290,9 @@ def test_journal_is_private_exclusive_and_durable(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("mode", list(TranslationMode))
 @pytest.mark.parametrize("language", ["ru_ru", "en_us"])
+@pytest.mark.parametrize("gender", list(VoiceGender))
 def test_selected_mode_reaches_session_and_every_frame(
-    monkeypatch, mode, language
+    monkeypatch, mode, language, gender
 ) -> None:
     sessions = []
     frames = []
@@ -326,11 +329,13 @@ def test_selected_mode_reaches_session_and_every_frame(
             Provider(),
             {"language": language, "pcm": b"\x01\x02" * 3200},
             mode,
+            gender,
         )
     )
     assert result["status"] == "completed"
     assert len(sessions) == 1
     assert sessions[0].mode is mode
+    assert sessions[0].voice_profile.gender is gender
     assert len(frames) == 2
     assert all(frame.mode is mode for frame in frames)
     assert all(frame.direction_id is sessions[0].direction_id for frame in frames)
@@ -373,6 +378,51 @@ def test_cli_selects_mode_with_compatible_default(
     assert product_audio_pair.main() == 0
     assert observed == [expected]
     assert '"status": "complete"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [([], VoiceGender.FEMALE), (["--voice-gender", "male"], VoiceGender.MALE)],
+)
+def test_cli_selects_voice_gender(monkeypatch, capsys, option, expected) -> None:
+    observed = []
+
+    async def fake_run(arguments):
+        observed.append(arguments.voice_gender)
+        return {"status": "complete"}
+
+    monkeypatch.setattr(product_audio_pair, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "translator_product_audio_pair.py",
+            "--manifest",
+            "/tmp/manifest",
+            "--screen",
+            "/tmp/screen",
+            "--turbo",
+            "/tmp/turbo",
+            "--output",
+            "/tmp/private-result",
+            *option,
+        ],
+    )
+    assert product_audio_pair.main() == 0
+    assert observed == [expected]
+    assert '"status": "complete"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [("ru_ru", Language.EN), ("en_us", Language.RU)],
+)
+def test_request_selects_pinned_male_target_voice(source, target) -> None:
+    request = product_audio_pair._request(
+        source, TranslationMode.QUALITY_FIRST, VoiceGender.MALE
+    )
+    assert request.voice_profile.language is target
+    assert request.voice_profile.gender is VoiceGender.MALE
 
 
 def test_invalid_cli_mode_exits_before_corpus_or_model_access(
@@ -455,6 +505,7 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
     monkeypatch.setattr(product_audio_pair, "HY_SERVER", tmp_path / "not-installed")
     monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(tmp_path))
     requested = TranslationMode.BALANCED
+    requested_gender = VoiceGender.MALE
 
     class Provider:
         _asr_model_id = product_audio_pair.ASR_ID
@@ -471,7 +522,8 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
             raise RuntimeError("synthetic build failure")
         return Provider()
 
-    async def run_case(provider, case, mode):
+    async def run_case(provider, case, mode, voice_gender):
+        assert voice_gender is requested_gender
         if failure_stage == "attempt":
             raise RuntimeError("synthetic case failure")
         if failure_stage == "provider_drop":
@@ -506,6 +558,7 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
         smoke=True,
         order="nllb-hy",
         mode=requested,
+        voice_gender=requested_gender,
     )
     result = asyncio.run(product_audio_pair.run(arguments))
     records = [
@@ -514,6 +567,12 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
     assert records
     assert result["status"] == ("complete" if failure_stage == "complete" else "failed")
     assert all(record.get("mode") == requested.value for record in records)
+    assert records[0]["voice_gender"] == requested_gender.value
+    assert all(
+        record["voice_gender"] == requested_gender.value
+        for record in records
+        if record["type"] == "attempt"
+    )
     assert records[0]["type"] == "header"
     assert records[-1]["type"] == "terminal"
     assert records[-1]["status"] == (
@@ -618,6 +677,7 @@ def test_dropped_provider_latency_is_exactly_allowlisted_or_unmeasured(
                 Provider(),
                 {"language": "en_us", "pcm": b"\x01\x02" * 1600},
                 TranslationMode.STREAMING_FIRST,
+                VoiceGender.FEMALE,
             )
         )
     assert failure.value.safe_provider_codes == ["provider_unavailable"]
@@ -671,6 +731,7 @@ def test_wait_idle_failure_does_not_invent_latency(monkeypatch) -> None:
                 Provider(),
                 {"language": "en_us", "pcm": b"\x01\x02" * 1600},
                 TranslationMode.STREAMING_FIRST,
+                VoiceGender.FEMALE,
             )
         )
     assert not hasattr(failure.value, "safe_provider_latency")

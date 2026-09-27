@@ -314,7 +314,9 @@ def pair_rows(
     return pairs
 
 
-def _request(language: str, mode: TranslationMode) -> OpenProviderSession:
+def _request(
+    language: str, mode: TranslationMode, voice_gender: VoiceGender
+) -> OpenProviderSession:
     source, target, direction = (
         (Language.RU, Language.EN, AudioDirection.MICROPHONE)
         if language == "ru_ru"
@@ -341,7 +343,7 @@ def _request(language: str, mode: TranslationMode) -> OpenProviderSession:
         ),
         voice_profile=VoiceProfile(
             language=target,
-            gender=VoiceGender.FEMALE,
+            gender=voice_gender,
             engine=VoiceEngine.PIPER,
         ),
         debug_text_enabled=True,
@@ -349,9 +351,12 @@ def _request(language: str, mode: TranslationMode) -> OpenProviderSession:
 
 
 async def _run_case(
-    provider: Any, case: dict[str, Any], mode: TranslationMode
+    provider: Any,
+    case: dict[str, Any],
+    mode: TranslationMode,
+    voice_gender: VoiceGender,
 ) -> dict[str, Any]:
-    request = _request(case["language"], mode)
+    request = _request(case["language"], mode, voice_gender)
     event_times: list[tuple[Any, int]] = []
 
     async def publish(batch: tuple[Any, ...], commit: Any) -> None:
@@ -491,6 +496,7 @@ async def _run_arm(
     journal: TextIO,
     rows: list[dict[str, Any]],
     mode: TranslationMode,
+    voice_gender: VoiceGender,
 ) -> bool:
     previous_asr = os.environ.get("TRANSLATOR_ASR_MODEL_ID")
     previous_mt = os.environ.get("TRANSLATOR_MT_MODEL_ID")
@@ -530,13 +536,13 @@ async def _run_arm(
                 "language": case["language"],
                 "speaker_id": case["speaker_id"],
                 "wav_sha256": case["wav_sha256"],
-                "voice_gender": "female",
+                "voice_gender": voice_gender.value,
                 "reference": case["reference"],
                 "turbo_frozen_text": case["turbo_text"],
                 "critical_labels": case["critical_labels"],
             }
             try:
-                row.update(await _run_case(provider, case, mode))
+                row.update(await _run_case(provider, case, mode, voice_gender))
             except Exception as error:  # noqa: BLE001 - retain the failed attempt
                 row.update(status="failed", error_type=type(error).__name__)
                 if str(error) in SAFE_EVALUATION_REASONS:
@@ -630,6 +636,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     mode = args.mode
     if not isinstance(mode, TranslationMode):
         raise TypeError("product mode is invalid")
+    voice_gender = args.voice_gender
+    if not isinstance(voice_gender, VoiceGender):
+        raise TypeError("product voice gender is invalid")
     cases = load_cases(args.manifest, args.screen, args.turbo)
     model_cache_root = os.environ.get("TRANSLATOR_MODEL_CACHE_ROOT")
     if model_cache_root is None or not Path(model_cache_root).is_dir():
@@ -688,7 +697,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 "diagnostic_case_id": args.case_id,
                 "order": order,
                 "mode": mode.value,
-                "voice_gender": "female",
+                "voice_gender": voice_gender.value,
                 "input": "mono s16le 16000 Hz 100 ms, submitted as fast as possible",
                 "output": "mono s16le 24000 Hz 20 ms",
                 "cpu_affinity": sorted(os.sched_getaffinity(0)),
@@ -696,7 +705,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         all_complete = True
         for arm_index, backend in enumerate(order):
-            if not await _run_arm(backend, cases, journal, rows, mode):
+            if not await _run_arm(backend, cases, journal, rows, mode, voice_gender):
                 all_complete = False
                 for remaining_backend in order[arm_index + 1 :]:
                     for case in cases:
@@ -742,6 +751,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
+        "--voice-gender",
+        choices=tuple(gender.value for gender in VoiceGender),
+        default=VoiceGender.FEMALE.value,
+    )
+    parser.add_argument(
         "--case-id", help="one frozen origin for failure diagnosis only"
     )
     parser.add_argument("--order", choices=("nllb-hy", "hy-nllb"), default="nllb-hy")
@@ -752,6 +766,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     args.mode = TranslationMode(args.mode)
+    args.voice_gender = VoiceGender(args.voice_gender)
     try:
         result = asyncio.run(run(args))
     except Exception as error:  # noqa: BLE001 - stdout must remain text-free
