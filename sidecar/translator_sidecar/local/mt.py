@@ -94,6 +94,12 @@ def _preserve_purchase_order_identifiers(
     result = translated
     for source_match in _PURCHASE_ORDER_ID_RE.finditer(source):
         identifier = re.escape(source_match.group("identifier"))
+        number_token = re.compile(rf"(?<!\w){identifier}(?!\w)")
+        if (
+            len(number_token.findall(source)) != 1
+            or len(number_token.findall(result)) != 1
+        ):
+            continue
         correct = re.compile(
             rf"\b(?:номер\s+заказа|заказ\s+номер)\s+{identifier}\b",
             flags=re.IGNORECASE,

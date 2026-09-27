@@ -242,6 +242,128 @@ def test_nllb_does_not_rewrite_order_words_without_matching_source_contract() ->
     )
 
 
+def test_nllb_does_not_invent_order_role_for_ambiguous_identifier() -> None:
+    source = "Confirm order number 104 and decree number 104."
+    translated = "Подтвердите номер приказа 104."
+    assert (
+        _preserve_purchase_order_identifiers(
+            source, translated, source_language=Language.EN, target_language=Language.RU
+        )
+        == translated
+    )
+
+
+def test_nllb_order_role_guard_is_en_to_ru_only() -> None:
+    translated = "Подтвердите номер приказа 104."
+    assert (
+        _preserve_purchase_order_identifiers(
+            "Confirm order number 104.",
+            translated,
+            source_language=Language.RU,
+            target_language=Language.EN,
+        )
+        == translated
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "translated", "expected"),
+    [
+        (
+            "Confirm order number 104.",
+            "Номер приказа 104 и номер порядка 104.",
+            "Номер приказа 104 и номер порядка 104.",
+        ),
+        (
+            "Confirm order number 104.",
+            "Номер приказа 104 и номер заказа 104.",
+            "Номер приказа 104 и номер заказа 104.",
+        ),
+        (
+            "Confirm order number 104 and order number 215.",
+            "Подтвердите номер приказа 215 и номер порядка 104.",
+            "Подтвердите номер заказа 215 и номер заказа 104.",
+        ),
+        (
+            "Confirm order number 104, decree number 104, and order number 215.",
+            "Подтвердите номер приказа 104 и номер порядка 215.",
+            "Подтвердите номер приказа 104 и номер заказа 215.",
+        ),
+        (
+            "Confirm order number 104 and reference 1040.",
+            "Подтвердите номер порядка 104 и код 1040.",
+            "Подтвердите номер заказа 104 и код 1040.",
+        ),
+        (
+            "Confirm order number 104.",
+            "Подтвердите номер приказа 204.",
+            "Подтвердите номер приказа 204.",
+        ),
+    ],
+)
+def test_nllb_order_identifier_rewrite_is_unambiguous_and_idempotent(
+    source: str, translated: str, expected: str
+) -> None:
+    actual = _preserve_purchase_order_identifiers(
+        source,
+        translated,
+        source_language=Language.EN,
+        target_language=Language.RU,
+    )
+    assert actual == expected
+    assert (
+        _preserve_purchase_order_identifiers(
+            source,
+            actual,
+            source_language=Language.EN,
+            target_language=Language.RU,
+        )
+        == actual
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("Confirm order number 104.", "Подтвердите номер заказа 104."),
+        (
+            "Confirm order number 104 and decree number 104.",
+            "Подтвердите номер приказа 104.",
+        ),
+    ],
+)
+def test_nllb_translate_purchase_order_role_guard(
+    tmp_path: Path, source: str, expected: str
+) -> None:
+    class FixedRussianOutputPiece(SentenceEchoPiece):
+        def decode(self, tokens: list[str]) -> str:
+            return "Подтвердите номер приказа 104."
+
+    class FixedRussianOutputRuntime(FakeCTranslate2):
+        def translate_batch(
+            self, source: list[list[str]], **kwargs: object
+        ) -> list[FakeResult]:
+            results = super().translate_batch(source, **kwargs)
+            for result in results:
+                result.hypotheses = [["rus_Cyrl", "translated"]]
+            return results
+
+    translator = NllbTranslator(
+        tmp_path,
+        translator=FixedRussianOutputRuntime(),
+        tokenizer=FixedRussianOutputPiece(),
+    )
+    assert (
+        translator.translate(
+            source,
+            source_language=Language.EN,
+            target_language=Language.RU,
+            mode=TranslationMode.QUALITY_FIRST,
+        )
+        == expected
+    )
+
+
 @pytest.mark.parametrize(
     (
         "source",
