@@ -26,6 +26,14 @@ calibration lease is released. Deterministic controller tests cover failed
 cleanup and retry. This does not enable open-speaker use: no production
 calibration engine is connected, and no physical acoustic proof has been run.
 
+The fork now avoids creating a raw-microphone original loopback when the
+selected output is an open speaker or unknown, and reconciliation recognizes
+only loopback modules marked as owned on both Pulse stream halves. This closes
+the normal request path for that bypass, but does not make device changes
+atomic: an existing module can remain live after failed unload or until the
+next watcher refresh. Open-speaker use remains unavailable pending a real AEC
+engine, immediate revocation, and physical validation.
+
 The Task 7 E2E harness now makes at most two attempts to clean up its owned
 input sink. Persistent cleanup failures terminate with no success report;
 foreign module IDs are not unloaded. This is harness safety evidence only, not
