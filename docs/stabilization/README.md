@@ -26,6 +26,11 @@ calibration lease is released. Deterministic controller tests cover failed
 cleanup and retry. This does not enable open-speaker use: no production
 calibration engine is connected, and no physical acoustic proof has been run.
 
+The Task 7 E2E harness now makes at most two attempts to clean up its owned
+input sink. Persistent cleanup failures terminate with no success report;
+foreign module IDs are not unloaded. This is harness safety evidence only, not
+a new physical Task 7 result or a release gate pass.
+
 ## Recovery baseline (2026-09-23)
 
 The last code commit is `b239b9a1be094a4f2c1f53132e49a664bbf020fa`

@@ -468,6 +468,111 @@ def test_live_e2e_retains_temporary_owner_wipes_before_retry_and_never_reports_s
     assert arguments.report_calls == []
 
 
+@pytest.mark.parametrize("failure_kind", ["unload", "inventory"])
+@pytest.mark.parametrize("body_failure", [False, True])
+def test_live_e2e_persistent_sink_cleanup_is_bounded_and_fail_closed(
+    tmp_path, monkeypatch, failure_kind, body_failure
+):
+    arguments, fixture, runner, owner, _ = temporary_sink_live_fixture(
+        tmp_path, monkeypatch
+    )
+    if failure_kind == "unload":
+        runner.unload_errors = 2
+    else:
+        runner.read_error = "invalid inventory"
+
+    if body_failure:
+
+        def fail_measurement(*args, **kwargs):
+            raise Task7E2EError("synthetic measurement failed")
+
+        monkeypatch.setattr(task7_e2e, "run_smoke_pairs", fail_measurement)
+
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        assert sleeps == [1], "outer sink cleanup must retry only once"
+
+    monkeypatch.setattr(
+        task7_e2e,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: 100.0,
+            monotonic_ns=lambda: 100_000_000_000,
+            sleep=sleep,
+        ),
+    )
+    with pytest.raises(Task7E2EError, match="E2E cleanup failed") as failure:
+        run_live_e2e(arguments)
+
+    assert sleeps == [1]
+    assert (
+        len(
+            [
+                command
+                for command, _ in runner.calls
+                if command[:3] == ["pactl", "list", "short"]
+            ]
+        )
+        == 2
+    )
+    assert len(runner.unloads()) == (2 if failure_kind == "unload" else 0)
+    assert owner.module_id == 73
+    assert len(runner.modules) == 1
+    assert fixture.audio == bytearray(len(fixture.audio))
+    assert not arguments.output.exists()
+    assert arguments.report_calls == []
+    if failure_kind == "unload":
+        assert failure.value.__cause__ is runner.unload_failure
+    else:
+        assert str(failure.value.__cause__) == "temporary sink ownership is uncertain"
+    if body_failure:
+        assert isinstance(failure.value.__context__, Task7E2EError)
+        assert str(failure.value.__context__).startswith(
+            "synthetic measurement failed; bridge diagnostics:"
+        )
+        assert (
+            str(failure.value.__context__.__cause__) == "synthetic measurement failed"
+        )
+
+
+def test_live_e2e_retry_does_not_unload_foreign_reused_module(tmp_path, monkeypatch):
+    arguments, fixture, runner, owner, _ = temporary_sink_live_fixture(
+        tmp_path, monkeypatch
+    )
+    runner.unload_errors = 1
+    runner.apply_failed_unload = True
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        runner.modules = [
+            {"index": 73, "name": "module-null-sink", "argument": "sink_name=foreign"}
+        ]
+
+    monkeypatch.setattr(
+        task7_e2e,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: 100.0,
+            monotonic_ns=lambda: 100_000_000_000,
+            sleep=sleep,
+        ),
+    )
+    with pytest.raises(Task7E2EError, match="E2E cleanup failed"):
+        run_live_e2e(arguments)
+
+    assert sleeps == [1]
+    assert runner.unloads() == [["pactl", "unload-module", "73"]]
+    assert runner.modules == [
+        {"index": 73, "name": "module-null-sink", "argument": "sink_name=foreign"}
+    ]
+    assert owner.module_id is None
+    assert fixture.audio == bytearray(len(fixture.audio))
+    assert arguments.report_calls == []
+
+
 @pytest.mark.parametrize("setup_failure", ["none", "quality", "graph", "profile"])
 def test_live_e2e_setup_and_success_zeroize_returned_fixtures(
     tmp_path, monkeypatch, setup_failure

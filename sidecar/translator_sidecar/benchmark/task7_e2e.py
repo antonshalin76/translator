@@ -1896,14 +1896,15 @@ def run_live_e2e(arguments: argparse.Namespace) -> dict[str, Any]:
                     bridge.kill()
                 except BaseException as kill_error:
                     cleanup_errors.append(kill_error)
-        while True:
+        for attempt in range(2):
             try:
                 temporary_sink.stop()
                 break
             except (Task7E2EError, OSError, subprocess.SubprocessError) as error:
                 if not cleanup_errors:
                     cleanup_errors.append(error)
-                time.sleep(1)
+                if attempt == 0:
+                    time.sleep(1)
         if cleanup_errors:
             raise Task7E2EError("E2E cleanup failed") from cleanup_errors[0]
     graph_after = pulse_graph_summary()
