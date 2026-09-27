@@ -403,21 +403,36 @@ impl OriginalLoopbackError {
 struct OriginalLoopbackRequest {
     media_name: &'static str,
     source: String,
-    source_target_object: String,
     sink: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveredOriginalLoopback {
     media_name: &'static str,
-    source_target_object: Option<String>,
-    sink_target_object: Option<String>,
+    source_index: Option<u32>,
+    sink_index: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawPulseModuleId {
+    Text(String),
+    Number(u32),
 }
 
 #[derive(Debug, Deserialize)]
 struct RawPulseStream {
+    owner_module: Option<RawPulseModuleId>,
+    source: Option<u32>,
+    sink: Option<u32>,
     #[serde(default)]
     properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPulseEndpoint {
+    index: u32,
+    name: String,
 }
 
 struct PulseOriginalLoopbacks<R = SystemCommandRunner> {
@@ -438,12 +453,28 @@ where
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
         let source_outputs: Vec<RawPulseStream> =
             self.run_json(&["--format=json", "list", "source-outputs"])?;
-        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs);
+        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
+        let (sources, sinks) = if requests.is_empty() {
+            (HashMap::new(), HashMap::new())
+        } else {
+            let sources = endpoint_names(self.run_json(&["--format=json", "list", "sources"])?)?;
+            let sinks = endpoint_names(self.run_json(&["--format=json", "list", "sinks"])?)?;
+            (sources, sinks)
+        };
+        if requests.iter().any(|request| {
+            !sources.values().any(|name| name == &request.source)
+                || !sinks.values().any(|name| name == &request.sink)
+        }) {
+            return Err(OriginalLoopbackError::new(
+                OriginalLoopbackErrorCode::Discovery,
+            ));
+        }
         let mut keep_module_ids = HashSet::new();
         let mut missing_requests = Vec::new();
 
         for request in &requests {
-            let mut matching_module_ids = matching_original_loopbacks(&discovered, request);
+            let mut matching_module_ids =
+                matching_original_loopbacks(&discovered, request, &sources, &sinks)?;
             matching_module_ids.sort();
             if let Some(module_id) = matching_module_ids.first() {
                 keep_module_ids.insert(module_id.clone());
@@ -474,7 +505,7 @@ where
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
         let source_outputs: Vec<RawPulseStream> =
             self.run_json(&["--format=json", "list", "source-outputs"])?;
-        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs);
+        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
         let mut module_ids: Vec<_> = discovered.keys().cloned().collect();
         module_ids.sort();
         for module_id in &module_ids {
@@ -544,7 +575,6 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
         requests.push(OriginalLoopbackRequest {
             media_name: SPEAKER_ORIGINAL_LOOPBACK,
             source: format!("{REMOTE_IN_SINK}.monitor"),
-            source_target_object: REMOTE_IN_SINK.to_owned(),
             sink: sink.name.clone(),
         });
     }
@@ -556,7 +586,6 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
         requests.push(OriginalLoopbackRequest {
             media_name: MICROPHONE_ORIGINAL_LOOPBACK,
             source: source.name.clone(),
-            source_target_object: source.name.clone(),
             sink: MIC_OUT_SINK.to_owned(),
         });
     }
@@ -578,11 +607,11 @@ fn original_loopback_load_args(request: &OriginalLoopbackRequest) -> Vec<String>
         "source_dont_move=true".to_owned(),
         "sink_dont_move=true".to_owned(),
         format!(
-            "source_output_properties=media.name={} translator.owner=true",
+            "source_output_properties='media.name={} translator.owner=true'",
             request.media_name
         ),
         format!(
-            "sink_input_properties=media.name={} translator.owner=true",
+            "sink_input_properties='media.name={} translator.owner=true'",
             request.media_name
         ),
     ]
@@ -591,7 +620,7 @@ fn original_loopback_load_args(request: &OriginalLoopbackRequest) -> Vec<String>
 fn discover_original_loopbacks(
     sink_inputs: &[RawPulseStream],
     source_outputs: &[RawPulseStream],
-) -> HashMap<String, DiscoveredOriginalLoopback> {
+) -> Result<HashMap<String, DiscoveredOriginalLoopback>, OriginalLoopbackError> {
     let mut modules = HashMap::new();
     let mut owned_sink_inputs = HashSet::new();
     let mut owned_source_outputs = HashSet::new();
@@ -599,61 +628,119 @@ fn discover_original_loopbacks(
         let Some(media_name) = original_media_name(&input.properties) else {
             continue;
         };
-        let Some(module_id) = property(&input.properties, "pulse.module.id") else {
-            continue;
-        };
-        owned_sink_inputs.insert((module_id.to_owned(), media_name));
-        let module = discovered_loopback_entry(&mut modules, module_id, media_name);
-        module.sink_target_object = property(&input.properties, "target.object").map(str::to_owned);
+        let module_id = stream_module_id(input)?;
+        owned_sink_inputs.insert((module_id.clone(), media_name));
+        let module = discovered_loopback_entry(&mut modules, &module_id, media_name)?;
+        let sink_index = input.sink.ok_or_else(discovery_error)?;
+        if module
+            .sink_index
+            .replace(sink_index)
+            .is_some_and(|previous| previous != sink_index)
+        {
+            return Err(discovery_error());
+        }
     }
 
     for output in source_outputs {
         let Some(media_name) = original_media_name(&output.properties) else {
             continue;
         };
-        let Some(module_id) = property(&output.properties, "pulse.module.id") else {
-            continue;
-        };
-        owned_source_outputs.insert((module_id.to_owned(), media_name));
-        let module = discovered_loopback_entry(&mut modules, module_id, media_name);
-        module.source_target_object =
-            property(&output.properties, "target.object").map(str::to_owned);
+        let module_id = stream_module_id(output)?;
+        owned_source_outputs.insert((module_id.clone(), media_name));
+        let module = discovered_loopback_entry(&mut modules, &module_id, media_name)?;
+        let source_index = output.source.ok_or_else(discovery_error)?;
+        if module
+            .source_index
+            .replace(source_index)
+            .is_some_and(|previous| previous != source_index)
+        {
+            return Err(discovery_error());
+        }
     }
     modules.retain(|module_id, module| {
         let identity = (module_id.clone(), module.media_name);
         owned_sink_inputs.contains(&identity) && owned_source_outputs.contains(&identity)
     });
-    modules
+    Ok(modules)
 }
 
 fn discovered_loopback_entry<'a>(
     modules: &'a mut HashMap<String, DiscoveredOriginalLoopback>,
     module_id: &str,
     media_name: &'static str,
-) -> &'a mut DiscoveredOriginalLoopback {
-    modules
-        .entry(module_id.to_owned())
-        .or_insert_with(|| DiscoveredOriginalLoopback {
-            media_name,
-            source_target_object: None,
-            sink_target_object: None,
-        })
+) -> Result<&'a mut DiscoveredOriginalLoopback, OriginalLoopbackError> {
+    let module =
+        modules
+            .entry(module_id.to_owned())
+            .or_insert_with(|| DiscoveredOriginalLoopback {
+                media_name,
+                source_index: None,
+                sink_index: None,
+            });
+    if module.media_name != media_name {
+        return Err(discovery_error());
+    }
+    Ok(module)
 }
 
 fn matching_original_loopbacks(
     discovered: &HashMap<String, DiscoveredOriginalLoopback>,
     request: &OriginalLoopbackRequest,
-) -> Vec<String> {
-    discovered
-        .iter()
-        .filter_map(|(module_id, loopback)| {
-            (loopback.media_name == request.media_name
-                && loopback.source_target_object.as_deref()
-                    == Some(request.source_target_object.as_str())
-                && loopback.sink_target_object.as_deref() == Some(request.sink.as_str()))
-            .then_some(module_id.clone())
-        })
-        .collect()
+    sources: &HashMap<u32, String>,
+    sinks: &HashMap<u32, String>,
+) -> Result<Vec<String>, OriginalLoopbackError> {
+    let mut matching = Vec::new();
+    for (module_id, loopback) in discovered {
+        if loopback.media_name != request.media_name {
+            continue;
+        }
+        let source = loopback
+            .source_index
+            .and_then(|index| sources.get(&index))
+            .ok_or_else(discovery_error)?;
+        let sink = loopback
+            .sink_index
+            .and_then(|index| sinks.get(&index))
+            .ok_or_else(discovery_error)?;
+        if source == &request.source && sink == &request.sink {
+            matching.push(module_id.clone());
+        }
+    }
+    Ok(matching)
+}
+
+fn stream_module_id(stream: &RawPulseStream) -> Result<String, OriginalLoopbackError> {
+    match stream.owner_module.as_ref().ok_or_else(discovery_error)? {
+        RawPulseModuleId::Number(id) => Ok(id.to_string()),
+        RawPulseModuleId::Text(id)
+            if id
+                .parse::<u32>()
+                .is_ok_and(|parsed| parsed.to_string() == *id) =>
+        {
+            Ok(id.clone())
+        }
+        RawPulseModuleId::Text(_) => Err(discovery_error()),
+    }
+}
+
+fn endpoint_names(
+    endpoints: Vec<RawPulseEndpoint>,
+) -> Result<HashMap<u32, String>, OriginalLoopbackError> {
+    let mut names = HashMap::new();
+    let mut seen_names = HashSet::new();
+    for endpoint in endpoints {
+        if endpoint.name.is_empty()
+            || !seen_names.insert(endpoint.name.clone())
+            || names.insert(endpoint.index, endpoint.name).is_some()
+        {
+            return Err(discovery_error());
+        }
+    }
+    Ok(names)
+}
+
+fn discovery_error() -> OriginalLoopbackError {
+    OriginalLoopbackError::new(OriginalLoopbackErrorCode::Discovery)
 }
 
 fn original_media_name(properties: &HashMap<String, String>) -> Option<&'static str> {
@@ -1489,15 +1576,16 @@ mod tests {
 
     use super::{
         DiscoveredOriginalLoopback, LifecycleProtected, MICROPHONE_ORIGINAL_LOOPBACK,
-        ManualRouteAdmission, OriginalLoopbackRequest, PulseOriginalLoopbacks, RawPulseStream,
-        SPEAKER_ORIGINAL_LOOPBACK, discover_original_loopbacks, maintain_audio_graph,
-        manual_route_admission, matching_original_loopbacks, original_loopback_load_args,
-        original_loopback_requests,
+        ManualRouteAdmission, OriginalLoopbackRequest, PulseOriginalLoopbacks, RawPulseModuleId,
+        RawPulseStream, SPEAKER_ORIGINAL_LOOPBACK, discover_original_loopbacks,
+        maintain_audio_graph, manual_route_admission, matching_original_loopbacks,
+        original_loopback_load_args, original_loopback_requests,
     };
     use translator_audio::{
         AecCapability, AudioEndpointState, AudioGraph, AudioGraphError, AudioGraphState,
         CommandResult, CommandRunError, CommandRunner, DeviceHealth, DeviceSelectionState,
         EndpointRole, GraphHealth, MIC_OUT_SINK, OutputMode, PhysicalDevice, REMOTE_IN_SINK,
+        SystemCommandRunner,
     };
     use translator_daemon::{
         AcousticSafety, AdmittedDuplex, AudioMixState, AudioOperationState, DeviceState,
@@ -1621,13 +1709,11 @@ mod tests {
                 OriginalLoopbackRequest {
                     media_name: SPEAKER_ORIGINAL_LOOPBACK,
                     source: format!("{REMOTE_IN_SINK}.monitor"),
-                    source_target_object: REMOTE_IN_SINK.to_owned(),
                     sink: "alsa_output.headphones".to_owned(),
                 },
                 OriginalLoopbackRequest {
                     media_name: MICROPHONE_ORIGINAL_LOOPBACK,
                     source: "alsa_input.microphone".to_owned(),
-                    source_target_object: "alsa_input.microphone".to_owned(),
                     sink: MIC_OUT_SINK.to_owned(),
                 },
             ]
@@ -1662,13 +1748,11 @@ mod tests {
                 OriginalLoopbackRequest {
                     media_name: SPEAKER_ORIGINAL_LOOPBACK,
                     source: format!("{REMOTE_IN_SINK}.monitor"),
-                    source_target_object: REMOTE_IN_SINK.to_owned(),
                     sink: "alsa_output.headphones".to_owned(),
                 },
                 OriginalLoopbackRequest {
                     media_name: MICROPHONE_ORIGINAL_LOOPBACK,
                     source: "alsa_input.microphone".to_owned(),
-                    source_target_object: "alsa_input.microphone".to_owned(),
                     sink: MIC_OUT_SINK.to_owned(),
                 },
             ]
@@ -1720,18 +1804,18 @@ mod tests {
 
     #[test]
     fn original_loopback_discovery_ignores_name_matched_foreign_streams() {
-        let owned_sink = raw_stream(MICROPHONE_ORIGINAL_LOOPBACK, "41", MIC_OUT_SINK);
-        let owned_source = raw_stream(MICROPHONE_ORIGINAL_LOOPBACK, "41", "alsa_input.microphone");
-        let mut foreign_sink = raw_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", MIC_OUT_SINK);
+        let owned_sink = raw_sink_stream(MICROPHONE_ORIGINAL_LOOPBACK, "41", 1);
+        let owned_source = raw_source_stream(MICROPHONE_ORIGINAL_LOOPBACK, "41", 0);
+        let mut foreign_sink = raw_sink_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 1);
         foreign_sink.properties.remove("translator.owner");
-        let mut foreign_source =
-            raw_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", "alsa_input.microphone");
+        let mut foreign_source = raw_source_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 0);
         foreign_source.properties.remove("translator.owner");
 
         let discovered = discover_original_loopbacks(
             &[owned_sink, foreign_sink],
             &[owned_source, foreign_source],
-        );
+        )
+        .unwrap();
 
         assert!(discovered.contains_key("41"));
         assert!(!discovered.contains_key("42"));
@@ -1739,11 +1823,11 @@ mod tests {
 
     #[test]
     fn original_loopback_discovery_requires_both_owner_markers() {
-        let sink = raw_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", MIC_OUT_SINK);
-        let mut source = raw_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", "alsa_input.microphone");
+        let sink = raw_sink_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 1);
+        let mut source = raw_source_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 0);
         source.properties.remove("translator.owner");
 
-        let discovered = discover_original_loopbacks(&[sink], &[source]);
+        let discovered = discover_original_loopbacks(&[sink], &[source]).unwrap();
 
         assert!(!discovered.contains_key("42"));
     }
@@ -1764,6 +1848,10 @@ mod tests {
         modules: Vec<LoopbackModule>,
         calls: Vec<Vec<String>>,
         fail_unload: bool,
+        missing_source_index: bool,
+        missing_sink_index: bool,
+        duplicate_sink_index: bool,
+        malformed_module_id: bool,
     }
 
     impl LoopbackRunner {
@@ -1801,24 +1889,67 @@ mod tests {
             state.calls.push(args.to_vec());
             match args {
                 [format, list, kind] if format == "--format=json" && list == "list" => {
+                    if kind == "sources" {
+                        let mut sources = serde_json::json!([
+                            {"index": 0, "name": "alsa_input.microphone"},
+                            {"index": 1, "name": format!("{REMOTE_IN_SINK}.monitor")},
+                            {"index": 2, "name": "alsa_input.other"}
+                        ]);
+                        if state.missing_source_index {
+                            sources.as_array_mut().unwrap().remove(2);
+                        }
+                        return Ok(CommandResult::success(
+                            serde_json::to_vec(&sources).unwrap(),
+                        ));
+                    }
+                    if kind == "sinks" {
+                        let mut sinks = serde_json::json!([
+                            {"index": 0, "name": "alsa_output.headphones"},
+                            {"index": 1, "name": MIC_OUT_SINK},
+                            {"index": 2, "name": "alsa_output.other"}
+                        ]);
+                        if state.duplicate_sink_index {
+                            sinks.as_array_mut().unwrap().push(serde_json::json!({
+                                "index": 0,
+                                "name": "alsa_output.duplicate"
+                            }));
+                        }
+                        if state.missing_sink_index {
+                            sinks.as_array_mut().unwrap().remove(2);
+                        }
+                        return Ok(CommandResult::success(serde_json::to_vec(&sinks).unwrap()));
+                    }
                     let streams: Vec<_> = state
                         .modules
                         .iter()
                         .map(|module| {
-                            let target = if kind == "sink-inputs" {
-                                module.sink.as_str()
+                            let (endpoint, index) = if kind == "sink-inputs" {
+                                ("sink", match module.sink.as_str() {
+                                    "alsa_output.headphones" => 0,
+                                    MIC_OUT_SINK => 1,
+                                    "alsa_output.other" => 2,
+                                    other => panic!("unexpected sink: {other}"),
+                                })
                             } else {
-                                module.source.as_str()
+                                ("source", match module.source.as_str() {
+                                    "alsa_input.microphone" => 0,
+                                    name if name == format!("{REMOTE_IN_SINK}.monitor") => 1,
+                                    "alsa_input.other" => 2,
+                                    other => panic!("unexpected source: {other}"),
+                                })
                             };
                             let mut properties = serde_json::json!({
                                 "media.name": module.media_name,
-                                "pulse.module.id": module.id.to_string(),
-                                "target.object": target,
                             });
                             if module.owned {
                                 properties["translator.owner"] = "true".into();
                             }
-                            serde_json::json!({ "properties": properties })
+                            let mut stream = serde_json::json!({
+                                "owner_module": if state.malformed_module_id { "not-an-id".to_owned() } else { module.id.to_string() },
+                                "properties": properties,
+                            });
+                            stream[endpoint] = index.into();
+                            stream
                         })
                         .collect();
                     Ok(CommandResult::success(
@@ -1853,7 +1984,7 @@ mod tests {
                         .find_map(|arg| arg.strip_prefix("sink="))
                         .unwrap();
                     let source = if media_name == SPEAKER_ORIGINAL_LOOPBACK {
-                        REMOTE_IN_SINK.to_owned()
+                        format!("{REMOTE_IN_SINK}.monitor")
                     } else {
                         source.to_owned()
                     };
@@ -1892,7 +2023,7 @@ mod tests {
         LoopbackModule {
             id,
             media_name: SPEAKER_ORIGINAL_LOOPBACK,
-            source: REMOTE_IN_SINK.to_owned(),
+            source: format!("{REMOTE_IN_SINK}.monitor"),
             sink: "alsa_output.headphones".to_owned(),
             owned: true,
         }
@@ -2030,11 +2161,148 @@ mod tests {
     }
 
     #[test]
-    fn original_loopback_load_args_are_discoverable_by_audio_mix() {
+    fn wrong_source_or_sink_is_replaced_after_owned_unload() {
+        for wrong_source in [false, true] {
+            let mut module = microphone_module(41, true);
+            if wrong_source {
+                module.source = "alsa_input.other".to_owned();
+            } else {
+                module.sink = "alsa_output.other".to_owned();
+            }
+            let runner = LoopbackRunner::new(vec![module, microphone_module(42, false)]);
+            let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+            let snapshot = RuntimeSnapshot {
+                translation_running: true,
+                audio_mix: AudioMixState {
+                    microphone_original_percent: 74,
+                    ..AudioMixState::default()
+                },
+                ..loopback_snapshot(OutputMode::Headphones)
+            };
+
+            loopbacks.ensure(&snapshot).unwrap();
+
+            let calls = runner.calls();
+            let unload = calls
+                .iter()
+                .position(|args| args == &["unload-module", "41"])
+                .unwrap();
+            let load = calls
+                .iter()
+                .position(|args| args.first().map(String::as_str) == Some("load-module"))
+                .unwrap();
+            assert!(unload < load);
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|args| args.first().map(String::as_str) == Some("load-module"))
+                    .count(),
+                1
+            );
+            assert!(runner.module_ids().contains(&42));
+            let state = runner.0.lock().unwrap();
+            let replacement = state
+                .modules
+                .iter()
+                .find(|module| module.owned && module.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
+                .unwrap();
+            assert_eq!(replacement.source, "alsa_input.microphone");
+            assert_eq!(replacement.sink, MIC_OUT_SINK);
+        }
+    }
+
+    #[test]
+    fn incomplete_owned_inventory_prevents_all_mutation() {
+        for fault in 0..4 {
+            let mut module = microphone_module(41, true);
+            if fault == 0 {
+                module.source = "alsa_input.other".to_owned();
+            }
+            if fault == 3 {
+                module.sink = "alsa_output.other".to_owned();
+            }
+            let runner = LoopbackRunner::new(vec![module]);
+            {
+                let mut state = runner.0.lock().unwrap();
+                state.missing_source_index = fault == 0;
+                state.duplicate_sink_index = fault == 1;
+                state.malformed_module_id = fault == 2;
+                state.missing_sink_index = fault == 3;
+            }
+            let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+
+            assert!(
+                loopbacks
+                    .ensure(&loopback_snapshot(OutputMode::Headphones))
+                    .is_err()
+            );
+            assert!(runner.calls().iter().all(|args| !matches!(
+                args.first().map(String::as_str),
+                Some("load-module" | "unload-module")
+            )));
+            if fault == 2 {
+                assert!(loopbacks.cleanup_all().is_err());
+                assert!(runner.module_ids().contains(&41));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a disposable private PulseAudio socket and virtual fixture sinks"]
+    fn private_pulse_original_loopback_load_discover_and_cleanup() {
+        let server = std::env::var("PULSE_SERVER").expect("private PULSE_SERVER is required");
+        assert!(
+            server.starts_with("unix:/tmp/translator-loopback-") && server.ends_with("/native"),
+            "refusing to use a non-fixture PulseAudio server"
+        );
+        let mut devices = selected_devices();
+        devices.source.selected.as_mut().unwrap().name = "translator_test_mic.monitor".to_owned();
+        devices.sink.selected.as_mut().unwrap().name = "translator_test_out".to_owned();
+        let snapshot = RuntimeSnapshot {
+            translation_running: true,
+            audio_mix: AudioMixState {
+                microphone_original_percent: 100,
+                ..AudioMixState::default()
+            },
+            devices: Some(devices),
+            ..RuntimeSnapshot::default()
+        };
+        let loopbacks = PulseOriginalLoopbacks::new(SystemCommandRunner);
+
+        loopbacks.cleanup_all().unwrap();
+        loopbacks.ensure(&snapshot).unwrap();
+        loopbacks.ensure(&snapshot).unwrap();
+        let sink_inputs: Vec<RawPulseStream> = loopbacks
+            .run_json(&["--format=json", "list", "sink-inputs"])
+            .unwrap();
+        let source_outputs: Vec<RawPulseStream> = loopbacks
+            .run_json(&["--format=json", "list", "source-outputs"])
+            .unwrap();
+        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs).unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(
+            discovered.values().next().unwrap().media_name,
+            MICROPHONE_ORIGINAL_LOOPBACK
+        );
+        assert_eq!(loopbacks.cleanup_all().unwrap().len(), 1);
+        let sink_inputs: Vec<RawPulseStream> = loopbacks
+            .run_json(&["--format=json", "list", "sink-inputs"])
+            .unwrap();
+        let source_outputs: Vec<RawPulseStream> = loopbacks
+            .run_json(&["--format=json", "list", "source-outputs"])
+            .unwrap();
+        assert!(
+            discover_original_loopbacks(&sink_inputs, &source_outputs)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn original_loopback_load_args_quote_nested_owner_properties() {
         let request = OriginalLoopbackRequest {
             media_name: SPEAKER_ORIGINAL_LOOPBACK,
             source: format!("{REMOTE_IN_SINK}.monitor"),
-            source_target_object: REMOTE_IN_SINK.to_owned(),
             sink: "alsa_output.headphones".to_owned(),
         };
 
@@ -2046,12 +2314,12 @@ mod tests {
         assert!(args.contains(&"sink=alsa_output.headphones".to_owned()));
         assert!(args.contains(&"latency_msec=20".to_owned()));
         assert!(args.contains(
-            &"source_output_properties=media.name=loopback-speaker-original translator.owner=true"
+            &"source_output_properties='media.name=loopback-speaker-original translator.owner=true'"
                 .to_owned()
         ));
         assert!(
             args.contains(
-                &"sink_input_properties=media.name=loopback-speaker-original translator.owner=true"
+                &"sink_input_properties='media.name=loopback-speaker-original translator.owner=true'"
                     .to_owned()
             )
         );
@@ -2059,30 +2327,34 @@ mod tests {
 
     #[test]
     fn original_loopback_discovery_matches_sink_and_source_targets_by_module() {
-        let sink_inputs = [raw_stream(
-            SPEAKER_ORIGINAL_LOOPBACK,
-            "42",
-            "alsa_output.headphones",
-        )];
-        let source_outputs = [raw_stream(SPEAKER_ORIGINAL_LOOPBACK, "42", REMOTE_IN_SINK)];
+        let sink_inputs = [raw_sink_stream(SPEAKER_ORIGINAL_LOOPBACK, "42", 0)];
+        let source_outputs = [raw_source_stream(SPEAKER_ORIGINAL_LOOPBACK, "42", 1)];
         let request = OriginalLoopbackRequest {
             media_name: SPEAKER_ORIGINAL_LOOPBACK,
             source: format!("{REMOTE_IN_SINK}.monitor"),
-            source_target_object: REMOTE_IN_SINK.to_owned(),
             sink: "alsa_output.headphones".to_owned(),
         };
 
-        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs);
+        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs).unwrap();
 
         assert_eq!(
             discovered.get("42"),
             Some(&DiscoveredOriginalLoopback {
                 media_name: SPEAKER_ORIGINAL_LOOPBACK,
-                source_target_object: Some(REMOTE_IN_SINK.to_owned()),
-                sink_target_object: Some("alsa_output.headphones".to_owned()),
+                source_index: Some(1),
+                sink_index: Some(0),
             })
         );
-        assert_eq!(matching_original_loopbacks(&discovered, &request), ["42"]);
+        assert_eq!(
+            matching_original_loopbacks(
+                &discovered,
+                &request,
+                &HashMap::from([(1, format!("{REMOTE_IN_SINK}.monitor"))]),
+                &HashMap::from([(0, "alsa_output.headphones".to_owned())]),
+            )
+            .unwrap(),
+            ["42"]
+        );
     }
 
     #[test]
@@ -2196,15 +2468,23 @@ mod tests {
         }
     }
 
-    fn raw_stream(media_name: &str, module_id: &str, target: &str) -> RawPulseStream {
+    fn raw_sink_stream(media_name: &str, module_id: &str, sink: u32) -> RawPulseStream {
         RawPulseStream {
+            owner_module: Some(RawPulseModuleId::Text(module_id.to_owned())),
+            source: None,
+            sink: Some(sink),
             properties: HashMap::from([
                 ("media.name".to_owned(), media_name.to_owned()),
-                ("pulse.module.id".to_owned(), module_id.to_owned()),
-                ("target.object".to_owned(), target.to_owned()),
                 ("translator.owner".to_owned(), "true".to_owned()),
             ]),
         }
+    }
+
+    fn raw_source_stream(media_name: &str, module_id: &str, source: u32) -> RawPulseStream {
+        let mut stream = raw_sink_stream(media_name, module_id, 0);
+        stream.source = Some(source);
+        stream.sink = None;
+        stream
     }
 
     #[derive(Default)]
