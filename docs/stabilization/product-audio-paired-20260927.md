@@ -57,10 +57,21 @@ is still unknown. No physical microphone, speaker, or headphone was used.
 | `smoke-streaming-first.jsonl` | `cdab0e6de0e53fec7170c1689bf29942dc66fc54bb434d12f807fc5b41bec62b` | 4/4 completed, two pairs |
 | `full-balanced.jsonl` | `e573c01f18d6e9e9ca393a7d789e1b696c81dd2cbcb280ba2bd72dff260ed5f6` | 48/48 completed, 24/24 pairs |
 | `full-streaming-first.jsonl` | `e62a2354db27005ad857fe1e4b32673572c2e000f4929863831347a0b51d7ff8` | 13/48 attempted; 12 completed, first EN case `en-78643` failed, 35 `NOT_RUN` |
+| `replay-streaming-first-en-78643.jsonl` | `77efb12cbc8314624ef2e8ad43bca6d15e3d4753feef2c23a48d564d24c46792` | One frozen-case replay: Hy and NLLB completed; original failure remains unresolved |
 
-The failed run is retained. Its journal recorded a `ValueError`, but the
-original version did not retain a safe event-level failure category, so the
-cause cannot be assigned to Hy inference, provider publication, TTS or the
+The streaming-first failed attempt retained safe code
+`provider_unavailable`, terminal outcome `dropped`, a live Hy child, and
+no stage latency. The separate replay on exact fork commit `848978b`
+completed both arms and released GPU resources. A passing replay is not a
+reliability estimate and does not erase the failed full run. Kernel logs
+contain NVIDIA `NV_ERR_NO_MEMORY` during the failed run, but also during
+the successful balanced run; temporal association is not causal attribution.
+No broad rerun is justified until failure stages and host resource pressure
+can be distinguished.
+
+The earlier reverse-order quality-first failed run is also retained. Its
+journal recorded a `ValueError`, but that runner version did not retain a
+safe event-level failure category, so its cause cannot be assigned to Hy inference, provider publication, TTS or the
 diagnostic validator. The Hy child was still alive at that attempt and was
 cleaned up afterward. A separate one-case replay passed, which does not
 invalidate the failure. Later runner versions record a safe error category
