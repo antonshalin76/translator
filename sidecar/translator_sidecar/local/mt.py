@@ -58,28 +58,28 @@ class LocalTranslationCleanupPending(LocalTranslationError):
 
 
 def _preserve_24_hour_times(source: str, translated: str) -> str:
-    result = translated
-    for source_match in _TIME_24_RE.finditer(source):
-        source_hour = int(source_match.group("hour"))
-        if source_hour < 13:
-            continue
-        minute = source_match.group("minute")
-        target_hour = source_hour - 12
-        target_pattern = re.compile(
-            rf"(?<!\d)0?{target_hour}:{minute}(?!\d)",
-        )
-        target_match = target_pattern.search(result)
-        if target_match is None:
-            continue
-        suffix = result[target_match.end() : target_match.end() + 8]
-        if re.match(r"\s*[ap]\.?m\.?\b", suffix, flags=re.IGNORECASE):
-            continue
-        result = (
-            result[: target_match.start()]
-            + source_match.group(0)
-            + result[target_match.end() :]
-        )
-    return result
+    source_matches = list(_TIME_24_RE.finditer(source))
+    translated_matches = list(_TIME_24_RE.finditer(translated))
+    if len(source_matches) != 1 or len(translated_matches) != 1:
+        return translated
+
+    source_match = source_matches[0]
+    target_match = translated_matches[0]
+    source_hour = int(source_match.group("hour"))
+    if (
+        source_hour < 13
+        or int(target_match.group("hour")) != source_hour - 12
+        or target_match.group("minute") != source_match.group("minute")
+    ):
+        return translated
+    suffix = translated[target_match.end() : target_match.end() + 8]
+    if re.match(r"\s*[ap]\.?m\.?\b", suffix, flags=re.IGNORECASE):
+        return translated
+    return (
+        translated[: target_match.start()]
+        + source_match.group(0)
+        + translated[target_match.end() :]
+    )
 
 
 def _preserve_purchase_order_identifiers(
@@ -125,18 +125,19 @@ def _preserve_named_entity_roles(
             )
             result = ambiguous.sub(entity, result, count=1)
     elif source_language is Language.EN and target_language is Language.RU:
-        for source_match in _EN_DOCUMENT_ENTITY_RE.finditer(source):
-            entity = source_match.group("entity")
-            correct = re.compile(
-                rf"\bдокумент\s+{re.escape(entity)}\b",
-                flags=re.IGNORECASE,
-            )
-            if correct.search(result):
-                continue
-            translated_label = re.compile(
-                r"\bдокумент\s+[\w-]+\b",
-                flags=re.IGNORECASE,
-            )
+        source_matches = list(_EN_DOCUMENT_ENTITY_RE.finditer(source))
+        translated_label = re.compile(
+            r"\bдокумент\s+[\w-]+\b",
+            flags=re.IGNORECASE,
+        )
+        if len(source_matches) != 1 or len(translated_label.findall(result)) != 1:
+            return result
+        entity = source_matches[0].group("entity")
+        correct = re.compile(
+            rf"\bдокумент\s+{re.escape(entity)}\b",
+            flags=re.IGNORECASE,
+        )
+        if not correct.search(result):
             result = translated_label.sub(f"документ {entity}", result, count=1)
     return result
 

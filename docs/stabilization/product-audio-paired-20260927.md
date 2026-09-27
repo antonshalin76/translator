@@ -149,6 +149,16 @@ this inventory. An audio source outside these MDC archives is required for
 the independent release holdout; re-labelling these rows would not satisfy
 EVAL-0.
 
+Subsequent fork-only NLLB postprocessor fixes restrict 24-hour time and
+EN-to-RU document-name correction to sentences with one corresponding numeric
+time or document label in each language. The old first-match rewrites could
+assign 13:45 to the wrong event or replace the first document name with the
+second. Six time and three document-name regressions were RED before the fixes;
+all 17 direct cases and the affected MT/provider tests pass afterward.
+Ambiguous sentences retain the model output unchanged. This prevents those
+code-introduced fact swaps; it does not validate the model's translation. The
+saved-audio receipts above were not rerun or re-scored after these changes.
+
 **Decision:** retain Turbo as the input development baseline, NLLB as the
 production/default MT, Piper as the voice baseline, and Hy as an opt-in
 quality challenger in the fork. A small additional PCM delay would be

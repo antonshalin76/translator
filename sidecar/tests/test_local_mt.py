@@ -142,6 +142,46 @@ def test_nllb_verified_boundary_loads_native_model_in_subprocess_cuda() -> None:
             "Channel 1 works.",
             "Channel 1 works.",
         ),
+        (
+            "The first call was at 1:45, and the second at 13:45.",
+            "Первый звонок был в 1:45, а второй в 1:45.",
+            "Первый звонок был в 1:45, а второй в 1:45.",
+        ),
+        (
+            "The first call was at 13:45, and the second at 1:45.",
+            "Первый звонок был в 1:45, а второй в 1:45.",
+            "Первый звонок был в 1:45, а второй в 1:45.",
+        ),
+        (
+            "Meet at 13:15 and leave at 14:45.",
+            "Встретимся в 1:15.",
+            "Встретимся в 1:15.",
+        ),
+        (
+            "Meet at 13:45.",
+            "Встреча в 1:45, напоминание в 1:45.",
+            "Встреча в 1:45, напоминание в 1:45.",
+        ),
+        (
+            "Meet at 13:45.",
+            "Встреча в 13:45, напоминание в 1:45.",
+            "Встреча в 13:45, напоминание в 1:45.",
+        ),
+        (
+            "Meet at 13:45.",
+            "Встреча в 1:45 p.m., напоминание в 1:45.",
+            "Встреча в 1:45 p.m., напоминание в 1:45.",
+        ),
+        (
+            "Meet at 13:45.",
+            "Встреча в 1:45, напоминание в 1:45 p.m.",
+            "Встреча в 1:45, напоминание в 1:45 p.m.",
+        ),
+        (
+            "Meet at 13:45.",
+            "Встреча в 1:45 p.m.",
+            "Встреча в 1:45 p.m.",
+        ),
     ],
 )
 def test_nllb_preserves_unmarked_24_hour_times(
@@ -231,6 +271,27 @@ def test_nllb_does_not_rewrite_order_words_without_matching_source_contract() ->
             Language.EN,
             Language.RU,
             "Пожалуйста, откройте документ Hotel и не изменяйте его.",
+        ),
+        (
+            "Send document Alpha and document Beta.",
+            "Отправьте документ Гамма и документ Дельта.",
+            Language.EN,
+            Language.RU,
+            "Отправьте документ Гамма и документ Дельта.",
+        ),
+        (
+            "Send document Alpha.",
+            "Отправьте документ Гамма и документ Дельта.",
+            Language.EN,
+            Language.RU,
+            "Отправьте документ Гамма и документ Дельта.",
+        ),
+        (
+            "Send document Alpha and document Beta.",
+            "Отправьте документ Гамма.",
+            Language.EN,
+            Language.RU,
+            "Отправьте документ Гамма.",
         ),
     ],
 )
