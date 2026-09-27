@@ -11,6 +11,7 @@ import sys
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import translator_product_audio_pair as product_audio_pair
@@ -24,10 +25,12 @@ from translator_product_audio_pair import (
 from translator_sidecar.provider_contract import (
     PrivacySafeProviderError,
     ProviderAudioDelta,
+    ProviderLatency,
     ProviderState,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
     ProviderUtteranceFinal,
+    SafeErrorCode,
     SampleFormat,
     TranslationMode,
     UtteranceOutcome,
@@ -427,7 +430,9 @@ def test_pair_rejects_missing_or_wrong_mode_relative_to_requested(
         pair_rows(rows, TranslationMode.BALANCED)
 
 
-@pytest.mark.parametrize("failure_stage", ["complete", "build", "attempt", "shutdown"])
+@pytest.mark.parametrize(
+    "failure_stage", ["complete", "build", "attempt", "provider_drop", "shutdown"]
+)
 def test_run_journal_binds_mode_to_success_and_failure_paths(
     tmp_path, monkeypatch, failure_stage
 ) -> None:
@@ -469,6 +474,17 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
     async def run_case(provider, case, mode):
         if failure_stage == "attempt":
             raise RuntimeError("synthetic case failure")
+        if failure_stage == "provider_drop":
+            error = ValueError("provider returned a safe error")
+            error.safe_provider_codes = ["provider_unavailable"]
+            error.outcomes = ["dropped"]
+            error.safe_provider_latency = {
+                "asr_final_text_ms": 111,
+                "mt_first_text_ms": None,
+                "tts_first_audio_ms": None,
+                "provider_total_ms": 130,
+            }
+            raise error
         return {
             "status": "completed",
             "asr_text": "source",
@@ -514,3 +530,147 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
         assert len([record for record in records if record["type"] == "not_run"]) == 3
     if failure_stage == "shutdown":
         assert {"cleanup_error", "arm_end"} <= {record["type"] for record in records}
+    if failure_stage == "provider_drop":
+        failed = next(record for record in records if record["type"] == "attempt")
+        assert failed["status"] == "failed"
+        assert failed["safe_provider_codes"] == ["provider_unavailable"]
+        assert failed["observed_outcomes"] == ["dropped"]
+        assert failed["safe_provider_latency"] == {
+            "asr_final_text_ms": 111,
+            "mt_first_text_ms": None,
+            "tts_first_audio_ms": None,
+            "provider_total_ms": 130,
+        }
+        assert records[-1]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "latency_kind",
+    ["one", "none", "duplicate", "foreign_session", "foreign_utterance", "invalid"],
+)
+def test_dropped_provider_latency_is_exactly_allowlisted_or_unmeasured(
+    monkeypatch, latency_kind
+) -> None:
+    published = {}
+
+    class Reservation:
+        async def open(self):
+            return None, SimpleNamespace(state=ProviderState.READY)
+
+        def drain(self, reason):
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            published["request"] = request
+            published["publish"] = publish
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            published["frame"] = frame
+
+        async def wait_idle(self):
+            request = published["request"]
+            frame = published["frame"]
+            latencies = []
+            if latency_kind != "none":
+                latency = ProviderLatency.model_construct(
+                    session_id=(
+                        uuid4()
+                        if latency_kind == "foreign_session"
+                        else request.session_id
+                    ),
+                    utterance_id=(
+                        uuid4()
+                        if latency_kind == "foreign_utterance"
+                        else frame.utterance_id
+                    ),
+                    asr_final_text_ms=(
+                        "not-a-number" if latency_kind == "invalid" else 111
+                    ),
+                    mt_first_text_ms=None,
+                    tts_first_audio_ms=None,
+                    provider_total_ms=130,
+                )
+                latencies = [latency]
+                if latency_kind == "duplicate":
+                    latencies.append(latency)
+            await published["publish"](
+                tuple(latencies)
+                + (
+                    PrivacySafeProviderError.model_construct(
+                        code=SafeErrorCode.PROVIDER_UNAVAILABLE
+                    ),
+                    ProviderUtteranceFinal.model_construct(
+                        outcome=UtteranceOutcome.DROPPED
+                    ),
+                ),
+                lambda: None,
+            )
+
+    async def finish_cleanup(_pending):
+        return SimpleNamespace(delivery_error=None)
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    with pytest.raises(ValueError, match="provider returned a safe error") as failure:
+        asyncio.run(
+            product_audio_pair._run_case(
+                Provider(),
+                {"language": "en_us", "pcm": b"\x01\x02" * 1600},
+                TranslationMode.STREAMING_FIRST,
+            )
+        )
+    assert failure.value.safe_provider_codes == ["provider_unavailable"]
+    assert failure.value.outcomes == ["dropped"]
+    expected = (
+        {
+            "asr_final_text_ms": 111,
+            "mt_first_text_ms": None,
+            "tts_first_audio_ms": None,
+            "provider_total_ms": 130,
+        }
+        if latency_kind == "one"
+        else None
+    )
+    assert failure.value.safe_provider_latency == expected
+    if expected is not None:
+        assert set(expected) == {
+            "asr_final_text_ms",
+            "mt_first_text_ms",
+            "tts_first_audio_ms",
+            "provider_total_ms",
+        }
+        assert all(value is None or type(value) is int for value in expected.values())
+
+
+def test_wait_idle_failure_does_not_invent_latency(monkeypatch) -> None:
+    class Reservation:
+        async def open(self):
+            return None, SimpleNamespace(state=ProviderState.READY)
+
+        def drain(self, reason):
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            return None
+
+        async def wait_idle(self):
+            raise RuntimeError("synthetic wait_idle failure")
+
+    async def finish_cleanup(_pending):
+        return SimpleNamespace(delivery_error=None)
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    with pytest.raises(RuntimeError, match="wait_idle failure") as failure:
+        asyncio.run(
+            product_audio_pair._run_case(
+                Provider(),
+                {"language": "en_us", "pcm": b"\x01\x02" * 1600},
+                TranslationMode.STREAMING_FIRST,
+            )
+        )
+    assert not hasattr(failure.value, "safe_provider_latency")

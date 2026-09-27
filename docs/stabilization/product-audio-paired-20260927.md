@@ -33,6 +33,17 @@ record. All historical receipts below remain `quality_first`; selecting
 capture or audible output. Hy-MT and Piper currently ignore this mode argument,
 while Turbo ASR and NLLB use it. New mode smoke evidence is separate.
 
+A bounded offline smoke completed 4/4 attempts in each mode on one RU and
+one EN WAV (two MT arms each).
+A later full `BALANCED` run completed 48/48 attempts and 24/24 pairs.
+The full `STREAMING_FIRST` run failed on its first EN attempt after 12
+completed RU attempts; the remaining 35 attempts were `NOT_RUN`.
+This is a retained product-path failure, not a successful all-mode gate.
+The runner now retains at most one matching, sanitized `ProviderLatency`
+record on a failed attempt to distinguish request stages without recording
+speech, raw errors, or audio. The failed run predates this field; its cause
+is still unknown. No physical microphone, speaker, or headphone was used.
+
 ## Observed runs
 
 | Private receipt | SHA-256 | Result |
@@ -41,6 +52,11 @@ while Turbo ASR and NLLB use it. New mode smoke evidence is separate.
 | `full-hy-nllb.jsonl` | `cf909e37a3749c6b1feadb86dfb69bc11e5f2ed3b46a670edb4134b8d2159d05` | Hy failed on `en-93294` after 22 completions; NLLB `NOT_RUN` |
 | `full-hy-nllb-v2.jsonl` | `ca1f020ae5e0f54a1098f0a6901c3f99b0b4503558ea1c5646c3b8af09a23d97` | 48/48 completed, 24/24 pairs |
 | `full-hy-nllb-v3.jsonl` | `a2cb0bd632065d8f5a3a09320af128d1a4e3b5d24311bf0f04e818dbaa980a86` | 48/48 completed, 24/24 pairs |
+| `smoke-quality-first.jsonl` | `5c3c9bafc9ba54e0207eda3ac89bff773f68ed43dd2f74c688dc81a79483ddc4` | 4/4 completed, two pairs |
+| `smoke-balanced.jsonl` | `2b7672fbbe48bc46873fd443bf3298602bef32479863f8b1914aa59233d72bc5` | 4/4 completed, two pairs |
+| `smoke-streaming-first.jsonl` | `cdab0e6de0e53fec7170c1689bf29942dc66fc54bb434d12f807fc5b41bec62b` | 4/4 completed, two pairs |
+| `full-balanced.jsonl` | `e573c01f18d6e9e9ca393a7d789e1b696c81dd2cbcb280ba2bd72dff260ed5f6` | 48/48 completed, 24/24 pairs |
+| `full-streaming-first.jsonl` | `e62a2354db27005ad857fe1e4b32673572c2e000f4929863831347a0b51d7ff8` | 13/48 attempted; 12 completed, first EN case `en-78643` failed, 35 `NOT_RUN` |
 
 The failed run is retained. Its journal recorded a `ValueError`, but the
 original version did not retain a safe event-level failure category, so the

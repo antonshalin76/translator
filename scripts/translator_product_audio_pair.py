@@ -406,6 +406,30 @@ async def _run_case(
                 for event, _ in event_times
                 if isinstance(event, ProviderUtteranceFinal)
             ]
+            latencies = [
+                event
+                for event, _ in event_times
+                if isinstance(event, ProviderLatency)
+                and event.session_id == request.session_id
+                and event.utterance_id == utterance_id
+            ]
+            safe_latency = None
+            if len(latencies) == 1:
+                candidate = {
+                    field: getattr(latencies[0], field)
+                    for field in (
+                        "asr_final_text_ms",
+                        "mt_first_text_ms",
+                        "tts_first_audio_ms",
+                        "provider_total_ms",
+                    )
+                }
+                if all(
+                    value is None or (type(value) is int and value >= 0)
+                    for value in candidate.values()
+                ):
+                    safe_latency = candidate
+            observation_error.safe_provider_latency = safe_latency
             raise
     except BaseException as caught:
         error = caught
@@ -522,6 +546,9 @@ async def _run_arm(
                 ):
                     row["safe_provider_codes"] = error.safe_provider_codes
                     row["observed_outcomes"] = error.outcomes
+                    row["safe_provider_latency"] = getattr(
+                        error, "safe_provider_latency", None
+                    )
                 failed = True
             row["resources"] = _resources(provider)
             rows.append(row)

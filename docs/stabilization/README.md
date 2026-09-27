@@ -33,8 +33,13 @@ a new physical Task 7 result or a release gate pass.
 
 The paired saved-audio runner also accepts all three provider modes with mode
 identity checked from CLI through session, input frames, and failure journals.
-This is deterministic software coverage; real all-mode provider smoke and
-physical bidirectional E2E remain separate gates.
+Offline provider smoke completed 4/4 attempts in each of the three modes.
+The full balanced saved-audio run completed 48/48; the full streaming-first
+run retained a safe provider drop on its first English case after 12 Russian
+completions, with 35 attempts NOT_RUN. A narrow runner diagnostic now
+preserves only validated stage timings on future failed attempts. The failure
+cause is not yet known; neither software result proves live speech or playback.
+Physical bidirectional E2E remains a separate gate.
 
 ## Recovery baseline (2026-09-23)
 
