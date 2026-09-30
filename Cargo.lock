@@ -4190,6 +4190,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "translator-aec-backend"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "translator-audio"
 version = "0.1.0"
 dependencies = [

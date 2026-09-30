@@ -12,7 +12,7 @@
       "files": [
         "apps/translator-ui/src/uiModel.test.ts"
       ],
-      "node_count": 15,
+      "node_count": 18,
       "nodes": [
         {
           "file": "apps/translator-ui/src/uiModel.test.ts",
@@ -41,6 +41,24 @@
         {
           "file": "apps/translator-ui/src/uiModel.test.ts",
           "id": "apps/translator-ui/src/uiModel.test.ts::UI privacy contracts::normal mode never exposes transcript or translation text",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::UI safety gates::AEC calibration cancellation remains pending until daemon reports terminal state",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::UI safety gates::AEC calibration never borrows proof from a translation snapshot",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::UI safety gates::AEC calibration stays unavailable on controller error and cleanup uncertainty",
           "reason": "",
           "status": "deterministic"
         },
@@ -108,11 +126,12 @@
     },
     "pytest": {
       "external_skip_count": 5,
-      "file_count": 26,
+      "file_count": 29,
       "files": [
         "sidecar/tests/test_asr_quality.py",
         "sidecar/tests/test_cuda_runtime.py",
         "sidecar/tests/test_grpc_server.py",
+        "sidecar/tests/test_hy_mt.py",
         "sidecar/tests/test_inference_scheduler.py",
         "sidecar/tests/test_local_asr.py",
         "sidecar/tests/test_local_mt.py",
@@ -126,6 +145,8 @@
         "sidecar/tests/test_openai_runtime.py",
         "sidecar/tests/test_podcast_quality.py",
         "sidecar/tests/test_process_run.py",
+        "sidecar/tests/test_product_freeze.py",
+        "sidecar/tests/test_product_release_coverage.py",
         "sidecar/tests/test_provider_contract.py",
         "sidecar/tests/test_provider_engine.py",
         "sidecar/tests/test_provider_registry.py",
@@ -137,7 +158,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1041,
+      "node_count": 1138,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -788,6 +809,120 @@
           "status": "deterministic"
         },
         {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_bootstrap_requires_both_translation_directions",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_command_is_offline_private_and_resource_bounded",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_constructor_failure_cannot_spawn_child_and_releases_lease",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_dead_child_is_unavailable_before_request",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_health_retries_loading_response_before_bootstrap",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_http_input_rejection_is_request_scoped",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_load_owns_child_fd_socket_and_cleanup",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_load_preserves_explicit_cuda_visibility[-1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_load_preserves_explicit_cuda_visibility[0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_load_preserves_explicit_cuda_visibility[]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_output_budget_avoids_old_128_token_truncation",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_rejects_bad_input_before_sending_text",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_rejects_malformed_or_incomplete_output[response0-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_rejects_malformed_or_incomplete_output[response1-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_rejects_malformed_or_incomplete_output[response2-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_rejects_malformed_or_incomplete_output[response3-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_request_rejection_preserves_healthy_backend",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_request_timeout_fails_closed_and_reaps_child",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_hy_mt.py",
+          "id": "sidecar/tests/test_hy_mt.py::test_hy_startup_timeout_reaps_child_and_releases_lease",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
           "file": "sidecar/tests/test_inference_scheduler.py",
           "id": "sidecar/tests/test_inference_scheduler.py::test_cancel_purges_queued_job_without_running_it",
           "reason": "",
@@ -868,6 +1003,12 @@
         {
           "file": "sidecar/tests/test_inference_scheduler.py",
           "id": "sidecar/tests/test_inference_scheduler.py::test_repeated_shutdown_caller_cancellation_joins_real_native_threads",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_inference_scheduler.py",
+          "id": "sidecar/tests/test_inference_scheduler.py::test_request_scoped_native_failure_does_not_poison_next_job",
           "reason": "",
           "status": "deterministic"
         },
@@ -1161,6 +1302,12 @@
         },
         {
           "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_does_not_invent_order_role_for_ambiguous_identifier",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_does_not_rewrite_order_words_without_matching_source_contract",
           "reason": "",
           "status": "deterministic"
@@ -1203,6 +1350,48 @@
         },
         {
           "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_order_identifier_rewrite_is_unambiguous_and_idempotent[Confirm order number 104 and order number 215.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 215 /u0438 /u043d/u043e/u043c/u0435/u0440 /u043f/u043e/u0440/u044f/u0434/u043a/u0430 104.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u0437/u0430/u043a/u0430/u0437/u0430 215 /u0438 /u043d/u043e/u043c/u0435/u0440 /u0437/u0430/u043a/u0430/u0437/u0430 104.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_order_identifier_rewrite_is_unambiguous_and_idempotent[Confirm order number 104 and reference 1040.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u043f/u043e/u0440/u044f/u0434/u043a/u0430 104 /u0438 /u043a/u043e/u0434 1040.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u0437/u0430/u043a/u0430/u0437/u0430 104 /u0438 /u043a/u043e/u0434 1040.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_order_identifier_rewrite_is_unambiguous_and_idempotent[Confirm order number 104, decree number 104, and order number 215.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 104 /u0438 /u043d/u043e/u043c/u0435/u0440 /u043f/u043e/u0440/u044f/u0434/u043a/u0430 215.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 104 /u0438 /u043d/u043e/u043c/u0435/u0440 /u0437/u0430/u043a/u0430/u0437/u0430 215.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_order_identifier_rewrite_is_unambiguous_and_idempotent[Confirm order number 104.-/u041d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 104 /u0438 /u043d/u043e/u043c/u0435/u0440 /u0437/u0430/u043a/u0430/u0437/u0430 104.-/u041d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 104 /u0438 /u043d/u043e/u043c/u0435/u0440 /u0437/u0430/u043a/u0430/u0437/u0430 104.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_order_identifier_rewrite_is_unambiguous_and_idempotent[Confirm order number 104.-/u041d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 104 /u0438 /u043d/u043e/u043c/u0435/u0440 /u043f/u043e/u0440/u044f/u0434/u043a/u0430 104.-/u041d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 104 /u0438 /u043d/u043e/u043c/u0435/u0440 /u043f/u043e/u0440/u044f/u0434/u043a/u0430 104.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_order_identifier_rewrite_is_unambiguous_and_idempotent[Confirm order number 104.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 204.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 204.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_order_role_guard_is_en_to_ru_only",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_named_entity_roles[/u041f/u0435/u0440/u0435/u0434/u0430/u0439/u0442/u0435 /u0444/u0430/u0439/u043b /u043f/u043e/u043b/u044c/u0437/u043e/u0432/u0430/u0442/u0435/u043b/u044e Roman.-Pass the file to the Roman user.-ru-en-Pass the file to Roman.]",
           "reason": "",
           "status": "deterministic"
@@ -1216,6 +1405,24 @@
         {
           "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_named_entity_roles[Please open document Hotel and do not modify it.-/u041f/u043e/u0436/u0430/u043b/u0443/u0439/u0441/u0442/u0430, /u043e/u0442/u043a/u0440/u043e/u0439/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 Hotel /u0438 /u043d/u0435 /u0438/u0437/u043c/u0435/u043d/u044f/u0439/u0442/u0435 /u0435/u0433/u043e.-en-ru-/u041f/u043e/u0436/u0430/u043b/u0443/u0439/u0441/u0442/u0430, /u043e/u0442/u043a/u0440/u043e/u0439/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 Hotel /u0438 /u043d/u0435 /u0438/u0437/u043c/u0435/u043d/u044f/u0439/u0442/u0435 /u0435/u0433/u043e.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_named_entity_roles[Send document Alpha and document Beta.-/u041e/u0442/u043f/u0440/u0430/u0432/u044c/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0413/u0430/u043c/u043c/u0430 /u0438 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0414/u0435/u043b/u044c/u0442/u0430.-en-ru-/u041e/u0442/u043f/u0440/u0430/u0432/u044c/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0413/u0430/u043c/u043c/u0430 /u0438 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0414/u0435/u043b/u044c/u0442/u0430.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_named_entity_roles[Send document Alpha and document Beta.-/u041e/u0442/u043f/u0440/u0430/u0432/u044c/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0413/u0430/u043c/u043c/u0430.-en-ru-/u041e/u0442/u043f/u0440/u0430/u0432/u044c/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0413/u0430/u043c/u043c/u0430.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_named_entity_roles[Send document Alpha.-/u041e/u0442/u043f/u0440/u0430/u0432/u044c/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0413/u0430/u043c/u043c/u0430 /u0438 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0414/u0435/u043b/u044c/u0442/u0430.-en-ru-/u041e/u0442/u043f/u0440/u0430/u0432/u044c/u0442/u0435 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0413/u0430/u043c/u043c/u0430 /u0438 /u0434/u043e/u043a/u0443/u043c/u0435/u043d/u0442 /u0414/u0435/u043b/u044c/u0442/u0430.]",
           "reason": "",
           "status": "deterministic"
         },
@@ -1252,6 +1459,54 @@
         {
           "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[/u041d/u0435 /u043e/u0442/u043a/u043b/u044e/u0447/u0430/u0439/u0442/u0435 /u043c/u0438/u043a/u0440/u043e/u0444/u043e/u043d /u0434/u043e 09:30.-Do not mute the microphone until 9:30.-Do not mute the microphone until 9:30.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[Meet at 13:15 and leave at 14:45.-/u0412/u0441/u0442/u0440/u0435/u0442/u0438/u043c/u0441/u044f /u0432 1:15.-/u0412/u0441/u0442/u0440/u0435/u0442/u0438/u043c/u0441/u044f /u0432 1:15.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[Meet at 13:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 13:45, /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 13:45, /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[Meet at 13:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45 p.m., /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45 p.m., /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[Meet at 13:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45 p.m.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45 p.m.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[Meet at 13:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45, /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45 p.m.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45, /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45 p.m.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[Meet at 13:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45, /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45.-/u0412/u0441/u0442/u0440/u0435/u0447/u0430 /u0432 1:45, /u043d/u0430/u043f/u043e/u043c/u0438/u043d/u0430/u043d/u0438/u0435 /u0432 1:45.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[The first call was at 13:45, and the second at 1:45.-/u041f/u0435/u0440/u0432/u044b/u0439 /u0437/u0432/u043e/u043d/u043e/u043a /u0431/u044b/u043b /u0432 1:45, /u0430 /u0432/u0442/u043e/u0440/u043e/u0439 /u0432 1:45.-/u041f/u0435/u0440/u0432/u044b/u0439 /u0437/u0432/u043e/u043d/u043e/u043a /u0431/u044b/u043b /u0432 1:45, /u0430 /u0432/u0442/u043e/u0440/u043e/u0439 /u0432 1:45.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_preserves_unmarked_24_hour_times[The first call was at 1:45, and the second at 13:45.-/u041f/u0435/u0440/u0432/u044b/u0439 /u0437/u0432/u043e/u043d/u043e/u043a /u0431/u044b/u043b /u0432 1:45, /u0430 /u0432/u0442/u043e/u0440/u043e/u0439 /u0432 1:45.-/u041f/u0435/u0440/u0432/u044b/u0439 /u0437/u0432/u043e/u043d/u043e/u043a /u0431/u044b/u043b /u0432 1:45, /u0430 /u0432/u0442/u043e/u0440/u043e/u0439 /u0432 1:45.]",
           "reason": "",
           "status": "deterministic"
         },
@@ -1312,6 +1567,18 @@
         {
           "file": "sidecar/tests/test_local_mt.py",
           "id": "sidecar/tests/test_local_mt.py::test_nllb_supports_reverse_direction_with_same_resident_model",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_translate_purchase_order_role_guard[Confirm order number 104 and decree number 104.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u043f/u0440/u0438/u043a/u0430/u0437/u0430 104.]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_mt.py",
+          "id": "sidecar/tests/test_local_mt.py::test_nllb_translate_purchase_order_role_guard[Confirm order number 104.-/u041f/u043e/u0434/u0442/u0432/u0435/u0440/u0434/u0438/u0442/u0435 /u043d/u043e/u043c/u0435/u0440 /u0437/u0430/u043a/u0430/u0437/u0430 104.]",
           "reason": "",
           "status": "deterministic"
         },
@@ -1479,7 +1746,19 @@
         },
         {
           "file": "sidecar/tests/test_local_provider.py",
+          "id": "sidecar/tests/test_local_provider.py::test_health_reflects_translator_process_death_after_open",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_provider.py",
           "id": "sidecar/tests/test_local_provider.py::test_health_reports_cold_models_and_queued_source_truthfully",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_provider.py",
+          "id": "sidecar/tests/test_local_provider.py::test_health_uses_pinned_resident_asr_identity_after_fallback",
           "reason": "",
           "status": "deterministic"
         },
@@ -1690,6 +1969,12 @@
         {
           "file": "sidecar/tests/test_local_provider.py",
           "id": "sidecar/tests/test_local_provider.py::test_reopen_failed_session_does_not_replay_stale_publication_error",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_provider.py",
+          "id": "sidecar/tests/test_local_provider.py::test_request_scoped_mt_failure_keeps_model_ready_for_next_utterance",
           "reason": "",
           "status": "deterministic"
         },
@@ -1983,37 +2268,49 @@
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-large-v3-small]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-None-faster-whisper-large-v3-turbo-small]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-large-v3-turbo-small]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-large-v3-faster-whisper-large-v3-small]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-small-small]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-large-v3-turbo-faster-whisper-large-v3-turbo-small]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-large-v3-large-v3]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[False-cpu-cpu-faster-whisper-small-faster-whisper-small-small]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-large-v3-turbo-large-v3-turbo]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-None-faster-whisper-large-v3-turbo-large-v3-turbo]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
-          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-small-small]",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-large-v3-faster-whisper-large-v3-large-v3]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-large-v3-turbo-faster-whisper-large-v3-turbo-large-v3-turbo]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_build_local_provider_uses_verified_manifest_runtime[True-cuda-cuda-faster-whisper-small-faster-whisper-small-small]",
           "reason": "",
           "status": "deterministic"
         },
@@ -2049,6 +2346,36 @@
         },
         {
           "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_selected_hy_missing_manifest_reports_selected_backend_as_unavailable",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_selected_hy_reports_own_identity_and_never_uses_nllb_or_cpu[False-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_selected_hy_reports_own_identity_and_never_uses_nllb_or_cpu[False-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_selected_hy_reports_own_identity_and_never_uses_nllb_or_cpu[True-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
+          "id": "sidecar/tests/test_local_runtime.py::test_selected_hy_reports_own_identity_and_never_uses_nllb_or_cpu[True-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_runtime.py",
           "id": "sidecar/tests/test_local_runtime.py::test_unknown_runtime_modes_do_not_bypass_inventory[0]",
           "reason": "",
           "status": "deterministic"
@@ -2068,6 +2395,12 @@
         {
           "file": "sidecar/tests/test_local_runtime.py",
           "id": "sidecar/tests/test_local_runtime.py::test_unknown_runtime_modes_do_not_bypass_inventory[disabled]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_local_tts.py",
+          "id": "sidecar/tests/test_local_tts.py::test_default_piper_loader_bounds_onnx_threads_without_changing_voice_contract",
           "reason": "",
           "status": "deterministic"
         },
@@ -2403,6 +2736,12 @@
         },
         {
           "file": "sidecar/tests/test_model_fetch.py",
+          "id": "sidecar/tests/test_model_fetch.py::test_default_download_space_reservation_excludes_optional_model",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_fetch.py",
           "id": "sidecar/tests/test_model_fetch.py::test_default_transport_does_not_automatically_follow_redirects",
           "reason": "",
           "status": "deterministic"
@@ -2488,6 +2827,12 @@
         {
           "file": "sidecar/tests/test_model_fetch.py",
           "id": "sidecar/tests/test_model_fetch.py::test_fetch_all_skips_only_an_integrity_valid_existing_target",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_fetch.py",
+          "id": "sidecar/tests/test_model_fetch.py::test_fetch_all_skips_optional_download_but_explicit_fetch_installs_it",
           "reason": "",
           "status": "deterministic"
         },
@@ -2738,6 +3083,24 @@
           "status": "deterministic"
         },
         {
+          "file": "sidecar/tests/test_model_fetch.py",
+          "id": "sidecar/tests/test_model_fetch.py::test_manifest_rejects_non_boolean_auto_fetch[0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_fetch.py",
+          "id": "sidecar/tests/test_model_fetch.py::test_manifest_rejects_non_boolean_auto_fetch[None]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_fetch.py",
+          "id": "sidecar/tests/test_model_fetch.py::test_manifest_rejects_non_boolean_auto_fetch[false]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
           "file": "sidecar/tests/test_model_lease.py",
           "id": "sidecar/tests/test_model_lease.py::test_adapter_failed_constructor_releases_snapshots[asr]",
           "reason": "",
@@ -2854,6 +3217,12 @@
         {
           "file": "sidecar/tests/test_model_lease.py",
           "id": "sidecar/tests/test_model_lease.py::test_snapshot_100_lifecycles_and_closed_lease_cannot_reuse_fd",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_lease.py",
+          "id": "sidecar/tests/test_model_lease.py::test_snapshot_descriptor_can_be_inherited_without_unsealing",
           "reason": "",
           "status": "deterministic"
         },
@@ -3082,6 +3451,12 @@
         {
           "file": "sidecar/tests/test_model_manifest.py",
           "id": "sidecar/tests/test_model_manifest.py::test_downloader_uses_atomic_noreplace_against_competing_target",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_model_manifest.py",
+          "id": "sidecar/tests/test_model_manifest.py::test_exact_approved_license_identifiers_are_accepted[Apache-2.0-None]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4766,6 +5141,198 @@
           "status": "deterministic"
         },
         {
+          "file": "sidecar/tests/test_product_freeze.py",
+          "id": "sidecar/tests/test_product_freeze.py::test_corpus_hash_and_unpinned_model_fail",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_freeze.py",
+          "id": "sidecar/tests/test_product_freeze.py::test_exact_receipt_binds_models_runtime_and_corpus",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_freeze.py",
+          "id": "sidecar/tests/test_product_freeze.py::test_missing_or_corrupt_pinned_model_fails",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_freeze.py",
+          "id": "sidecar/tests/test_product_freeze.py::test_silent_fallback_fails_and_explicit_fallback_is_separate_cell",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_freeze.py",
+          "id": "sidecar/tests/test_product_freeze.py::test_source_tree_rejects_uncommitted_changes",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_acoustic_transform_cannot_reuse_origin_bytes",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_complete_metadata_is_coverage_only",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_incomplete_cell_keeps_not_done[<lambda>-failed_attempt0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_incomplete_cell_keeps_not_done[<lambda>-failed_attempt1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_incomplete_cell_keeps_not_done[<lambda>-failed_attempt2]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_incomplete_cell_keeps_not_done[<lambda>-measured_cases0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_incomplete_cell_keeps_not_done[<lambda>-measured_cases1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_incomplete_cell_keeps_not_done[<lambda>-overlap]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_incomplete_cell_keeps_not_done[<lambda>-warmups]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-case_count]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-case_metadata0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-case_metadata1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-critical_controls]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-development_overlap]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-duplicate_source]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-fixture_coverage]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-fixture_metadata]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-speaker_coverage]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_ineligible_holdout_is_not_done[<lambda>-template_family]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_malformed_metadata_fails_closed_without_exception[<lambda>0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_malformed_metadata_fails_closed_without_exception[<lambda>1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_malformed_metadata_fails_closed_without_exception[<lambda>2]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_malformed_metadata_fails_closed_without_exception[<lambda>3]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_malformed_metadata_fails_closed_without_exception[<lambda>4]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_missing_declared_path_and_unknown_attempt_are_not_done",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_more_than_ten_excluded_warmups_are_eligible_but_late_warmup_is_not",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_product_release_coverage.py",
+          "id": "sidecar/tests/test_product_release_coverage.py::test_recorded_drop_keeps_coverage_complete_and_visible",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
           "file": "sidecar/tests/test_provider_contract.py",
           "id": "sidecar/tests/test_provider_contract.py::test_lifecycle_messages_use_distinct_versions_and_stable_identity",
           "reason": "",
@@ -5206,6 +5773,12 @@
         {
           "file": "sidecar/tests/test_source_commit.py",
           "id": "sidecar/tests/test_source_commit.py::test_async_callbacks_are_owned_exactly_once_by_commit_boundary",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_source_commit.py",
+          "id": "sidecar/tests/test_source_commit.py::test_async_commit_preserves_sanitized_request_rejection_and_fails_closed",
           "reason": "",
           "status": "deterministic"
         },
@@ -5955,6 +6528,30 @@
         },
         {
           "file": "sidecar/tests/test_task7_e2e.py",
+          "id": "sidecar/tests/test_task7_e2e.py::test_live_e2e_persistent_sink_cleanup_is_bounded_and_fail_closed[False-inventory]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task7_e2e.py",
+          "id": "sidecar/tests/test_task7_e2e.py::test_live_e2e_persistent_sink_cleanup_is_bounded_and_fail_closed[False-unload]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task7_e2e.py",
+          "id": "sidecar/tests/test_task7_e2e.py::test_live_e2e_persistent_sink_cleanup_is_bounded_and_fail_closed[True-inventory]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task7_e2e.py",
+          "id": "sidecar/tests/test_task7_e2e.py::test_live_e2e_persistent_sink_cleanup_is_bounded_and_fail_closed[True-unload]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task7_e2e.py",
           "id": "sidecar/tests/test_task7_e2e.py::test_live_e2e_retains_temporary_owner_wipes_before_retry_and_never_reports_success[bridge_kill]",
           "reason": "",
           "status": "deterministic"
@@ -5980,6 +6577,12 @@
         {
           "file": "sidecar/tests/test_task7_e2e.py",
           "id": "sidecar/tests/test_task7_e2e.py::test_live_e2e_retains_temporary_owner_wipes_before_retry_and_never_reports_success[none]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task7_e2e.py",
+          "id": "sidecar/tests/test_task7_e2e.py::test_live_e2e_retry_does_not_unload_foreign_reused_module",
           "reason": "",
           "status": "deterministic"
         },
@@ -6388,12 +6991,21 @@
       ]
     },
     "rust": {
-      "external_skip_count": 1,
-      "file_count": 40,
+      "external_skip_count": 12,
+      "file_count": 50,
       "files": [
         "apps/translator-ui/src-tauri/src/main.rs",
+        "crates/translator-aec-backend/src/fixture.rs",
+        "crates/translator-aec-backend/src/main.rs",
+        "crates/translator-aec-backend/src/witness.rs",
+        "crates/translator-aec-backend/tests/cli.rs",
+        "crates/translator-aec-backend/tests/fixture_cli.rs",
+        "crates/translator-aec-backend/tests/native_diagnostics.rs",
+        "crates/translator-aec-backend/tests/witness_cli.rs",
         "crates/translator-audio/src/lib.rs",
+        "crates/translator-audio/tests/aec_backend_wire.rs",
         "crates/translator-audio/tests/aec_graph.rs",
+        "crates/translator-audio/tests/aec_measurement.rs",
         "crates/translator-audio/tests/aec_validation_observation.rs",
         "crates/translator-audio/tests/aec_validation_power.rs",
         "crates/translator-audio/tests/audio_graph.rs",
@@ -6408,6 +7020,7 @@
         "crates/translator-daemon/src/bin/task7_benchmark_runtime.rs",
         "crates/translator-daemon/src/lib.rs",
         "crates/translator-daemon/src/main.rs",
+        "crates/translator-daemon/tests/aec_backend_session.rs",
         "crates/translator-daemon/tests/api_security.rs",
         "crates/translator-daemon/tests/audio_mix_application.rs",
         "crates/translator-daemon/tests/audio_operation_gate.rs",
@@ -6432,8 +7045,33 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 780,
+      "node_count": 926,
       "nodes": [
+        {
+          "file": "crates/translator-aec-backend/tests/cli.rs",
+          "id": "translator-aec-backend::test::cli::rejects_missing_private_pipewire_and_ipc_descriptors",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-aec-backend/tests/cli.rs",
+          "id": "translator-aec-backend::test::cli::rejects_unconnected_descriptors_before_creating_a_graph",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-aec-backend/tests/fixture_cli.rs",
+          "id": "translator-aec-backend::test::fixture_cli::fixture_rejects_missing_private_pipewire_descriptor",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-aec-backend/tests/native_diagnostics.rs",
+          "id": "translator-aec-backend::test::native_diagnostics::native_first_failure_diagnostics_are_immutable",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-aec-backend/tests/witness_cli.rs",
+          "id": "translator-aec-backend::test::witness_cli::witness_rejects_missing_private_descriptors",
+          "status": "deterministic"
+        },
         {
           "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::module_list::tests::malformed_nonempty_inventory_never_becomes_absence",
@@ -6481,7 +7119,72 @@
         },
         {
           "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::pcm::tests::production_playback_spawns_have_distinct_registration_ids",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::pcm::tests::registration_requires_exact_session_process_sink_and_zero_volume",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::pcm::tests::rms_tracks_frame_energy_for_vad_gate",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::pcm::tests::round_trip_monitor_is_not_a_muted_production_translation_stream",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::armed_identity_mismatch_is_terminal",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::armed_is_required_once_between_links_and_first_frame",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::complete_wire_stream_is_only_generic_windows",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::fatal_is_terminal_and_cannot_be_retried_into_success",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::fragmented_wire_frames_preserve_absolute_origin_and_sequence",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::progress_counts_only_complete_valid_frames",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::rejects_discontinuous_or_reidentified_graph",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::rejects_early_or_malformed_armed_packet",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::rejects_invalid_pcm_and_protocol_bounds",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_backend_wire.rs",
+          "id": "translator-audio::test::aec_backend_wire::requires_exact_hello_and_links_before_pcm",
           "status": "deterministic"
         },
         {
@@ -6613,6 +7316,36 @@
           "file": "crates/translator-audio/tests/aec_graph.rs",
           "id": "translator-audio::test::aec_graph::workstation_aec_graph_is_owned_and_tears_down",
           "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_measurement.rs",
+          "id": "translator-audio::test::aec_measurement::cancellation_or_invalid_frame_discards_partial_evidence",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_measurement.rs",
+          "id": "translator-audio::test::aec_measurement::incomplete_or_extra_frames_fail_closed",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_measurement.rs",
+          "id": "translator-audio::test::aec_measurement::independent_parec_is_explicitly_unavailable",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_measurement.rs",
+          "id": "translator-audio::test::aec_measurement::malformed_or_replayed_pcm_never_yields_evidence",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_measurement.rs",
+          "id": "translator-audio::test::aec_measurement::source_error_cancellation_and_failed_cleanup_never_yield_evidence",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/aec_measurement.rs",
+          "id": "translator-audio::test::aec_measurement::synthetic_dual_channel_sample_evidence_is_not_proof",
+          "status": "deterministic"
         },
         {
           "file": "crates/translator-audio/tests/aec_validation_observation.rs",
@@ -6871,13 +7604,48 @@
         },
         {
           "file": "crates/translator-audio/tests/audio_mix.rs",
+          "id": "translator-audio::test::audio_mix::claimed_original_requires_paired_module_and_owner_marker",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/audio_mix.rs",
+          "id": "translator-audio::test::audio_mix::claimed_original_with_wrong_endpoint_fails_before_any_set",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/audio_mix.rs",
+          "id": "translator-audio::test::audio_mix::claimed_speaker_with_wrong_source_fails_before_any_set",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/audio_mix.rs",
+          "id": "translator-audio::test::audio_mix::duplicate_owned_stream_index_or_module_fails_before_any_set",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/audio_mix.rs",
           "id": "translator-audio::test::audio_mix::malformed_prior_channels_fail_discovery_without_physical_writes",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/audio_mix.rs",
+          "id": "translator-audio::test::audio_mix::missing_or_duplicate_referenced_endpoint_fails_before_any_set",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-audio/tests/audio_mix.rs",
           "id": "translator-audio::test::audio_mix::mono_plan_restores_one_exact_raw_channel",
           "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/audio_mix.rs",
+          "id": "translator-audio::test::audio_mix::owned_original_streams_use_actual_pulse_module_and_endpoint_schema",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/audio_mix.rs",
+          "id": "translator-audio::test::audio_mix::private_pulse_original_volume_set_readback_and_restore",
+          "status": "external_skip"
         },
         {
           "file": "crates/translator-audio/tests/audio_mix.rs",
@@ -7218,6 +7986,11 @@
           "file": "crates/translator-audio/tests/pcm_stream.rs",
           "id": "translator-audio::test::pcm_stream::pcm_queue_is_bounded_to_four_hundred_milliseconds",
           "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/pcm_stream.rs",
+          "id": "translator-audio::test::pcm_stream::private_pulse_production_playback_is_muted_from_first_frame",
+          "status": "external_skip"
         },
         {
           "file": "crates/translator-audio/tests/pcm_stream.rs",
@@ -7606,6 +8379,41 @@
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::acknowledged_load_without_owned_pair_does_not_certify_route",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::acknowledged_unload_with_hidden_streams_but_module_still_loaded_blocks_replacement",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::acknowledged_unload_with_owned_module_still_visible_blocks_replacement",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::bypass_custody_is_read_only_and_requires_exact_owned_pair",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::bypass_fact_refresh_does_not_reconcile_original_loopbacks",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::bypass_repair_with_missing_requested_mic_uses_only_a_local_muted_snapshot",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::exclusive_audio_refresh_never_inspects_or_mutates_original_loopbacks",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::failed_mix_recovery_uses_the_same_owned_shutdown_retry",
           "status": "deterministic"
         },
@@ -7617,6 +8425,11 @@
         {
           "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::failed_terminal_round_trip_is_drained_and_owner_joined_before_route_cleanup",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::failed_unsafe_transition_cleanup_does_not_load_new_loopback",
           "status": "deterministic"
         },
         {
@@ -7636,7 +8449,27 @@
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::fresh_headphones_keep_speaker_loopback_across_running_and_stop",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::graph_maintenance_recreates_virtual_endpoints_after_degraded_inspection",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::headphones_restore_mic_loopback_once_and_missing_devices_clean_owned_only",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::incomplete_owned_inventory_prevents_all_mutation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::incomplete_owned_loopback_blocks_reconcile_without_mutating_modules",
           "status": "deterministic"
         },
         {
@@ -7646,12 +8479,22 @@
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::original_loopback_discovery_ignores_name_matched_foreign_streams",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::original_loopback_discovery_matches_sink_and_source_targets_by_module",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
-          "id": "translator-daemon::bin::translator-daemon::tests::original_loopback_load_args_are_discoverable_by_audio_mix",
+          "id": "translator-daemon::bin::translator-daemon::tests::original_loopback_discovery_rejects_incomplete_owned_marker",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::original_loopback_load_args_quote_nested_owner_properties",
           "status": "deterministic"
         },
         {
@@ -7666,7 +8509,22 @@
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_original_loopback_load_discover_and_cleanup",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::production_reconcile_never_creates_a_new_raw_microphone_loopback",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::shutdown_waits_for_active_refresh_and_rejects_late_refresh",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::speaker_only_snapshot_never_requests_microphone_original_loopback",
           "status": "deterministic"
         },
         {
@@ -7677,6 +8535,31 @@
         {
           "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::typed_pending_cleanup_retries_sequentially_after_one_second",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::unsafe_output_never_requests_raw_microphone_loopback",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::unsafe_transition_removes_owned_mic_before_loading_speaker",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::unsafe_transition_retains_matching_speaker_loopback",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::vanished_speaker_loopback_is_not_reloaded_until_runtime_is_stopped",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::wrong_source_or_sink_is_replaced_after_owned_unload",
           "status": "deterministic"
         },
         {
@@ -7762,6 +8645,101 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::aec_admission::tests::reservation_is_consumed_once_after_exact_reinspection",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::absent_scope_does_not_clear_late_creation_obligation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::admitted_then_vanished_scope_releases_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::caller_runtime_drop_does_not_drop_process_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::collector_panic_keeps_process_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::concurrent_shutdown_calls_share_entry_deadline",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::explicit_manager_rejection_releases_absent_scope_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::failed_cgroup_write_keeps_owner_pending_until_scope_is_gone",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::invalid_or_conflicting_manager_marker_cannot_settle_creation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::late_scope_is_bound_before_retry_kill",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::no_frame_runner_reaps_detached_scope_member",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::observed_scope_is_killed_while_manager_outcome_is_unknown",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::panicked_cleanup_task_never_reports_idle",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::pre_request_exit_without_marker_releases_owner_after_reap",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::replaced_scope_cannot_receive_kill",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::sent_request_then_eof_without_terminal_remains_unknown",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::shutdown_during_held_startup_still_cancels_within_entry_budget",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::trusted_runner_command_has_no_caller_control",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::unavailable_kill_control_retains_cleanup_obligation",
           "status": "deterministic"
         },
         {
@@ -7941,6 +8919,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_validation_control::tests::invalid_preflight_binding_cannot_skip_graph_cleanup",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::aec_validation_control::tests::non_cooperative_engine_is_aborted_at_deadline_and_gate_remains_retained",
           "status": "deterministic"
         },
@@ -7951,12 +8934,27 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_validation_control::tests::preflight_cancel_retains_gate_until_graph_cleanup_confirms",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_validation_control::tests::preflight_inspection_error_and_panic_keep_custody_through_failed_retry",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::aec_validation_control::tests::shutdown_after_success_revokes_proof_and_clears_active_owner",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::aec_validation_control::tests::shutdown_closes_admission_cancels_and_joins_the_active_attempt",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::aec_validation_control::tests::shutdown_joins_preflight_and_retains_lease_on_cleanup_error",
           "status": "deterministic"
         },
         {
@@ -8066,6 +9064,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::busy_audio_gate_rejects_start_before_route_or_mix_mutation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::c10_s2a_periodic_inspector_panic_revokes_and_stops_registered_runtime_once",
           "status": "deterministic"
         },
@@ -8087,6 +9090,16 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::c9_s4c_stale_inspection_cannot_revoke_replacement_proof_or_runtime",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::hot_reconfigure_applies_mix_before_commit_and_stops_on_mix_failure",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::microphone_start_applies_non_bypass_mix_before_opening_runtime",
           "status": "deterministic"
         },
         {
@@ -8836,6 +9849,16 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::provider_latency_effect_keeps_zero_distinct_from_missing",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::provider_latency_effect_reaches_runtime_observer_with_all_milestones",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::provider_send_stop_and_timeout_retain_the_exact_owner_and_typed_result",
           "status": "deterministic"
         },
@@ -8897,6 +9920,176 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::terminal_reap_keeps_thread_ownership_until_completion_is_observable",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::cancel_is_shared_and_reaps_owned_process_group",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::concurrent_cancel_calls_join_one_cleanup",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::dropped_caller_still_drives_cleanup",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::exact_stream_requires_clean_eof_exit_and_cleanup_before_result",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::exited_leader_does_not_release_descendant_group",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::failed_first_cleanup_keeps_live_descendant_owned_until_retry",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::isolated_native_exact_stream_yields_nonadmissible_result_after_cleanup",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::isolated_native_stream_is_owned_and_cancelled",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::isolated_runner_rejects_stream_with_foreign_session",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::killed_runner_cannot_leave_scope_or_early_idle",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::late_fatal_extra_frame_partial_eof_and_nonzero_exit_never_return_result",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::no_progress_is_bounded_and_cannot_become_success",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::owned_group_is_a_private_session",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::owner_shutdown_joins_the_same_cleanup_task",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::same_session_member_in_other_group_prevents_early_reap",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::absent_scope_does_not_clear_late_creation_obligation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::admitted_then_vanished_scope_releases_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::caller_runtime_drop_does_not_drop_process_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::collector_panic_keeps_process_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::concurrent_shutdown_calls_share_entry_deadline",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::explicit_manager_rejection_releases_absent_scope_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::failed_cgroup_write_keeps_owner_pending_until_scope_is_gone",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::invalid_or_conflicting_manager_marker_cannot_settle_creation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::late_scope_is_bound_before_retry_kill",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::no_frame_runner_reaps_detached_scope_member",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::observed_scope_is_killed_while_manager_outcome_is_unknown",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::panicked_cleanup_task_never_reports_idle",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::pre_request_exit_without_marker_releases_owner_after_reap",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::replaced_scope_cannot_receive_kill",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::sent_request_then_eof_without_terminal_remains_unknown",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::shutdown_during_held_startup_still_cancels_within_entry_budget",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::trusted_runner_command_has_no_caller_control",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/aec_backend_session.rs",
+          "id": "translator-daemon::test::aec_backend_session::session::scope_tests::unavailable_kill_control_retains_cleanup_obligation",
           "status": "deterministic"
         },
         {
@@ -8987,6 +10180,11 @@
         {
           "file": "crates/translator-daemon/tests/api_security.rs",
           "id": "translator-daemon::test::api_security::graph_and_route_reads_report_typed_unavailable_state",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/api_security.rs",
+          "id": "translator-daemon::test::api_security::inert_bypass_fixture_never_claims_raw_microphone_custody",
           "status": "deterministic"
         },
         {
@@ -9121,6 +10319,16 @@
         },
         {
           "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::acknowledged_mic_mute_without_observed_zero_must_not_commit",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::active_mix_reconcile_fails_if_committed_raw_microphone_target_disappears",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
           "id": "translator-daemon::test::audio_mix_application::applies_independent_mix_volumes_to_current_pulse_streams",
           "status": "deterministic"
         },
@@ -9141,7 +10349,17 @@
         },
         {
           "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::failed_microphone_muted_bypass_cannot_restore_stale_raw_mic",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
           "id": "translator-daemon::test::audio_mix_application::failed_patch_is_never_reapplied_by_reconciliation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::failed_quarantine_never_restores_a_nonzero_original_microphone",
           "status": "deterministic"
         },
         {
@@ -9151,12 +10369,42 @@
         },
         {
           "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::headphone_quarantine_without_owned_original_mic_target_fails_closed",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
           "id": "translator-daemon::test::audio_mix_application::invalid_desired_volume_is_rejected_before_discovery_even_in_bypass",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::microphone_muted_bypass_preserves_speaker_without_unmuting_stale_raw_mic",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
           "id": "translator-daemon::test::audio_mix_application::missing_prior_channel_volume_rejects_before_any_set",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::observed_original_mic_zero_can_commit_translating_mix",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::private_pulse_respawn_admits_exact_committed_volume_before_first_frame",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::quarantine_requires_every_owned_output_to_read_back_zero",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::requested_raw_microphone_volume_requires_a_discovered_owned_target",
           "status": "deterministic"
         },
         {
@@ -9246,6 +10494,16 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::cleanup_pending_watchdog_cannot_restore_audio_from_start_quarantine",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::device_loss_quarantines_and_stops_live_microphone_before_reconcile",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::direction_health_is_serialized_and_fenced_by_generation_and_epoch",
           "status": "deterministic"
         },
@@ -9261,7 +10519,17 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::failed_loopback_refresh_keeps_stop_quarantined_until_retry",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::failed_native_shutdown_keeps_translating_mix_and_retry_ownership",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::failed_quarantine_still_stops_pcm_and_records_unknown_mix",
           "status": "deterministic"
         },
         {
@@ -9286,7 +10554,32 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::loopback_refresh_failure_quarantines_and_stops_live_microphone",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::lost_graph_or_route_quarantines_and_stops_live_microphone",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::mic_only_stop_uses_speaker_only_safety_validation_when_raw_custody_is_absent",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::missing_speaker_bypass_is_repaired_only_after_native_stop",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::ordinary_bypass_failure_is_not_silently_recovered",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::output_switch_during_bypass_repair_never_unmutes_raw_microphone",
           "status": "deterministic"
         },
         {
@@ -9301,7 +10594,37 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::speaker_only_start_skips_microphone_quarantine_and_lost_route_stops_runtime",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stale_open_speaker_facts_keep_microphone_muted_and_block_start",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::start_failure_debug_never_formats_the_cleanup_owner",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stop_holds_production_lease_until_headphone_bypass_is_verified",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stopped_mix_patch_revalidates_without_unmuting_open_speaker_microphone",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stopped_unknown_mix_patch_cannot_apply_desired_or_open_start_gate",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::system_default_change_does_not_stop_pinned_live_microphone",
           "status": "deterministic"
         },
         {
@@ -9312,6 +10635,11 @@
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::terminal_completion_reaps_only_the_matching_generation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::unsupported_stopped_mix_patch_releases_lease_without_mutating_audio_or_status",
           "status": "deterministic"
         },
         {
@@ -9382,6 +10710,11 @@
         {
           "file": "crates/translator-daemon/tests/direction_session.rs",
           "id": "translator-daemon::test::direction_session::direction_session_keeps_stream_stable_rotates_utterances_and_sequences_globally",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/direction_session.rs",
+          "id": "translator-daemon::test::direction_session::direction_session_preserves_partial_provider_latency",
           "status": "deterministic"
         },
         {
@@ -10281,6 +11614,11 @@
         },
         {
           "file": "apps/translator-ui/src-tauri/src/main.rs",
+          "id": "translator-ui::bin::translator-ui::tests::aec_status_parser_rejects_missing_attempt_and_proof_fields",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src-tauri/src/main.rs",
           "id": "translator-ui::bin::translator-ui::tests::cloud_provider_requires_explicit_opt_in",
           "status": "deterministic"
         },
@@ -10297,6 +11635,11 @@
         {
           "file": "apps/translator-ui/src-tauri/src/main.rs",
           "id": "translator-ui::bin::translator-ui::tests::daemon_base_url_is_loopback_only",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src-tauri/src/main.rs",
+          "id": "translator-ui::bin::translator-ui::tests::daemon_endpoint_maps_aec_calibration_controls",
           "status": "deterministic"
         },
         {
@@ -10338,10 +11681,16 @@
     },
     "unittest": {
       "external_skip_count": 22,
-      "file_count": 13,
+      "file_count": 19,
       "files": [
+        "tests/test_aec_backend_check.py",
+        "tests/test_aec_backend_isolation.py",
+        "tests/test_aec_backend_isolation_hardening.py",
+        "tests/test_aec_backend_stage.py",
+        "tests/test_aec_public_boundary.py",
         "tests/test_ci_contract.py",
         "tests/test_manifest_execution_gate.py",
+        "tests/test_portable_bundle.py",
         "tests/test_publication_gate.py",
         "tests/test_schema_gate.py",
         "tests/test_supply_chain_gate.py",
@@ -10354,8 +11703,248 @@
         "tests/test_task9_desktop_run_mode.py",
         "tests/test_translator_ui_compact_layout.py"
       ],
-      "node_count": 279,
+      "node_count": 322,
       "nodes": [
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_cancel_lifecycle_accepts_ordered_armed_before_frames",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_diagnostic_lag_finds_known_delays_without_pcm_output",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_first_buffer_failure_survives_long_untrusted_stderr",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_first_gap_snapshot_contains_only_numeric_provenance",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_fixture_first_failure_is_numeric_and_private",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_oversized_native_diagnostic_is_unobserved",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_preflight_reports_private_namespace",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_private_meta_gap_reports_structured_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_seq_skew_verdict_uses_structured_native_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_truncated_first_buffer_diagnostic_is_unobserved",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation.py",
+          "id": "test_aec_backend_isolation.AecBackendIsolationTests.test_inherited_descriptor_and_default_socket_are_rejected",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation.py",
+          "id": "test_aec_backend_isolation.AecBackendIsolationTests.test_probe_runs_in_private_namespace",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_ambiguous_acquisition_never_emits_terminal_marker",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_await_scope_checks_cancel_after_negative_membership_read",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_cancel_during_manager_call_waits_for_exact_job_result",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_completed_job_buffered_before_start_reply_admits_exact_pid",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_connect_failure_before_request_is_definitive_no_create",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_connect_is_cancelled_before_any_manager_request",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_default_server_override_is_rejected_before_probe",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_explicit_manager_rejection_reports_definitive_no_create",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_failed_scope_admission_keeps_expected_scope_in_cleanup_custody",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_get_name_owner_is_cancelled_before_p_marker",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_inherited_fd_is_rejected_before_probe",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_lifecycle_descriptor_above_nine_is_accepted_only_for_marker",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_missing_gi_before_request_reaps_child_and_marks_no_create",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_p_marker_precedes_start_and_failed_write_prevents_request",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_preflight_has_no_host_devices_routes_or_default_runtime",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_probe_cannot_open_host_resources_or_reach_parent_listeners",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_remote_rejection_requires_absent_unit_and_job",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_sigterm_inside_popen_keeps_child_in_cleanup_custody",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_transport_failure_is_not_definitive_manager_rejection",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_unknown_scope_creation_cannot_report_cleanup_reaped",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_fault_requires_confirmed_injection_and_matching_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_frozen_artifact_set_includes_runtime_and_harness",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_gio_runtime_is_in_frozen_artifact_set",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_lifecycle_and_gap_require_causal_receipt",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_near_and_startup_have_distinct_contracts",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_owner_receipt_requires_exact_test_count",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_trials_bind_mode_frames_metric_and_identity",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_public_boundary.py",
+          "id": "test_aec_public_boundary.AecPublicBoundaryTests.test_external_crate_cannot_fabricate_or_publish_raw_aec_measurement",
+          "reason": "",
+          "status": "deterministic"
+        },
         {
           "file": "tests/test_ci_contract.py",
           "id": "test_ci_contract.CiContractTests.test_actions_and_toolchain_are_immutable_and_exact",
@@ -11151,6 +12740,24 @@
         {
           "file": "tests/test_manifest_execution_gate.py",
           "id": "test_manifest_execution_gate.ManifestExecutionGateTests.test_validation_environment_uses_an_explicit_allowlist",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_portable_bundle.py",
+          "id": "test_portable_bundle.PortableBundleTests.test_inherited_runtime_override_remains_supported",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_portable_bundle.py",
+          "id": "test_portable_bundle.PortableBundleTests.test_moved_bundle_uses_its_own_runtime_without_checkout_paths",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_portable_bundle.py",
+          "id": "test_portable_bundle.PortableBundleTests.test_private_service_environment_overrides_bundle_defaults",
           "reason": "",
           "status": "deterministic"
         },
@@ -12343,6 +13950,61 @@
       "id": "translator-audio::test::aec_graph::workstation_aec_graph_is_owned_and_tears_down"
     },
     {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-audio::test::audio_mix::private_pulse_original_volume_set_readback_and_restore"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-audio::test::pcm_stream::private_pulse_production_playback_is_muted_from_first_frame"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_original_loopback_load_discover_and_cleanup"
+    },
+    {
+      "code": "missing_external_prerequisite:isolated_user_scope",
+      "framework": "rust",
+      "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::no_frame_runner_reaps_detached_scope_member"
+    },
+    {
+      "code": "missing_external_prerequisite:isolated_user_scope",
+      "framework": "rust",
+      "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal"
+    },
+    {
+      "code": "missing_external_prerequisite:isolated_native_pipewire",
+      "framework": "rust",
+      "id": "translator-daemon::test::aec_backend_session::isolated_native_exact_stream_yields_nonadmissible_result_after_cleanup"
+    },
+    {
+      "code": "missing_external_prerequisite:isolated_native_pipewire",
+      "framework": "rust",
+      "id": "translator-daemon::test::aec_backend_session::isolated_native_stream_is_owned_and_cancelled"
+    },
+    {
+      "code": "missing_external_prerequisite:isolated_native_pipewire",
+      "framework": "rust",
+      "id": "translator-daemon::test::aec_backend_session::killed_runner_cannot_leave_scope_or_early_idle"
+    },
+    {
+      "code": "missing_external_prerequisite:isolated_user_scope",
+      "framework": "rust",
+      "id": "translator-daemon::test::aec_backend_session::session::scope_tests::no_frame_runner_reaps_detached_scope_member"
+    },
+    {
+      "code": "missing_external_prerequisite:isolated_user_scope",
+      "framework": "rust",
+      "id": "translator-daemon::test::aec_backend_session::session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::test::audio_mix_application::private_pulse_respawn_admits_exact_committed_volume_before_first_frame"
+    },
+    {
       "code": "missing_external_prerequisite:private_human_evidence",
       "framework": "unittest",
       "id": "test_task10_real_app_smoke.Task10RealAppSmokeTests.test_real_app_smoke_reports_record_blockers_without_spoken_content"
@@ -12455,7 +14117,7 @@
   ],
   "runner": {
     "path": "scripts/translator-test-manifest",
-    "sha256": "270f3398251b71e34b8ba7f0d267019ff02ebbd4be0334140ab5ccc72fc413fd"
+    "sha256": "66733550ac0060903d85d517cd7ffb11ca260569be1e2b0197eaa8e52f04f5c1"
   },
   "schema_version": 1,
   "validator": {

@@ -25,7 +25,7 @@ const DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct PulseState {
-    volumes: [u32; 2],
+    volumes: [u32; 3],
     sets: Vec<Vec<String>>,
 }
 
@@ -41,7 +41,7 @@ impl Default for Pulse {
     fn default() -> Self {
         Self {
             state: Mutex::new(PulseState {
-                volumes: [32768, 49152],
+                volumes: [32768, 49152, 32768],
                 sets: Vec::new(),
             }),
             fail_at: AtomicUsize::new(0),
@@ -64,18 +64,35 @@ impl CommandRunner for PulseRunner {
         assert_eq!(program, "pactl");
         let mut state = self.0.state.lock().unwrap();
         if args[0] == "--format=json" {
-            let inputs: Vec<_> = if args[2] == "sink-inputs" {
-                ["translator-outgoing-playback", "translator-incoming-playback"]
-                    .into_iter().enumerate().map(|(index, media)| json!({
-                        "index": 43 + index,
+            let values = match args[2].as_str() {
+                "sink-inputs" => {
+                    let mut inputs: Vec<_> =
+                        ["translator-outgoing-playback", "translator-incoming-playback"]
+                            .into_iter().enumerate().map(|(index, media)| json!({
+                                "index": 43 + index,
+                                "channel_map": "mono",
+                                "volume": {"mono": {"value": state.volumes[index]}},
+                                "properties": {"application.name": "translator-daemon", "media.name": media},
+                            })).collect();
+                    inputs.push(json!({
+                        "index": 45,
+                        "owner_module": "9002",
+                        "sink": 1,
                         "channel_map": "mono",
-                        "volume": {"mono": {"value": state.volumes[index]}},
-                        "properties": {"application.name": "translator-daemon", "media.name": media},
-                    })).collect()
-            } else {
-                Vec::new()
+                        "volume": {"mono": {"value": state.volumes[2]}},
+                        "properties": {"translator.owner": "true", "media.name": "loopback-microphone-original"},
+                    }));
+                    inputs
+                }
+                "source-outputs" => vec![json!({
+                    "owner_module": "9002", "source": 0,
+                    "properties": {"translator.owner": "true", "media.name": "loopback-microphone-original"},
+                })],
+                "sources" => vec![json!({"index": 0, "name": "alsa_input.physical"})],
+                "sinks" => vec![json!({"index": 1, "name": "translator_mic_out"})],
+                other => panic!("unexpected pactl list: {other}"),
             };
-            return Ok(CommandResult::success(serde_json::to_vec(&inputs).unwrap()));
+            return Ok(CommandResult::success(serde_json::to_vec(&values).unwrap()));
         }
         assert_eq!(args[0], "set-sink-input-volume");
         let index = args[1].parse::<usize>().unwrap() - 43;
@@ -127,6 +144,30 @@ impl ActiveDuplexRuntime for Native {
 
 impl RuntimeMaintenance for Native {
     fn refresh(&self, _: &RuntimeStore) -> Result<(), ControlFailure> {
+        Ok(())
+    }
+
+    fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        let facts = translator_daemon::RuntimeFactsSource::inspect(
+            self,
+            std::time::Instant::now() + DEADLINE,
+        )
+        .unwrap();
+        store.set_devices(facts.devices.into());
+        store.set_audio_graph(facts.audio_graph);
+        store.set_routes(facts.routes);
+        Ok(())
+    }
+
+    fn verify_bypass_custody(
+        &self,
+        _: &translator_daemon::RuntimeSnapshot,
+        _: bool,
+    ) -> Result<(), ControlFailure> {
+        Ok(())
+    }
+
+    fn prepare_start(&self, _: &translator_daemon::RuntimeSnapshot) -> Result<(), ControlFailure> {
         Ok(())
     }
 }
@@ -257,7 +298,7 @@ async fn failed_physical_patch_never_changes_http_or_sse_desired_state() {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(problem["code"], "audio_mix_apply_failed");
     assert_eq!(store.snapshot().audio_mix, before);
-    assert_eq!(pulse.state.lock().unwrap().volumes, [65536, 65536]);
+    assert_eq!(pulse.state.lock().unwrap().volumes, [65536, 65536, 0]);
     assert!(
         futures_util::poll!(events.frame()).is_pending(),
         "failed candidate must not emit a successful snapshot"
@@ -269,10 +310,11 @@ async fn failed_physical_patch_never_changes_http_or_sse_desired_state() {
     {
         let state = pulse.state.lock().unwrap();
         assert_eq!(
-            &state.sets[state.sets.len() - 2..],
+            &state.sets[state.sets.len() - 3..],
             [
                 vec!["set-sink-input-volume", "43", "100%"],
                 vec!["set-sink-input-volume", "44", "100%"],
+                vec!["set-sink-input-volume", "45", "0%"],
             ]
         );
     }
@@ -332,18 +374,20 @@ async fn cancelled_http_and_watchdog_are_drained_before_shutdown_returns() {
     assert!(!after.translation_running);
     let state = pulse.state.lock().unwrap();
     assert_eq!(
-        &state.sets[2..6],
+        &state.sets[6..12],
         [
             vec!["set-sink-input-volume", "43", "80%"],
             vec!["set-sink-input-volume", "44", "90%"],
+            vec!["set-sink-input-volume", "45", "0%"],
             vec!["set-sink-input-volume", "43", "80%"],
             vec!["set-sink-input-volume", "44", "90%"],
+            vec!["set-sink-input-volume", "45", "0%"],
         ],
         "queued watchdog must use the newly committed candidate"
     );
     assert_eq!(
         state.volumes,
-        [0, 0],
+        [0, 0, 65536],
         "joined shutdown must physically reconcile bypass"
     );
 }

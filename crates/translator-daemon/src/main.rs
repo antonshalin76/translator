@@ -91,10 +91,17 @@ impl<R: CommandRunner> PulseResources<R> {
         } else {
             store.clear_audio_graph("journal_path_unavailable");
         }
-        self.refresh(store);
+        if let Err(error) = self.refresh(store) {
+            tracing::warn!(event = "audio_state_initialization_incomplete", code = ?error.code());
+        }
     }
 
-    fn refresh(&mut self, store: &RuntimeStore) {
+    fn refresh(&mut self, store: &RuntimeStore) -> Result<(), OriginalLoopbackError> {
+        self.refresh_facts_only(store);
+        self.ensure_original_loopbacks(store)
+    }
+
+    fn refresh_facts_only(&mut self, store: &RuntimeStore) {
         self.refresh_graph(store);
         match self.routing.reconcile(None) {
             Ok(state) => store.set_routes(state),
@@ -104,13 +111,11 @@ impl<R: CommandRunner> PulseResources<R> {
             }
         }
         self.refresh_devices(store);
-        self.ensure_original_loopbacks(store);
     }
 
     fn refresh_graph_and_devices(&mut self, store: &RuntimeStore) {
         self.refresh_graph(store);
         self.refresh_devices(store);
-        self.ensure_original_loopbacks(store);
     }
 
     fn refresh_graph(&mut self, store: &RuntimeStore) {
@@ -129,13 +134,17 @@ impl<R: CommandRunner> PulseResources<R> {
         }
     }
 
-    fn ensure_original_loopbacks(&self, store: &RuntimeStore) {
-        if let Err(error) = self.original_loopbacks.ensure(&store.snapshot()) {
+    fn ensure_original_loopbacks(&self, store: &RuntimeStore) -> Result<(), OriginalLoopbackError> {
+        let result = self
+            .original_loopbacks
+            .ensure_without_new_mic(&store.snapshot());
+        if let Err(error) = &result {
             tracing::warn!(
                 event = "original_loopback_reconciliation_failed",
                 code = ?error.code()
             );
         }
+        result
     }
 
     fn cleanup_graph(&mut self) {
@@ -189,8 +198,123 @@ struct PulseManualRoutes<R = SystemCommandRunner> {
 
 impl<R: CommandRunner + Send> RuntimeMaintenance for PulseManualRoutes<R> {
     fn refresh(&self, store: &RuntimeStore) -> Result<(), translator_daemon::ControlFailure> {
-        self.refresh_audio_state(store);
-        Ok(())
+        if !matches!(
+            self.operation_gate.state(),
+            AudioOperationState::Idle | AudioOperationState::Production
+        ) {
+            return Err(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::CONFLICT,
+                code: "audio_operation_busy",
+            });
+        }
+        self.resources
+            .with_active(|resources| resources.refresh(store))
+            .ok_or(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "original_loopback_custody_unknown",
+            })?
+            .map_err(|_| translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "original_loopback_custody_unknown",
+            })
+    }
+
+    fn refresh_bypass_facts(
+        &self,
+        store: &RuntimeStore,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if self.operation_gate.state() != AudioOperationState::Production {
+            return Err(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::CONFLICT,
+                code: "audio_operation_busy",
+            });
+        }
+        self.resources
+            .with_active(|resources| resources.refresh_facts_only(store))
+            .ok_or(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "original_loopback_custody_unknown",
+            })
+    }
+
+    fn verify_bypass_custody(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit_mic_original: bool,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if self.operation_gate.state() != AudioOperationState::Production {
+            return Err(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::CONFLICT,
+                code: "audio_operation_busy",
+            });
+        }
+        self.resources
+            .with_active(|resources| {
+                resources
+                    .original_loopbacks
+                    .verify_existing(snapshot, permit_mic_original)
+            })
+            .ok_or(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "original_loopback_custody_unknown",
+            })?
+            .map_err(|_| translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "original_loopback_custody_unknown",
+            })
+    }
+
+    fn prepare_start(
+        &self,
+        candidate: &RuntimeSnapshot,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        self.resources
+            .with_active(|resources| resources.original_loopbacks.ensure_without_new_mic(candidate))
+            .ok_or(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "original_loopback_custody_unknown",
+            })?
+            .map_err(|error| {
+                tracing::warn!(event = "original_loopback_start_preparation_failed", code = ?error.code());
+                translator_daemon::ControlFailure {
+                    status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    code: "original_loopback_custody_unknown",
+                }
+            })
+    }
+
+    fn prepare_bypass(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if self.operation_gate.state() != AudioOperationState::Production {
+            return Err(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::CONFLICT,
+                code: "audio_operation_busy",
+            });
+        }
+        self.resources
+            .with_active(|resources| {
+                resources
+                    .original_loopbacks
+                    .ensure_without_new_mic(snapshot)
+                    .or_else(|_| {
+                        let mut muted = snapshot.clone();
+                        muted.audio_mix.microphone_original_percent = 0;
+                        resources.original_loopbacks.ensure_without_new_mic(&muted)
+                    })
+            })
+            .ok_or(translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "original_loopback_custody_unknown",
+            })?
+            .map_err(|error| {
+                tracing::warn!(event = "original_loopback_bypass_preparation_failed", code = ?error.code());
+                translator_daemon::ControlFailure {
+                    status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    code: "original_loopback_custody_unknown",
+                }
+            })
     }
 }
 
@@ -292,7 +416,7 @@ impl<R: CommandRunner + Send> PulseManualRoutes<R> {
         );
         self.resources.with_active(|resources| {
             if routing_allowed {
-                resources.refresh(store);
+                let _ = resources.refresh(store);
             } else {
                 resources.refresh_graph_and_devices(store);
             }
@@ -447,7 +571,23 @@ where
         Self { runner }
     }
 
+    #[cfg(test)]
     fn ensure(&self, snapshot: &RuntimeSnapshot) -> Result<(), OriginalLoopbackError> {
+        self.ensure_with_policy(snapshot, true)
+    }
+
+    fn ensure_without_new_mic(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<(), OriginalLoopbackError> {
+        self.ensure_with_policy(snapshot, false)
+    }
+
+    fn ensure_with_policy(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        allow_new_mic: bool,
+    ) -> Result<(), OriginalLoopbackError> {
         let requests = original_loopback_requests(snapshot);
         let sink_inputs: Vec<RawPulseStream> =
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
@@ -493,10 +633,93 @@ where
             self.unload_module(&module_id)?;
         }
 
+        if snapshot.translation_running
+            && missing_requests
+                .iter()
+                .any(|request| request.media_name == SPEAKER_ORIGINAL_LOOPBACK)
+        {
+            return Err(discovery_error());
+        }
+        if !allow_new_mic
+            && missing_requests
+                .iter()
+                .any(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
+        {
+            return Err(discovery_error());
+        }
+
         for request in missing_requests {
             self.load_module(&request)?;
         }
 
+        let sink_inputs: Vec<RawPulseStream> =
+            self.run_json(&["--format=json", "list", "sink-inputs"])?;
+        let source_outputs: Vec<RawPulseStream> =
+            self.run_json(&["--format=json", "list", "source-outputs"])?;
+        let verified = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
+        if verified.len() != requests.len()
+            || requests.iter().any(|request| {
+                !matching_original_loopbacks(&verified, request, &sources, &sinks)
+                    .is_ok_and(|matches| matches.len() == 1)
+            })
+        {
+            return Err(OriginalLoopbackError::new(
+                OriginalLoopbackErrorCode::Discovery,
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn verify_existing(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit_mic_original: bool,
+    ) -> Result<(), OriginalLoopbackError> {
+        let mut requests = original_loopback_requests(snapshot);
+        if permit_mic_original {
+            if direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
+                && snapshot
+                    .devices
+                    .as_ref()
+                    .is_some_and(|devices| devices.acoustic.mode == OutputMode::Headphones)
+                && !requests
+                    .iter()
+                    .any(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
+            {
+                let source = snapshot
+                    .devices
+                    .as_ref()
+                    .and_then(|devices| devices.source.selected.as_ref())
+                    .ok_or_else(discovery_error)?;
+                requests.push(OriginalLoopbackRequest {
+                    media_name: MICROPHONE_ORIGINAL_LOOPBACK,
+                    source: source.name.clone(),
+                    sink: MIC_OUT_SINK.to_owned(),
+                });
+            }
+        } else {
+            requests.retain(|request| request.media_name != MICROPHONE_ORIGINAL_LOOPBACK);
+        }
+        let sink_inputs: Vec<RawPulseStream> =
+            self.run_json(&["--format=json", "list", "sink-inputs"])?;
+        let source_outputs: Vec<RawPulseStream> =
+            self.run_json(&["--format=json", "list", "source-outputs"])?;
+        let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
+        if discovered.len() != requests.len() {
+            return Err(discovery_error());
+        }
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let sources = endpoint_names(self.run_json(&["--format=json", "list", "sources"])?)?;
+        let sinks = endpoint_names(self.run_json(&["--format=json", "list", "sinks"])?)?;
+        if requests.iter().any(|request| {
+            !matching_original_loopbacks(&discovered, request, &sources, &sinks)
+                .is_ok_and(|matches| matches.len() == 1)
+        }) {
+            return Err(discovery_error());
+        }
         Ok(())
     }
 
@@ -525,6 +748,20 @@ where
             &["unload-module".to_owned(), module_id.to_owned()],
             OriginalLoopbackErrorCode::Cleanup,
         )?;
+        let module_id = module_id
+            .parse::<u32>()
+            .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup))?;
+        let result = self.run_pactl(
+            &["list", "short", "modules"],
+            OriginalLoopbackErrorCode::Cleanup,
+        )?;
+        let present = translator_audio::module_id_present(result.stdout(), module_id)
+            .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup))?;
+        if present {
+            return Err(OriginalLoopbackError::new(
+                OriginalLoopbackErrorCode::Cleanup,
+            ));
+        }
         Ok(())
     }
 
@@ -569,7 +806,7 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
     };
 
     let mut requests = Vec::new();
-    if original_bypass_required(snapshot, snapshot.audio_mix.speaker_original_percent)
+    if direction_enabled(snapshot, translator_core::AudioDirection::Speaker)
         && let Some(sink) = devices.sink.selected.as_ref()
     {
         requests.push(OriginalLoopbackRequest {
@@ -579,8 +816,9 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
         });
     }
 
-    if devices.acoustic.mode == OutputMode::Headphones
-        && original_bypass_required(snapshot, snapshot.audio_mix.microphone_original_percent)
+    if direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
+        && devices.acoustic.mode == OutputMode::Headphones
+        && snapshot.audio_mix.microphone_original_percent > 0
         && let Some(source) = devices.source.selected.as_ref()
     {
         requests.push(OriginalLoopbackRequest {
@@ -593,8 +831,14 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
     requests
 }
 
-const fn original_bypass_required(snapshot: &RuntimeSnapshot, configured_percent: u8) -> bool {
-    !snapshot.translation_running || configured_percent > 0
+fn direction_enabled(
+    snapshot: &RuntimeSnapshot,
+    direction_id: translator_core::AudioDirection,
+) -> bool {
+    snapshot
+        .directions
+        .iter()
+        .any(|direction| direction.direction_id == direction_id && direction.enabled)
 }
 
 fn original_loopback_load_args(request: &OriginalLoopbackRequest) -> Vec<String> {
@@ -657,10 +901,9 @@ fn discover_original_loopbacks(
             return Err(discovery_error());
         }
     }
-    modules.retain(|module_id, module| {
-        let identity = (module_id.clone(), module.media_name);
-        owned_sink_inputs.contains(&identity) && owned_source_outputs.contains(&identity)
-    });
+    if owned_sink_inputs != owned_source_outputs {
+        return Err(discovery_error());
+    }
     Ok(modules)
 }
 
@@ -892,16 +1135,19 @@ async fn async_main() -> ExitCode {
         operation_gate: operation_gate.clone(),
     });
     manual_routes.initialize(&store);
-    let audio_mix: Arc<dyn AudioMixController> =
-        Arc::new(AudioMixApplication::new(SystemCommandRunner));
+    let audio_mix_application = Arc::new(AudioMixApplication::new(SystemCommandRunner));
+    let audio_mix: Arc<dyn AudioMixController> = audio_mix_application.clone();
     let duplex_config = build_duplex_config(lease.token_path());
     let translation = duplex_config.clone().map(|config| {
         ControlApplication::spawn(
             store.clone(),
-            Arc::new(ProcessDuplexRunner::with_observer(
-                config,
-                Arc::new(RuntimeLatencyObserver::new(store.clone())),
-            )),
+            Arc::new(
+                ProcessDuplexRunner::with_observer(
+                    config,
+                    Arc::new(RuntimeLatencyObserver::new(store.clone())),
+                )
+                .with_playback_mix_authority(audio_mix_application.clone()),
+            ),
             operation_gate.clone(),
             manual_routes.clone(),
             manual_routes.clone(),
@@ -1593,6 +1839,88 @@ mod tests {
     };
     use uuid::Uuid;
 
+    #[derive(Clone, Default)]
+    struct ExclusiveRefreshRunner(Arc<Mutex<Vec<Vec<String>>>>);
+
+    impl CommandRunner for ExclusiveRefreshRunner {
+        fn run_until(
+            &self,
+            _: &str,
+            args: &[String],
+            _: Instant,
+        ) -> Result<CommandResult, CommandRunError> {
+            self.0.lock().unwrap().push(args.to_vec());
+            Err(CommandRunError::NotFound)
+        }
+    }
+
+    #[test]
+    fn exclusive_audio_refresh_never_inspects_or_mutates_original_loopbacks() {
+        for calibration in [true, false] {
+            let runner = ExclusiveRefreshRunner::default();
+            let gate = translator_daemon::AudioOperationGate::new();
+            let _lease = if calibration {
+                gate.acquire_calibration(Uuid::new_v4()).unwrap()
+            } else {
+                gate.acquire_human_round_trip(Uuid::new_v4()).unwrap()
+            };
+            let routes = super::PulseManualRoutes {
+                resources: LifecycleProtected::new(super::PulseResources {
+                    routing: translator_audio::PulseRoutingWatcher::new(
+                        runner.clone(),
+                        translator_audio::RoutingProfile::Production,
+                    ),
+                    devices: translator_audio::PulseDeviceWatcher::new(
+                        runner.clone(),
+                        AecCapability::Unavailable,
+                    ),
+                    original_loopbacks: PulseOriginalLoopbacks::new(runner.clone()),
+                    graph: None,
+                }),
+                operation_gate: gate,
+            };
+
+            routes.refresh(&translator_daemon::RuntimeStore::default());
+            assert!(runner.0.lock().unwrap().iter().all(|args| {
+                !matches!(
+                    args.as_slice(),
+                    [first, ..] if first == "load-module" || first == "unload-module"
+                ) && args.as_slice() != ["--format=json", "list", "sink-inputs"]
+            }));
+        }
+    }
+
+    #[test]
+    fn bypass_fact_refresh_does_not_reconcile_original_loopbacks() {
+        let runner = ExclusiveRefreshRunner::default();
+        let loopback_runner = ExclusiveRefreshRunner::default();
+        let gate = translator_daemon::AudioOperationGate::new();
+        let _lease = gate.acquire_production().unwrap();
+        let routes = super::PulseManualRoutes {
+            resources: LifecycleProtected::new(super::PulseResources {
+                routing: translator_audio::PulseRoutingWatcher::new(
+                    runner.clone(),
+                    translator_audio::RoutingProfile::Production,
+                ),
+                devices: translator_audio::PulseDeviceWatcher::new(
+                    runner.clone(),
+                    AecCapability::Unavailable,
+                ),
+                original_loopbacks: PulseOriginalLoopbacks::new(loopback_runner.clone()),
+                graph: None,
+            }),
+            operation_gate: gate,
+        };
+
+        translator_daemon::RuntimeMaintenance::refresh_bypass_facts(
+            &routes,
+            &translator_daemon::RuntimeStore::default(),
+        )
+        .unwrap();
+        assert!(!runner.0.lock().unwrap().is_empty());
+        assert!(loopback_runner.0.lock().unwrap().is_empty());
+    }
+
     struct TestFacts;
     impl translator_daemon::RuntimeFactsSource for TestFacts {
         fn inspect(
@@ -1736,7 +2064,11 @@ mod tests {
             },
             ..snapshot
         };
-        assert!(original_loopback_requests(&muted_originals).is_empty());
+        assert_eq!(original_loopback_requests(&muted_originals).len(), 1);
+        assert_eq!(
+            original_loopback_requests(&muted_originals)[0].media_name,
+            SPEAKER_ORIGINAL_LOOPBACK
+        );
 
         let stopped_muted = RuntimeSnapshot {
             translation_running: false,
@@ -1744,18 +2076,33 @@ mod tests {
         };
         assert_eq!(
             original_loopback_requests(&stopped_muted),
-            [
-                OriginalLoopbackRequest {
-                    media_name: SPEAKER_ORIGINAL_LOOPBACK,
-                    source: format!("{REMOTE_IN_SINK}.monitor"),
-                    sink: "alsa_output.headphones".to_owned(),
-                },
-                OriginalLoopbackRequest {
-                    media_name: MICROPHONE_ORIGINAL_LOOPBACK,
-                    source: "alsa_input.microphone".to_owned(),
-                    sink: MIC_OUT_SINK.to_owned(),
-                },
-            ]
+            [OriginalLoopbackRequest {
+                media_name: SPEAKER_ORIGINAL_LOOPBACK,
+                source: format!("{REMOTE_IN_SINK}.monitor"),
+                sink: "alsa_output.headphones".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn speaker_only_snapshot_never_requests_microphone_original_loopback() {
+        let mut snapshot = RuntimeSnapshot {
+            devices: Some(selected_devices()),
+            ..RuntimeSnapshot::default()
+        };
+        snapshot
+            .directions
+            .iter_mut()
+            .find(|direction| direction.direction_id == translator_core::AudioDirection::Microphone)
+            .unwrap()
+            .enabled = false;
+        assert_eq!(
+            original_loopback_requests(&snapshot),
+            [OriginalLoopbackRequest {
+                media_name: SPEAKER_ORIGINAL_LOOPBACK,
+                source: format!("{REMOTE_IN_SINK}.monitor"),
+                sink: "alsa_output.headphones".to_owned(),
+            }]
         );
     }
 
@@ -1799,7 +2146,11 @@ mod tests {
             devices: Some(devices),
             ..RuntimeSnapshot::default()
         };
-        assert!(original_loopback_requests(&muted_speaker).is_empty());
+        assert_eq!(original_loopback_requests(&muted_speaker).len(), 1);
+        assert_eq!(
+            original_loopback_requests(&muted_speaker)[0].media_name,
+            SPEAKER_ORIGINAL_LOOPBACK
+        );
     }
 
     #[test]
@@ -1822,14 +2173,17 @@ mod tests {
     }
 
     #[test]
-    fn original_loopback_discovery_requires_both_owner_markers() {
+    fn original_loopback_discovery_rejects_incomplete_owned_marker() {
         let sink = raw_sink_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 1);
         let mut source = raw_source_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 0);
         source.properties.remove("translator.owner");
 
-        let discovered = discover_original_loopbacks(&[sink], &[source]).unwrap();
+        assert!(discover_original_loopbacks(&[sink], &[source]).is_err());
 
-        assert!(!discovered.contains_key("42"));
+        let mut sink = raw_sink_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 1);
+        sink.properties.remove("translator.owner");
+        let source = raw_source_stream(MICROPHONE_ORIGINAL_LOOPBACK, "42", 0);
+        assert!(discover_original_loopbacks(&[sink], &[source]).is_err());
     }
 
     #[derive(Clone)]
@@ -1848,10 +2202,16 @@ mod tests {
         modules: Vec<LoopbackModule>,
         calls: Vec<Vec<String>>,
         fail_unload: bool,
+        retain_after_unload_ack: bool,
+        hide_streams_after_unload_ack: bool,
+        unload_acknowledged: bool,
+        omit_loaded_module_after_ack: bool,
         missing_source_index: bool,
         missing_sink_index: bool,
         duplicate_sink_index: bool,
         malformed_module_id: bool,
+        missing_sink_owner: bool,
+        missing_source_owner: bool,
     }
 
     impl LoopbackRunner {
@@ -1888,6 +2248,19 @@ mod tests {
             let mut state = self.0.lock().unwrap();
             state.calls.push(args.to_vec());
             match args {
+                [list, short, kind] if list == "list" && short == "short" && kind == "modules" => {
+                    let inventory = state
+                        .modules
+                        .iter()
+                        .map(|module| {
+                            format!(
+                                "{}\tmodule-loopback\tsource={} sink={}\t\n",
+                                module.id, module.source, module.sink
+                            )
+                        })
+                        .collect::<String>();
+                    Ok(CommandResult::success(inventory.into_bytes()))
+                }
                 [format, list, kind] if format == "--format=json" && list == "list" => {
                     if kind == "sources" {
                         let mut sources = serde_json::json!([
@@ -1922,6 +2295,9 @@ mod tests {
                     let streams: Vec<_> = state
                         .modules
                         .iter()
+                        .filter(|_| {
+                            !(state.hide_streams_after_unload_ack && state.unload_acknowledged)
+                        })
                         .map(|module| {
                             let (endpoint, index) = if kind == "sink-inputs" {
                                 ("sink", match module.sink.as_str() {
@@ -1941,7 +2317,10 @@ mod tests {
                             let mut properties = serde_json::json!({
                                 "media.name": module.media_name,
                             });
-                            if module.owned {
+                            if module.owned
+                                && !(kind == "sink-inputs" && state.missing_sink_owner)
+                                && !(kind == "source-outputs" && state.missing_source_owner)
+                            {
                                 properties["translator.owner"] = "true".into();
                             }
                             let mut stream = serde_json::json!({
@@ -1960,8 +2339,11 @@ mod tests {
                     if state.fail_unload {
                         return Ok(CommandResult::failure(Vec::new(), Vec::new()));
                     }
-                    let id = id.parse::<u32>().unwrap();
-                    state.modules.retain(|module| module.id != id);
+                    if !state.retain_after_unload_ack {
+                        let id = id.parse::<u32>().unwrap();
+                        state.modules.retain(|module| module.id != id);
+                    }
+                    state.unload_acknowledged = true;
                     Ok(CommandResult::success(Vec::new()))
                 }
                 [command, kind, rest @ ..]
@@ -1995,13 +2377,15 @@ mod tests {
                         .max()
                         .unwrap_or(40)
                         + 1;
-                    state.modules.push(LoopbackModule {
-                        id,
-                        media_name,
-                        source,
-                        sink: sink.to_owned(),
-                        owned: true,
-                    });
+                    if !state.omit_loaded_module_after_ack {
+                        state.modules.push(LoopbackModule {
+                            id,
+                            media_name,
+                            source,
+                            sink: sink.to_owned(),
+                            owned: true,
+                        });
+                    }
                     Ok(CommandResult::success(id.to_string().into_bytes()))
                 }
                 _ => panic!("unexpected pactl call: {args:?}"),
@@ -2034,8 +2418,167 @@ mod tests {
         devices.acoustic.mode = mode;
         RuntimeSnapshot {
             translation_running: false,
+            audio_mix: AudioMixState {
+                microphone_original_percent: 100,
+                ..AudioMixState::default()
+            },
             devices: Some(devices),
             ..RuntimeSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn fresh_headphones_keep_speaker_loopback_across_running_and_stop() {
+        let runner = LoopbackRunner::new(Vec::new());
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+        let snapshot = RuntimeSnapshot {
+            audio_mix: AudioMixState::default(),
+            ..loopback_snapshot(OutputMode::Headphones)
+        };
+
+        loopbacks.ensure_without_new_mic(&snapshot).unwrap();
+        let running = RuntimeSnapshot {
+            translation_running: true,
+            ..snapshot.clone()
+        };
+        loopbacks.ensure_without_new_mic(&running).unwrap();
+        loopbacks.ensure_without_new_mic(&snapshot).unwrap();
+        loopbacks.verify_existing(&snapshot, false).unwrap();
+        assert!(loopbacks.verify_existing(&snapshot, true).is_err());
+        assert_eq!(runner.module_ids(), vec![41]);
+        let loads: Vec<_> = runner
+            .calls()
+            .into_iter()
+            .filter(|args| args.first().map(String::as_str) == Some("load-module"))
+            .collect();
+        assert_eq!(loads.len(), 1);
+        assert!(
+            !runner
+                .calls()
+                .iter()
+                .any(|args| { args.first().map(String::as_str) == Some("unload-module") })
+        );
+        assert!(
+            loads[0]
+                .iter()
+                .any(|arg| arg.contains(SPEAKER_ORIGINAL_LOOPBACK))
+        );
+        assert!(
+            !loads[0]
+                .iter()
+                .any(|arg| arg.contains(MICROPHONE_ORIGINAL_LOOPBACK))
+        );
+    }
+
+    #[test]
+    fn vanished_speaker_loopback_is_not_reloaded_until_runtime_is_stopped() {
+        let runner = LoopbackRunner::new(Vec::new());
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+        let stopped = RuntimeSnapshot {
+            audio_mix: AudioMixState::default(),
+            ..loopback_snapshot(OutputMode::Headphones)
+        };
+        loopbacks.ensure_without_new_mic(&stopped).unwrap();
+        runner.0.lock().unwrap().modules.clear();
+        let running = RuntimeSnapshot {
+            translation_running: true,
+            ..stopped.clone()
+        };
+        let loads_before = runner
+            .calls()
+            .iter()
+            .filter(|args| args.first().map(String::as_str) == Some("load-module"))
+            .count();
+
+        assert!(loopbacks.ensure_without_new_mic(&running).is_err());
+        assert_eq!(
+            runner
+                .calls()
+                .iter()
+                .filter(|args| args.first().map(String::as_str) == Some("load-module"))
+                .count(),
+            loads_before
+        );
+        loopbacks.ensure_without_new_mic(&stopped).unwrap();
+        loopbacks.verify_existing(&stopped, false).unwrap();
+        assert!(loopbacks.verify_existing(&stopped, true).is_err());
+        assert_eq!(runner.module_ids().len(), 1);
+        let loads: Vec<_> = runner
+            .calls()
+            .into_iter()
+            .filter(|args| args.first().map(String::as_str) == Some("load-module"))
+            .collect();
+        assert_eq!(loads.len(), loads_before + 1);
+        assert!(loads.iter().all(|args| {
+            args.iter()
+                .any(|arg| arg.contains(SPEAKER_ORIGINAL_LOOPBACK))
+                && !args
+                    .iter()
+                    .any(|arg| arg.contains(MICROPHONE_ORIGINAL_LOOPBACK))
+        }));
+    }
+
+    #[test]
+    fn bypass_repair_with_missing_requested_mic_uses_only_a_local_muted_snapshot() {
+        let runner = LoopbackRunner::new(vec![speaker_module(43)]);
+        let gate = translator_daemon::AudioOperationGate::new();
+        let _lease = gate.acquire_production().unwrap();
+        let routes = super::PulseManualRoutes {
+            resources: LifecycleProtected::new(super::PulseResources {
+                routing: translator_audio::PulseRoutingWatcher::new(
+                    runner.clone(),
+                    translator_audio::RoutingProfile::Production,
+                ),
+                devices: translator_audio::PulseDeviceWatcher::new(
+                    runner.clone(),
+                    AecCapability::Unavailable,
+                ),
+                original_loopbacks: PulseOriginalLoopbacks::new(runner.clone()),
+                graph: None,
+            }),
+            operation_gate: gate,
+        };
+        let snapshot = loopback_snapshot(OutputMode::Headphones);
+        assert_eq!(snapshot.audio_mix.microphone_original_percent, 100);
+
+        translator_daemon::RuntimeMaintenance::prepare_bypass(&routes, &snapshot).unwrap();
+        let unchanged = snapshot.audio_mix.microphone_original_percent;
+        assert_eq!(unchanged, 100);
+        assert_eq!(runner.module_ids(), vec![43]);
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|args| { args.first().map(String::as_str) != Some("load-module") })
+        );
+        let owned = PulseOriginalLoopbacks::new(runner);
+        owned.verify_existing(&snapshot, false).unwrap();
+        assert!(owned.verify_existing(&snapshot, true).is_err());
+    }
+
+    #[test]
+    fn incomplete_owned_loopback_blocks_reconcile_without_mutating_modules() {
+        for missing_source_owner in [false, true] {
+            let runner = LoopbackRunner::new(vec![microphone_module(41, true)]);
+            {
+                let mut state = runner.0.lock().unwrap();
+                state.missing_source_owner = missing_source_owner;
+                state.missing_sink_owner = !missing_source_owner;
+            }
+            let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+
+            assert!(
+                loopbacks
+                    .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                    .is_err()
+            );
+            assert_eq!(runner.module_ids(), vec![41]);
+            assert!(runner.calls().iter().all(|args| {
+                !matches!(
+                    args.first().map(String::as_str),
+                    Some("load-module" | "unload-module")
+                )
+            }));
         }
     }
 
@@ -2111,6 +2654,71 @@ mod tests {
     }
 
     #[test]
+    fn acknowledged_unload_with_owned_module_still_visible_blocks_replacement() {
+        let runner = LoopbackRunner::new(vec![microphone_module(41, true)]);
+        runner.0.lock().unwrap().retain_after_unload_ack = true;
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+
+        assert!(
+            loopbacks
+                .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                .is_err()
+        );
+        assert_eq!(runner.module_ids(), vec![41]);
+        let calls = runner.calls();
+        assert!(calls.iter().any(|args| args == &["unload-module", "41"]));
+        assert!(
+            calls
+                .iter()
+                .all(|args| args.first().map(String::as_str) != Some("load-module"))
+        );
+    }
+
+    #[test]
+    fn acknowledged_unload_with_hidden_streams_but_module_still_loaded_blocks_replacement() {
+        let runner = LoopbackRunner::new(vec![microphone_module(41, true)]);
+        {
+            let mut state = runner.0.lock().unwrap();
+            state.retain_after_unload_ack = true;
+            state.hide_streams_after_unload_ack = true;
+        }
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+
+        assert!(
+            loopbacks
+                .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                .is_err()
+        );
+        assert_eq!(runner.module_ids(), vec![41]);
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|args| { args.first().map(String::as_str) != Some("load-module") })
+        );
+    }
+
+    #[test]
+    fn acknowledged_load_without_owned_pair_does_not_certify_route() {
+        let runner = LoopbackRunner::new(Vec::new());
+        runner.0.lock().unwrap().omit_loaded_module_after_ack = true;
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+
+        assert!(
+            loopbacks
+                .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                .is_err()
+        );
+        assert!(runner.module_ids().is_empty());
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .any(|args| { args.first().map(String::as_str) == Some("load-module") })
+        );
+    }
+
+    #[test]
     fn headphones_restore_mic_loopback_once_and_missing_devices_clean_owned_only() {
         let runner = LoopbackRunner::new(vec![microphone_module(42, false)]);
         let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
@@ -2161,6 +2769,53 @@ mod tests {
     }
 
     #[test]
+    fn production_reconcile_never_creates_a_new_raw_microphone_loopback() {
+        let runner = LoopbackRunner::new(vec![speaker_module(43)]);
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+
+        assert!(
+            loopbacks
+                .ensure_without_new_mic(&loopback_snapshot(OutputMode::Headphones))
+                .is_err()
+        );
+        assert_eq!(runner.module_ids(), vec![43]);
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|args| { args.first().map(String::as_str) != Some("load-module") })
+        );
+    }
+
+    #[test]
+    fn bypass_custody_is_read_only_and_requires_exact_owned_pair() {
+        let runner = LoopbackRunner::new(vec![speaker_module(43), microphone_module(41, true)]);
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+        let headphones = loopback_snapshot(OutputMode::Headphones);
+        let speaker = loopback_snapshot(OutputMode::OpenSpeaker);
+
+        loopbacks.verify_existing(&headphones, true).unwrap();
+        assert!(loopbacks.verify_existing(&speaker, false).is_err());
+        assert!(runner.calls().iter().all(|args| {
+            !matches!(
+                args.first().map(String::as_str),
+                Some("load-module" | "unload-module")
+            )
+        }));
+
+        let speaker_only = LoopbackRunner::new(vec![speaker_module(43)]);
+        let loopbacks = PulseOriginalLoopbacks::new(speaker_only.clone());
+        loopbacks.verify_existing(&speaker, false).unwrap();
+        assert!(loopbacks.verify_existing(&headphones, true).is_err());
+        assert!(speaker_only.calls().iter().all(|args| {
+            !matches!(
+                args.first().map(String::as_str),
+                Some("load-module" | "unload-module")
+            )
+        }));
+    }
+
+    #[test]
     fn wrong_source_or_sink_is_replaced_after_owned_unload() {
         for wrong_source in [false, true] {
             let mut module = microphone_module(41, true);
@@ -2169,7 +2824,11 @@ mod tests {
             } else {
                 module.sink = "alsa_output.other".to_owned();
             }
-            let runner = LoopbackRunner::new(vec![module, microphone_module(42, false)]);
+            let runner = LoopbackRunner::new(vec![
+                speaker_module(43),
+                module,
+                microphone_module(42, false),
+            ]);
             let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
             let snapshot = RuntimeSnapshot {
                 translation_running: true,
@@ -2270,6 +2929,15 @@ mod tests {
         let loopbacks = PulseOriginalLoopbacks::new(SystemCommandRunner);
 
         loopbacks.cleanup_all().unwrap();
+        let stopped = RuntimeSnapshot {
+            translation_running: false,
+            audio_mix: AudioMixState {
+                microphone_original_percent: 0,
+                ..AudioMixState::default()
+            },
+            ..snapshot.clone()
+        };
+        loopbacks.ensure(&stopped).unwrap();
         loopbacks.ensure(&snapshot).unwrap();
         loopbacks.ensure(&snapshot).unwrap();
         let sink_inputs: Vec<RawPulseStream> = loopbacks
@@ -2279,12 +2947,18 @@ mod tests {
             .run_json(&["--format=json", "list", "source-outputs"])
             .unwrap();
         let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs).unwrap();
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(
-            discovered.values().next().unwrap().media_name,
-            MICROPHONE_ORIGINAL_LOOPBACK
+        assert_eq!(discovered.len(), 2);
+        assert!(
+            discovered
+                .values()
+                .any(|entry| entry.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
         );
-        assert_eq!(loopbacks.cleanup_all().unwrap().len(), 1);
+        assert!(
+            discovered
+                .values()
+                .any(|entry| entry.media_name == SPEAKER_ORIGINAL_LOOPBACK)
+        );
+        assert_eq!(loopbacks.cleanup_all().unwrap().len(), 2);
         let sink_inputs: Vec<RawPulseStream> = loopbacks
             .run_json(&["--format=json", "list", "sink-inputs"])
             .unwrap();
@@ -2546,6 +3220,36 @@ mod tests {
         fn refresh(
             &self,
             _: &translator_daemon::RuntimeStore,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            Ok(())
+        }
+
+        fn refresh_bypass_facts(
+            &self,
+            store: &translator_daemon::RuntimeStore,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            let facts = translator_daemon::RuntimeFactsSource::inspect(
+                &TestFacts,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            store.set_devices(facts.devices.into());
+            store.set_audio_graph(facts.audio_graph);
+            store.set_routes(facts.routes);
+            Ok(())
+        }
+
+        fn verify_bypass_custody(
+            &self,
+            _: &translator_daemon::RuntimeSnapshot,
+            _: bool,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            Ok(())
+        }
+
+        fn prepare_start(
+            &self,
+            _: &translator_daemon::RuntimeSnapshot,
         ) -> Result<(), translator_daemon::ControlFailure> {
             Ok(())
         }

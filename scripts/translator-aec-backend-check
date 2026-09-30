@@ -1,0 +1,2276 @@
+#!/usr/bin/python3
+"""Run AEC checks inside a private, device-free namespace."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import re
+import resource
+import secrets
+import select
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+MAX_PROBE_BYTES = 1024 * 1024
+MANAGER_PRE_REQUEST_TIMEOUT_SECONDS = 4.0
+AEC_PLUGIN = Path("/usr/lib/x86_64-linux-gnu/spa-0.2/aec/libspa-aec-webrtc.so")
+SPEECH_SOURCES = {
+    "far": ("ru_ru-0.wav", "0ebc61463e1e2db72f81f5261b865b5cead812851cbb07a799d5e98cf9df8654"),
+    "near": ("en_us-0.wav", "048169439c0328b758349af74aeb54a82a7a476e309709eb791dced06db25d48"),
+}
+SERVER_OVERRIDES = (
+    "PIPEWIRE_REMOTE",
+    "PIPEWIRE_RUNTIME_DIR",
+    "PULSE_SERVER",
+    "PULSE_RUNTIME_PATH",
+)
+
+PREFLIGHT = r"""
+import json, os, resource, socket
+
+def effective_capabilities():
+    with open("/proc/self/status", encoding="ascii") as status:
+        return int(next(line.split()[1] for line in status
+                        if line.startswith("CapEff:")), 16)
+
+def has_default_route():
+    try:
+        with open('/proc/net/route', encoding='ascii') as routes:
+            return any(line.split()[1] == '00000000' for line in list(routes)[1:])
+    except (OSError, IndexError):
+        return True
+
+interfaces = [name for _, name in socket.if_nameindex() if name != 'lo']
+host_audio = os.path.exists('/dev/snd')
+host_runtime = os.path.exists('/run/user')
+network = bool(interfaces) or has_default_route()
+net_changed = os.readlink('/proc/self/ns/net') != os.environ['PARENT_NET_NS']
+mount_changed = os.readlink('/proc/self/ns/mnt') != os.environ['PARENT_MNT_NS']
+print(json.dumps({
+    'isolated': net_changed and mount_changed and not (host_audio or host_runtime or network),
+    'host_audio_access': host_audio,
+    'host_runtime_access': host_runtime,
+    'network_access': network,
+    'non_loopback_interfaces': interfaces,
+    'default_route': has_default_route(),
+    'net_namespace_changed': net_changed,
+    'mount_namespace_changed': mount_changed,
+    'cap_net_admin': bool(effective_capabilities() & (1 << 12)),
+    'effective_capabilities': effective_capabilities(),
+    'cpu_affinity_count': len(os.sched_getaffinity(0)),
+    'address_space_limit_bytes': resource.getrlimit(resource.RLIMIT_AS)[0],
+}))
+"""
+
+PRIVATE_CONFIG = r"""
+context.properties = {
+    core.daemon = true
+    core.name = pipewire-0
+    default.clock.rate = 48000
+    default.clock.quantum = 480
+    default.clock.min-quantum = 480
+    default.clock.max-quantum = 480
+    clock.power-of-two-quantum = false
+    settings.check-quantum = true
+    settings.check-rate = true
+}
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.* = support/libspa-support
+}
+context.modules = [
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-profiler }
+    { name = libpipewire-module-metadata }
+    { name = libpipewire-module-spa-node-factory }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-access args = { access.force = unrestricted } }
+    { name = libpipewire-module-adapter }
+    { name = libpipewire-module-link-factory }
+]
+context.objects = [
+    { factory = spa-node-factory
+      args = {
+        factory.name = support.node.driver
+        node.name = translator-aec-driver
+        node.always-process = true
+        node.group = pipewire.dummy
+        priority.driver = 20000
+      }
+    }
+    { factory = adapter
+      args = {
+        factory.name = support.null-audio-sink
+        node.name = translator-aec-sink
+        node.description = Translator-AEC-Private-Sink
+        node.virtual = true
+        node.always-process = true
+        media.class = Audio/Sink
+        audio.rate = 48000
+        audio.channels = 1
+        audio.position = [ MONO ]
+        adapter.auto-port-config = {
+            mode = dsp
+            monitor = false
+            position = preserve
+        }
+      }
+    }
+]
+"""
+
+CLIENT_CONFIG = r"""
+context.properties = { log.level = 0 }
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.* = support/libspa-support
+}
+context.modules = [
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-adapter }
+]
+"""
+
+SESSION = r'''
+import fcntl
+import hashlib
+import json
+import math
+import os
+import resource
+import re
+import statistics
+import tempfile
+from array import array
+import select
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+STOP = b"\x04\x00\x00\x00\x04\x01\x00\x00"
+START = b"\x04\x00\x00\x00\x05\x01\x00\x00"
+INJECT_AEC_ERROR = b"\x04\x00\x00\x00\x08\x01\x00\x00"
+END_AT = time.monotonic() + 164
+stopping = False
+
+def on_stop(_signum, _frame):
+    global stopping
+    stopping = True
+
+signal.signal(signal.SIGTERM, on_stop)
+signal.signal(signal.SIGINT, on_stop)
+
+def ensure(condition, reason):
+    if not condition:
+        raise RuntimeError(reason)
+
+def verify_isolation():
+    ensure(os.readlink("/proc/self/ns/net") != os.environ["PARENT_NET_NS"],
+           "network namespace is not private")
+    ensure(os.readlink("/proc/self/ns/mnt") != os.environ["PARENT_MNT_NS"],
+           "mount namespace is not private")
+    ensure(not os.path.exists("/dev/snd") and not os.path.exists("/run/user"),
+           "host audio or runtime is visible")
+    ensure(not [name for _, name in socket.if_nameindex() if name != "lo"],
+           "non-loopback network interface is visible")
+    with open("/proc/net/route", encoding="ascii") as routes:
+        ensure(not any(line.split()[1] == "00000000" for line in list(routes)[1:]),
+               "default network route is visible")
+    with open("/proc/self/status", encoding="ascii") as status:
+        capabilities = int(next(line.split()[1] for line in status
+                                if line.startswith("CapEff:")), 16)
+    ensure(capabilities == 0, "sandbox has effective capabilities")
+    ensure(len(os.sched_getaffinity(0)) <= 2 and
+           resource.getrlimit(resource.RLIMIT_AS)[0] <= 1 << 30,
+           "sandbox resource limits absent")
+
+def prepare_speech():
+    manifest = json.loads(Path("/stage/speech.json").read_text(encoding="ascii"))
+    ensure(manifest.get("dataset") == "Google FLEURS" and
+           manifest.get("license") == "CC-BY-4.0", "speech manifest invalid")
+    version = subprocess.run(
+        ["/usr/bin/ffmpeg", "-version"], capture_output=True, text=True,
+        timeout=2, check=False, env={"PATH": "/usr/bin:/bin",
+                                    "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu/openblas-pthread"},
+    )
+    ensure(version.returncode == 0 and version.stdout.splitlines()[0].startswith(
+        "ffmpeg version " + manifest["ffmpeg_version"] + " "
+    ), "frozen speech ffmpeg version mismatch: " + (version.stdout.splitlines() or ["empty"])[0] + " stderr=" + (version.stderr.splitlines() or ["empty"])[0][:160])
+    descriptors = []
+    prepared = {}
+    try:
+        for role in ("far", "near"):
+            source = Path("/stage") / f"{role}.wav"
+            payload = source.read_bytes()
+            expected = manifest["sources"][role]["sha256"]
+            ensure(hashlib.sha256(payload).hexdigest() == expected,
+                   "frozen public speech source hash mismatch")
+            command = [
+                "/usr/bin/ffmpeg", "-hide_banner", "-nostdin", "-v", "error",
+                "-threads", "1", "-f", "wav", "-i", "pipe:0",
+                "-af", manifest["resampler"], "-ar", "48000", "-ac", "1",
+                "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1",
+            ]
+            converted = subprocess.run(
+                command, input=payload, capture_output=True, timeout=10,
+                check=False, env={"PATH": "/usr/bin:/bin",
+                                    "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu/openblas-pthread"},
+            )
+            ensure(converted.returncode == 0 and 0 < len(converted.stdout) <= 3 << 20
+                   and len(converted.stdout) % 1920 == 0,
+                   "frozen public speech resampling failed")
+            clip = converted.stdout
+            ensure(all(math.isfinite(sample) and abs(sample) <= 1
+                       for (sample,) in struct.iter_unpack("<f", clip)),
+                   "public speech clip contains invalid PCM")
+            descriptor = os.memfd_create(
+                "translator-aec-public-speech-" + role,
+                os.MFD_ALLOW_SEALING | os.MFD_CLOEXEC,
+            )
+            descriptors.append(descriptor)
+            target_bytes = 60 * 48000 * 4
+            digest = hashlib.sha256()
+            written = 0
+            while written < target_bytes:
+                block = clip[:min(len(clip), target_bytes - written)]
+                offset = 0
+                while offset < len(block):
+                    count = os.write(descriptor, block[offset:])
+                    ensure(count > 0, "public speech memfd write stalled")
+                    offset += count
+                digest.update(block)
+                written += len(block)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            seals = (
+                fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW |
+                fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+            )
+            fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+            ensure(fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & seals == seals,
+                   "public speech memfd sealing failed")
+            prepared[role] = {
+                "id": manifest["sources"][role]["id"],
+                "source_sha256": expected,
+                "prepared_sha256": digest.hexdigest(),
+                "prepared_samples": target_bytes // 4,
+            }
+        return descriptors[0], descriptors[1], {
+            "dataset": manifest["dataset"], "license": manifest["license"],
+            "attribution": manifest["attribution"],
+            "ffmpeg_version": manifest["ffmpeg_version"],
+            "resampler": manifest["resampler"], "sources": prepared,
+        }
+    except BaseException:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
+
+def choose_fixed_lag(raw, clean):
+    ensure(len(raw) == len(clean) == 24000, "AEC lag calibration window incomplete")
+    points = range(0, 24000 - 480, 16)
+    raw_power = sum(raw[index] * raw[index] for index in points)
+    ensure(raw_power > 1e-12, "AEC lag calibration has no input speech")
+    best = (-1.0, -1)
+    for lag in range(481):
+        cross = sum(raw[index] * clean[index + lag] for index in points)
+        clean_power = sum(clean[index + lag] ** 2 for index in points)
+        correlation = cross / math.sqrt(max(raw_power * clean_power, 1e-40))
+        if correlation > best[0]:
+            best = (correlation, lag)
+    return best[1], best[0]
+
+DIAGNOSTIC_LIMIT = 64 * 1024
+BUFFER_PRECONDITION = re.compile(
+    r"AEC_BUFFER_PRECONDITION site=([0-9]{1,16}) reasons=([0-9]{1,3}),([0-9]{1,3}),([0-9]{1,3}) "
+    r"state=([0-9]{1,3}) started=([01]) callback=([0-9]{1,16}) position=([0-9]{1,16})"
+)
+GAP_DIAGNOSTIC = re.compile(
+    r"AEC_GAP kind=([0-9]{1,3}) expected_pos=([0-9]{1,20}) observed_pos=([0-9]{1,20}) "
+    r"expected_clock=([0-9]{1,10}) observed_clock=([0-9]{1,10}) "
+    r"expected_xrun=([0-9]{1,20}) observed_xrun=([0-9]{1,20}) "
+    r"expected_seq=([0-9]{1,20}),([0-9]{1,20}) "
+    r"observed_seq=([0-9]{1,20}),([0-9]{1,20})"
+)
+BUFFER_META = re.compile(
+    r"AEC_BUFFER_META raw=([0-9]{1,16}),([0-9]{1,16}),([0-9]{1,16}),([01]),([0-9]{1,16}),([0-9]{1,16}) "
+    r"ref=([0-9]{1,16}),([0-9]{1,16}),([0-9]{1,16}),([01]),([0-9]{1,16}),([0-9]{1,16})"
+)
+
+def open_diagnostic(runtime, label, files):
+    diagnostic = tempfile.TemporaryFile(dir=runtime)
+    ensure(os.fstat(diagnostic.fileno()).st_nlink == 0,
+           "private diagnostic file is not anonymous")
+    files[label] = diagnostic
+    return diagnostic
+
+def limit_child_diagnostic():
+    resource.setrlimit(resource.RLIMIT_FSIZE,
+                       (DIAGNOSTIC_LIMIT, DIAGNOSTIC_LIMIT))
+
+def diagnostic_bytes(diagnostic):
+    if diagnostic is None:
+        return None
+    size = os.fstat(diagnostic.fileno()).st_size
+    if size >= DIAGNOSTIC_LIMIT:
+        return None
+    return os.pread(diagnostic.fileno(), size, 0)
+
+def read_native_diagnostics(diagnostic, label, session):
+    result = {"status": "UNOBSERVED", "session": session, "source": label}
+    payload = diagnostic_bytes(diagnostic)
+    if payload is None or not payload.endswith(b"\n"):
+        return result
+    lines = payload.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(b"AEC_GAP "):
+            try:
+                matched = GAP_DIAGNOSTIC.fullmatch(line.decode("ascii"))
+            except UnicodeDecodeError:
+                return result
+            if matched is None:
+                return result
+            values = [int(value) for value in matched.groups()]
+            return {
+                "status": "OBSERVED", "session": session, "source": label,
+                "gap_kind": values[0], "expected_position": values[1],
+                "observed_position": values[2],
+                "expected_clock": values[3], "observed_clock": values[4],
+                "expected_xrun": values[5], "observed_xrun": values[6],
+                "expected_sequences": values[7:9],
+                "observed_sequences": values[9:11],
+            }
+        if not line.startswith(b"AEC_BUFFER_PRECONDITION "):
+            continue
+        if index + 1 >= len(lines):
+            return result
+        try:
+            first = BUFFER_PRECONDITION.fullmatch(line.decode("ascii"))
+            second = BUFFER_META.fullmatch(lines[index + 1].decode("ascii"))
+        except UnicodeDecodeError:
+            return result
+        if first is None or second is None:
+            return result
+        values = [int(value) for value in first.groups()]
+        meta = [int(value) for value in second.groups()]
+        return {
+            "status": "OBSERVED", "session": session, "source": label,
+            "site": values[0], "buffer_reason": values[1:4],
+            "state": values[4], "started": values[5],
+            "callback": values[6], "position": values[7],
+            "raw_chunk": meta[0:3], "raw_header": meta[3:6],
+            "reference_chunk": meta[6:9], "reference_header": meta[9:12],
+        }
+    return result
+
+def read_fixture_diagnostics(diagnostic, session):
+    result = {"status": "UNOBSERVED", "session": session, "source": "fixture"}
+    payload = diagnostic_bytes(diagnostic)
+    if payload is None or not payload.endswith(b"\n"):
+        return result
+    expected = {
+        "callbacks", "state", "duration", "clock", "first", "last", "xrun",
+        "activated", "valid", "failed", "reason", "expected_pos",
+        "observed_pos", "expected_clock", "observed_clock", "raw_ready",
+        "ref_ready", "raw_buffer_reason", "ref_buffer_reason",
+    }
+    for line in payload.splitlines():
+        if not line.startswith(b"AEC_FIXTURE "):
+            continue
+        try:
+            fields = [field.split("=", 1) for field in line.decode("ascii").split()[1:]]
+            values = {key: int(value) for key, value in fields}
+        except (UnicodeDecodeError, ValueError):
+            return result
+        if (
+            len(fields) != len(expected) or set(values) != expected
+            or any(value < 0 or value > (1 << 64) - 1 for value in values.values())
+        ):
+            return result
+        return {**result, "status": "OBSERVED", **values}
+    return result
+
+
+def diagnose_window_lag(raw, clean):
+    ensure(len(raw) == len(clean) == 48000,
+           "AEC diagnostic window incomplete")
+    positions = range(1440, 48000 - 1440, 128)
+    raw_power = sum(raw[index] * raw[index] for index in positions)
+    ensure(raw_power > 1e-12, "AEC diagnostic window is silent")
+    best_correlation = -1.0
+    best_lag = 0
+    for lag in range(-1440, 1441):
+        cross = clean_power = 0.0
+        for index in positions:
+            value = clean[index + lag]
+            cross += raw[index] * value
+            clean_power += value * value
+        correlation = cross / math.sqrt(max(raw_power * clean_power, 1e-40))
+        if correlation > best_correlation:
+            best_correlation = correlation
+            best_lag = lag
+    return {"lag_samples": best_lag, "correlation": best_correlation}
+
+def sha256_file(path):
+    with open(path, "rb") as readable:
+        return hashlib.file_digest(readable, "sha256").hexdigest()
+
+def verify_identity():
+    identity = json.loads(Path("/stage/identity.json").read_text(encoding="ascii"))
+    paths = {
+        "backend": Path("/stage/backend"),
+        "fixture": Path("/stage/fixture"),
+        "witness": Path("/stage/witness"),
+        "aec_plugin": Path("/usr/lib/x86_64-linux-gnu/spa-0.2/aec/libspa-aec-webrtc.so"),
+    }
+    ensure(set(identity) == set(paths), "AEC identity manifest keys invalid")
+    for name, path in paths.items():
+        ensure(sha256_file(path) == identity[name],
+               "AEC staged binary or plugin identity mismatch: " + name)
+    return identity
+
+def wait_socket(path, server):
+    while time.monotonic() < min(END_AT, start_at + 4):
+        ensure(server.poll() is None, "private PipeWire server exited")
+        if path.is_socket():
+            return
+        time.sleep(0.05)
+    raise RuntimeError("private PipeWire socket did not appear")
+
+def connected_pipewire(path):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(2)
+    sock.connect(str(path))
+    sock.settimeout(None)
+    return sock
+
+def exact_ports(env, fixture, backend, witness, fixture_process, backend_process, witness_process, mode, deadline):
+    names = (
+        ("/usr/bin/pw-link", "-o", f"{fixture}:raw"),
+        ("/usr/bin/pw-link", "-o", f"{fixture}:reference"),
+        ("/usr/bin/pw-link", "-o", f"{backend}:clean"),
+        ("/usr/bin/pw-link", "-i", f"{backend}:raw"),
+        ("/usr/bin/pw-link", "-i", f"{backend}:reference"),
+        ("/usr/bin/pw-link", "-i", f"{witness}:clean"),
+    )
+    end = min(END_AT, deadline)
+    missing = []
+    sink_ports = []
+    while time.monotonic() < end:
+        if any(process.poll() is not None for process in
+               (fixture_process, backend_process, witness_process)):
+            detail = ""
+            crashed = next(process for process in
+                           (fixture_process, backend_process, witness_process)
+                           if process.poll() is not None)
+            if mode == "debug" and crashed.stdout is not None:
+                output = crashed.stdout.read(4096).decode(errors="replace")
+                stack = [line.strip() for line in output.splitlines()
+                         if line.startswith("#") or "Program received signal" in line]
+                detail = " | ".join(stack[:12])
+            if not detail and crashed.stderr is not None:
+                detail = crashed.stderr.read(4096).decode(errors="replace")
+                detail = detail.replace("/stage", "[stage]").replace("/run/translator-aec", "[private-runtime]")
+                detail = " | ".join(detail.splitlines()[-4:])
+            raise RuntimeError(
+                f"graph client exited: fixture={fixture_process.poll()} "
+                f"backend={backend_process.poll()} witness={witness_process.poll()} detail={detail}"
+            )
+        missing = []
+        found = True
+        for tool, option, name in names:
+            result = subprocess.run(
+                [tool, option], env=env, capture_output=True, text=True,
+                timeout=max(0.01, end - time.monotonic()), check=False,
+            )
+            if result.returncode != 0 or name not in result.stdout.splitlines():
+                found = False
+                missing.append(name)
+        sink = subprocess.run(
+            ["/usr/bin/pw-link", "-i"], env=env, capture_output=True,
+            text=True, timeout=max(0.01, end - time.monotonic()), check=False,
+        )
+        sink_ports = [line for line in sink.stdout.splitlines()
+                      if line.startswith(f"{witness}:")]
+        if found and sink.returncode == 0 and len(sink_ports) == 1:
+            return sink_ports[0]
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"private graph ports unavailable: missing={missing} sink_ports={len(sink_ports)}"
+    )
+
+def snapshot(env, deadline):
+    result = subprocess.run(
+        ["/usr/bin/pw-dump", "-N"], env=env, capture_output=True,
+        text=True, timeout=max(0.01, deadline - time.monotonic()), check=False,
+    )
+    ensure(result.returncode == 0, "private registry snapshot failed")
+    objects = json.loads(result.stdout)
+    ensure(isinstance(objects, list), "private registry snapshot malformed")
+    return objects
+
+def registry_counts(objects):
+    facts = []
+    keys = ("node.name", "node.virtual", "node.id", "port.name",
+            "link.output.node", "link.output.port", "link.input.node", "link.input.port")
+    for obj in objects:
+        kind = str(obj.get("type", "")).split(":")[-1]
+        if kind not in ("Node", "Port", "Link"):
+            continue
+        props = obj.get("info", {}).get("props", {})
+        facts.append({"id": obj.get("id"), "kind": kind,
+                      "props": {key: props[key] for key in keys if key in props}})
+    return facts[:20]
+
+def attest_links(objects, body, session, helper_name, fixture_name, witness_name, node_id):
+    ensure(len(body) == 72 and body[0] == 6, "AEC LINKS packet malformed")
+    ensure(struct.unpack_from("<Q", body, 12)[0] == int(session, 16),
+           "AEC LINKS generation mismatch")
+    ensure(struct.unpack_from("<I", body, 20)[0] == node_id,
+           "AEC LINKS helper node mismatch")
+    typed = {kind: [obj for obj in objects
+                    if str(obj.get("type", "")).split(":")[-1] == kind]
+             for kind in ("Node", "Port", "Link")}
+    named_nodes = {
+        obj.get("info", {}).get("props", {}).get("node.name"): obj
+        for obj in typed["Node"]
+    }
+    expected_names = (helper_name, fixture_name, witness_name)
+    ensure(all(name in named_nodes for name in expected_names),
+           "AEC registry node identity missing")
+    helper, fixture, sink = (named_nodes[name] for name in expected_names)
+    ensure(helper["id"] == node_id and all(
+        node.get("info", {}).get("props", {}).get("node.virtual") in (True, "true")
+        for node in (helper, fixture, sink)
+    ), "AEC registry virtual node identity invalid")
+    ports = {}
+    for obj in typed["Port"]:
+        props = obj.get("info", {}).get("props", {})
+        key = (int(props.get("node.id", -1)), props.get("port.name"))
+        ensure(key not in ports, "AEC registry duplicate port")
+        ports[key] = obj["id"]
+    expected = (
+        (ports.get((helper["id"], "raw")), fixture["id"],
+         ports.get((fixture["id"], "raw")), "input"),
+        (ports.get((helper["id"], "reference")), fixture["id"],
+         ports.get((fixture["id"], "reference")), "input"),
+        (ports.get((helper["id"], "clean")), sink["id"],
+         next((obj["id"] for obj in typed["Port"]
+               if int(obj.get("info", {}).get("props", {}).get("node.id", -1)) == sink["id"]),
+              None), "output"),
+    )
+    links = {obj["id"]: obj.get("info", {}).get("props", {}) for obj in typed["Link"]}
+    ensure(all(local is not None and peer_port is not None
+               for local, _, peer_port, _ in expected),
+           "AEC registry expected port missing")
+    for index, (local, peer_node, peer_port, direction) in enumerate(expected):
+        claimed = struct.unpack_from("<IIII", body, 24 + index * 16)
+        ensure(claimed[0] == local and claimed[2] == peer_node
+               and claimed[3] == peer_port and claimed[1] in links,
+               "AEC LINKS claim differs from independent registry")
+        actual = links[claimed[1]]
+        output_node, output_port, input_node, input_port = (
+            int(actual.get(key, -1)) for key in (
+                "link.output.node", "link.output.port",
+                "link.input.node", "link.input.port"
+            )
+        )
+        if direction == "input":
+            wanted = (peer_node, peer_port, node_id, local)
+            touch = (input_node, input_port)
+        else:
+            wanted = (node_id, local, peer_node, peer_port)
+            touch = (output_node, output_port)
+        ensure((output_node, output_port, input_node, input_port) == wanted,
+               "AEC LINKS endpoint mismatch")
+        attached = [
+            link for link in links.values()
+            if (int(link.get("link.input.node", -1)), int(link.get("link.input.port", -1)))
+            == (node_id, local)
+            or (int(link.get("link.output.node", -1)), int(link.get("link.output.port", -1)))
+            == (node_id, local)
+        ]
+        ensure(len(attached) == 1 and touch == (node_id, local),
+               "AEC registry contains an extra helper link")
+
+def link(env, output, input_, deadline):
+    result = subprocess.run(
+        ["/usr/bin/pw-link", output, input_], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=max(0.01, deadline - time.monotonic()), check=False,
+    )
+    ensure(result.returncode == 0, "explicit private graph link failed")
+
+def receive_exact(sock, count, deadline):
+    data = bytearray()
+    while len(data) < count:
+        if stopping or time.monotonic() >= deadline:
+            raise RuntimeError("AEC session stopped or timed out")
+        ready, _, _ = select.select([sock], [], [], 0.2)
+        if not ready:
+            continue
+        piece = sock.recv(count - len(data))
+        ensure(piece, "AEC helper disconnected")
+        data.extend(piece)
+    return bytes(data)
+
+def packet(sock, deadline):
+    deadline = min(deadline, time.monotonic() + 4)
+    prefix = receive_exact(sock, 4, deadline)
+    size = struct.unpack("<I", prefix)[0]
+    ensure(4 <= size <= 72 + 480 * 12, "AEC IPC packet length invalid")
+    body = receive_exact(sock, size, deadline)
+    ensure(body[1] == 1 and body[2:4] == b"\x00\x00", "AEC IPC version invalid")
+    return prefix + body, body
+
+def forward(payload):
+    remaining = memoryview(payload)
+    end = time.monotonic() + 0.5
+    while remaining:
+        writable = select.select([], [1], [], max(0, end - time.monotonic()))[1]
+        ensure(writable, "AEC consumer stopped reading IPC")
+        count = os.write(1, remaining)
+        ensure(count > 0, "AEC IPC stdout closed")
+        remaining = remaining[count:]
+
+def shutdown_all(backend, fixture, witness, server):
+    deadline = time.monotonic() + 8
+    if backend is not None and backend.poll() is None:
+        try:
+            backend.wait(timeout=min(2, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+    processes = [process for process in (backend, fixture, witness, server) if process is not None]
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                return False
+    return time.monotonic() <= deadline and all(process.poll() is not None for process in processes)
+
+def main():
+    global start_at
+    mode = sys.argv[1]
+    ensure(mode in ("check", "trial", "stream", "debug"), "invalid private AEC mode")
+    fixture_mode = sys.argv[2] if len(sys.argv) > 2 else "far-only"
+    target_frames = int(sys.argv[3]) if len(sys.argv) > 3 else 100
+    fault_mode = sys.argv[4] if len(sys.argv) > 4 else "none"
+    fixture_delay_ms = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+    mutant_mode = sys.argv[7] if len(sys.argv) > 7 else "none"
+    ensure(mutant_mode in ("none", "passthrough", "zero-clean"),
+           "invalid scorer mutant")
+    ensure(mutant_mode == "none" or (mode == "trial" and target_frames == 4500
+           and fixture_mode == ("far-only" if mutant_mode == "passthrough" else "near-only")),
+           "scorer mutant requires matching full trial")
+    ensure(0 <= fixture_delay_ms <= 1000 and
+           (fixture_delay_ms == 0 or mode == "trial"),
+           "fixture activation delay invalid")
+    ensure(fault_mode in ("none", "raw-unlink", "reference-unlink",
+                          "output-unlink", "helper-crash", "server-stop",
+                          "corrupt-ipc", "queue-overflow",
+                          "clock-reset", "generation-replacement",
+                          "aec-error"),
+           "invalid AEC live fault")
+    ensure(not fault_mode or fault_mode == "none" or
+           (mode == "trial" and target_frames >= 20),
+           "AEC live fault requires >=20-frame trial")
+    ensure(fixture_mode in ("far-only", "near-only", "wrong-reference", "seq-skew",
+                            "speech-far", "speech-near", "speech-wrong-reference",
+                            "meta-gap", "default-header", "prevalid-once")
+           and 1 <= target_frames <= 4500, "invalid AEC fixture trial")
+    verify_isolation()
+    identity = verify_identity()
+    session = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] != "-" else os.urandom(8).hex()
+    ensure(re.fullmatch(r"[0-9a-f]{16}", session) is not None and int(session, 16) != 0,
+           "invalid owner-provided AEC session")
+    runtime = Path("/run/translator-aec")
+    runtime.mkdir(mode=0o700)
+    env = dict(os.environ)
+    env["XDG_RUNTIME_DIR"] = str(runtime)
+    env["PIPEWIRE_REMOTE"] = "pipewire-0"
+    env["PIPEWIRE_CONFIG_DIR"] = "/stage"
+    server_env = dict(env)
+    server = fixture = backend = witness = None
+    diagnostic_files = {}
+    far_fd = near_fd = None
+    speech_receipt = None
+    ipc = control = witness_control = None
+    start_at = time.monotonic()
+    frames = changed = 0
+    witness_position_delta = None
+    previous_raw = None
+    window_raw_power = window_clean_power = window_cross = 0.0
+    window_cross_zero = 0.0
+    windows = []
+    zero_lag_correlations = []
+    diagnostic_raw = array('f')
+    diagnostic_clean = array('f')
+    worst_raw = worst_clean = None
+    worst_correlation = float('inf')
+    worst_second = None
+    calibration_raw = array('f')
+    calibration_clean = array('f')
+    candidate_raw = array('f')
+    candidate_clean = array('f')
+    best_calibration_power = -1.0
+    adaptation_power = 0.0
+    adaptation_powers = []
+    fixed_lag = None
+    calibration_correlation = None
+    active_power_threshold = None
+    window_input_power = 0.0
+    raw_peak = reference_peak = clean_peak = 0.0
+    failure = None
+    cleanup_ok = False
+    cleanup_ms = None
+    report = None
+    phase = "server"
+    last_type = None
+    fatal_reason = fatal_processed = None
+    fault_triggered = False
+    fault_confirmed = False
+    fault_at_frame = None
+    mutant_applied_frames = 0
+    inventory = []
+    try:
+        if fixture_mode.startswith("speech-"):
+            far_fd, near_fd, speech_receipt = prepare_speech()
+        server = subprocess.Popen(
+            ["/usr/bin/pipewire", "-c", "/stage/private.conf"],
+            env=server_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True,
+        )
+        endpoint = runtime / "pipewire-0"
+        wait_socket(endpoint, server)
+        phase = "clients"
+        fixture_pw = connected_pipewire(endpoint)
+        control, fixture_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            fixture_args = [
+                "/stage/fixture", "--pipewire-fd", str(fixture_pw.fileno()),
+                "--control-fd", str(fixture_control.fileno()),
+                "--session-id", session, "--mode", fixture_mode,
+            ]
+            fixture_fds = [fixture_pw.fileno(), fixture_control.fileno()]
+            if far_fd is not None and near_fd is not None:
+                fixture_args += [
+                    "--far-pcm-fd", str(far_fd), "--near-pcm-fd", str(near_fd),
+                ]
+                fixture_fds.extend((far_fd, near_fd))
+            fixture = subprocess.Popen(
+                fixture_args, env=env, pass_fds=tuple(fixture_fds),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=open_diagnostic(runtime, "fixture", diagnostic_files),
+                preexec_fn=limit_child_diagnostic, close_fds=True,
+            )
+        finally:
+            fixture_pw.close()
+            fixture_control.close()
+            for descriptor in (far_fd, near_fd):
+                if descriptor is not None:
+                    os.close(descriptor)
+            far_fd = near_fd = None
+        control.settimeout(4)
+        ensure(control.recv(1) == b"R", "fixture READY absent")
+        control.settimeout(None)
+        witness_pw = connected_pipewire(endpoint)
+        witness_control, witness_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            witness = subprocess.Popen(
+                ["/stage/witness", "--pipewire-fd", str(witness_pw.fileno()),
+                 "--output-fd", str(witness_child.fileno()),
+                 "--session-id", session],
+                env=env, pass_fds=(witness_pw.fileno(), witness_child.fileno()),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=open_diagnostic(runtime, "witness", diagnostic_files),
+                preexec_fn=limit_child_diagnostic, close_fds=True,
+            )
+        finally:
+            witness_pw.close()
+            witness_child.close()
+        witness_control.settimeout(4)
+        ensure(witness_control.recv(1) == b"R", "witness READY absent")
+        witness_control.settimeout(None)
+        backend_pw = connected_pipewire(endpoint)
+        ipc, helper_ipc = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            backend_args = ["/stage/backend", "--pipewire-fd", str(backend_pw.fileno()),
+                            "--ipc-fd", str(helper_ipc.fileno()), "--session-id", session]
+            if mode == "debug":
+                backend_args = ["/usr/bin/gdb", "--batch", "-ex", "run", "-ex", "bt 12",
+                                "--args", *backend_args]
+            backend = subprocess.Popen(
+                backend_args,
+                env=env, pass_fds=(backend_pw.fileno(), helper_ipc.fileno()),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if mode == "debug" else subprocess.DEVNULL,
+                stderr=open_diagnostic(runtime, "backend", diagnostic_files),
+                preexec_fn=limit_child_diagnostic, close_fds=True,
+            )
+        finally:
+            backend_pw.close()
+            helper_ipc.close()
+        fixture_name = "translator-aec-fixture-" + session
+        backend_name = "translator-aec-" + session
+        witness_name = "translator-aec-witness-" + session
+        setup_deadline = min(END_AT, time.monotonic() + 4)
+        sink_port = exact_ports(env, fixture_name, backend_name, witness_name,
+                                fixture, backend, witness, mode, setup_deadline)
+        phase = "links"
+        link(env, fixture_name + ":raw", backend_name + ":raw", setup_deadline)
+        link(env, fixture_name + ":reference", backend_name + ":reference", setup_deadline)
+        link(env, backend_name + ":clean", sink_port, setup_deadline)
+        inventory = snapshot(env, setup_deadline)
+        phase = "hello"
+        first, hello = packet(ipc, setup_deadline)
+        ensure(len(hello) == 36 and hello[0] == 1, "AEC HELLO absent")
+        ensure(hello[4:12] == bytes.fromhex(session)[::-1],
+               "AEC HELLO session mismatch")
+        node_id, rate, quantum, latency = struct.unpack_from("<IIII", hello, 20)
+        ensure(node_id != 0xffffffff and (rate, quantum, latency) == (48000, 480, 480),
+               "AEC HELLO ABI mismatch")
+        mapped = Path(f"/proc/{backend.pid}/maps").read_text(encoding="ascii")
+        ensure(any(
+            line.rstrip().endswith(
+                "/usr/lib/x86_64-linux-gnu/spa-0.2/aec/libspa-aec-webrtc.so"
+            )
+            for line in mapped.splitlines()
+        ), "pinned AEC plugin not loaded by private helper")
+        witness_control.sendall(b"S")
+        witness_control.settimeout(min(4, max(0.01, END_AT - time.monotonic())))
+        ensure(witness_control.recv(1) == b"A", "witness activation acknowledgment absent")
+        witness_control.settimeout(None)
+        if not fixture_delay_ms:
+            control.sendall(b"S")
+            control.settimeout(min(4, max(0.01, END_AT - time.monotonic())))
+            ensure(control.recv(1) == b"A", "fixture activation acknowledgment absent")
+            control.settimeout(None)
+        ipc.sendall(START)
+        if fixture_delay_ms:
+            time.sleep(fixture_delay_ms / 1000)
+            control.sendall(b"S")
+            control.settimeout(min(4, max(0.01, END_AT - time.monotonic())))
+            ensure(control.recv(1) == b"A", "fixture activation acknowledgment absent")
+            control.settimeout(None)
+        phase = "armed"
+        links_attested = False
+        if mode == "stream":
+            forward(first)
+        armed_deadline = min(END_AT, time.monotonic() + 4)
+        while True:
+            wire, body = packet(ipc, armed_deadline)
+            last_type = body[0]
+            ensure(struct.unpack_from("<Q", body, 4)[0] == int(session, 16),
+                   "AEC startup IPC session mismatch")
+            if last_type == 3:
+                ensure(len(body) == 32, "AEC startup FATAL malformed")
+                reason = struct.unpack_from("<I", body, 20)[0]
+                processed = struct.unpack_from("<Q", body, 24)[0]
+                fatal_reason, fatal_processed = reason, processed
+                raise RuntimeError(
+                    f"AEC helper startup FATAL reason={reason} processed={processed}"
+                )
+            if last_type == 6:
+                ensure(not links_attested, "duplicate startup LINKS")
+                attest_links(inventory, body, session, backend_name, fixture_name,
+                             witness_name, node_id)
+                links_attested = True
+            elif last_type == 7:
+                ensure(links_attested and len(body) == 24,
+                       "AEC ARMED missing LINKS or malformed")
+                armed_generation, armed_node = struct.unpack_from("<QI", body, 12)
+                ensure(armed_generation == int(session, 16) and armed_node == node_id,
+                       "AEC ARMED generation/node mismatch")
+                if mode == "stream":
+                    forward(wire)
+                break
+            else:
+                raise RuntimeError("unexpected AEC startup IPC packet")
+            if mode == "stream":
+                forward(wire)
+        phase = "frames"
+        last_seq = last_position = last_xrun = clock_id = None
+        end = min(END_AT, time.monotonic() +
+                  (160 if mode == "stream" else max(12, target_frames / 100 + 10)))
+        while time.monotonic() < end and not stopping:
+            if any(process.poll() is not None for process in (fixture, backend, witness, server)):
+                raise RuntimeError(
+                    f"private graph process exited: fixture={fixture.poll()} "
+                    f"backend={backend.poll()} witness={witness.poll()} server={server.poll()}"
+                )
+            wire, body = packet(ipc, end)
+            if fault_mode in ("corrupt-ipc", "clock-reset",
+                              "generation-replacement") and fault_triggered:
+                body = bytearray(body)
+                at = {"corrupt-ipc": 4, "clock-reset": 28,
+                      "generation-replacement": 12}[fault_mode]
+                body[at] ^= 0x01
+                fault_confirmed = True
+            msg_type = body[0]
+            last_type = msg_type
+            ensure(struct.unpack_from("<Q", body, 4)[0] == int(session, 16),
+                   "AEC IPC session mismatch")
+            if msg_type == 3:
+                ensure(len(body) == 32, "AEC FATAL packet malformed")
+                reason = struct.unpack_from("<I", body, 20)[0]
+                processed = struct.unpack_from("<Q", body, 24)[0]
+                fatal_reason, fatal_processed = reason, processed
+                raise RuntimeError(f"AEC helper FATAL reason={reason} processed={processed}")
+            if msg_type == 6:
+                ensure(not links_attested, "duplicate AEC LINKS claim")
+                attest_links(inventory, body, session, backend_name, fixture_name,
+                             witness_name, node_id)
+                links_attested = True
+                if mode == "stream":
+                    forward(first)
+                    forward(wire)
+                continue
+            ensure(links_attested, "AEC FRAME before independent LINKS attestation")
+            ensure(msg_type == 2 and len(body) == 72 + 480 * 12,
+                   "unexpected AEC IPC packet")
+            generation, seq = struct.unpack_from("<QQ", body, 12)
+            current_clock, sample_count = struct.unpack_from("<II", body, 28)
+            position, duration, xrun = struct.unpack_from("<QQQ", body, 36)
+            num, den, frame_node = struct.unpack_from("<III", body, 60)
+            ensure(generation == int(session, 16) and sample_count == 480
+                   and duration == 480 and current_clock != 0xffffffff
+                   and num > 0 and den == 48000 * num and frame_node == node_id,
+                   "AEC FRAME provenance invalid")
+            if last_seq is not None:
+                ensure(seq == last_seq + 1 and position == last_position + 480
+                       and xrun == last_xrun and current_clock == clock_id,
+                       "AEC FRAME gap or graph change")
+            last_seq, last_position, last_xrun, clock_id = seq, position, xrun, current_clock
+            raw_samples = []
+            clean_samples = []
+            for raw, reference, clean in struct.iter_unpack("<fff", body[72:]):
+                ensure(all(math.isfinite(value) and abs(value) <= 1 for value in
+                           (raw, reference, clean)), "AEC FRAME PCM invalid")
+                raw_peak = max(raw_peak, abs(raw))
+                reference_peak = max(reference_peak, abs(reference))
+                clean_peak = max(clean_peak, abs(clean))
+                changed += abs(raw - clean) > 1e-6
+                raw_samples.append(raw)
+                clean_samples.append(clean)
+            witness_tag = receive_exact(witness_control, 1, min(END_AT, time.monotonic() + 4))
+            if witness_tag == b"F":
+                reason, next_seq = struct.unpack(
+                    "<IQ", receive_exact(witness_control, 12,
+                                          min(END_AT, time.monotonic() + 4))
+                )
+                raise RuntimeError(f"witness failed reason={reason} next_seq={next_seq}")
+            ensure(witness_tag == b"W", "unexpected witness record")
+            observed = receive_exact(witness_control, 1944,
+                                     min(END_AT, time.monotonic() + 4))
+            wseq, wclock, wpos, wn = struct.unpack_from("<QI QI".replace(" ", ""), observed)
+            ensure(wseq == seq and wclock == current_clock and wn == 480,
+                   f"witness identity mismatch helper_seq={seq} witness_seq={wseq} "
+                   f"helper_clock={current_clock} witness_clock={wclock}")
+            observed_delta = wpos - position
+            if witness_position_delta is None:
+                witness_position_delta = observed_delta
+            ensure(observed_delta == witness_position_delta == 0,
+                   "witness graph position delta changed or nonzero")
+            clean_bytes = b"".join(body[72 + index * 12 + 8:72 + index * 12 + 12]
+                                   for index in range(480))
+            ensure(observed[24:] == clean_bytes, "witness output differs from helper clean bytes")
+            if mutant_mode == "passthrough":
+                clean_samples = raw_samples.copy()
+                mutant_applied_frames += 1
+            elif mutant_mode == "zero-clean":
+                clean_samples = [0.0] * len(raw_samples)
+                mutant_applied_frames += 1
+            near_mode = fixture_mode in ("near-only", "speech-near")
+            if near_mode and frames < 1500:
+                adaptation_power += sum(value * value for value in raw_samples)
+                if frames < 1400:
+                    candidate_raw.extend(raw_samples)
+                    candidate_clean.extend(clean_samples)
+                    if (frames + 1) % 50 == 0:
+                        candidate_power = sum(value * value for value in candidate_raw)
+                        if candidate_power > best_calibration_power:
+                            best_calibration_power = candidate_power
+                            calibration_raw = candidate_raw
+                            calibration_clean = candidate_clean
+                        candidate_raw = array('f')
+                        candidate_clean = array('f')
+                if (frames + 1) % 100 == 0:
+                    adaptation_powers.append(adaptation_power / 48000)
+                    adaptation_power = 0.0
+                if frames == 1499:
+                    fixed_lag, calibration_correlation = choose_fixed_lag(
+                        calibration_raw, calibration_clean
+                    )
+                    calibration_raw = calibration_clean = array('f')
+                    candidate_raw = candidate_clean = array('f')
+                    active_power_threshold = 0.04 * max(adaptation_powers)
+                    ensure(active_power_threshold > 0, "near speech input is silent")
+            if 1500 <= frames < 4500:
+                if near_mode:
+                    ensure(fixed_lag is not None and previous_raw is not None,
+                           "AEC near-speech lag not calibrated")
+                    context = previous_raw + raw_samples
+                    aligned_samples = context[480 - fixed_lag:960 - fixed_lag]
+                    window_input_power += sum(value * value for value in raw_samples)
+                    diagnostic_raw.extend(raw_samples)
+                    diagnostic_clean.extend(clean_samples)
+                else:
+                    aligned_samples = raw_samples
+                for aligned, clean in zip(aligned_samples, clean_samples):
+                    window_raw_power += aligned * aligned
+                    window_clean_power += clean * clean
+                    window_cross += aligned * clean
+                if (frames - 1499) % 100 == 0:
+                    if near_mode:
+                        level_db = 10 * math.log10(
+                            max(window_clean_power, 1e-20) /
+                            max(window_raw_power, 1e-20)
+                        )
+                        correlation = window_cross / math.sqrt(
+                            max(window_raw_power * window_clean_power, 1e-40)
+                        )
+                        active = window_input_power / 48000 >= active_power_threshold
+                        windows.append((level_db, correlation, active))
+                        if active and correlation < worst_correlation:
+                            worst_correlation = correlation
+                            worst_second = len(windows) - 1
+                            worst_raw = diagnostic_raw
+                            worst_clean = diagnostic_clean
+                        diagnostic_raw = array('f')
+                        diagnostic_clean = array('f')
+                    else:
+                        erle_db = 10 * math.log10(
+                            max(window_raw_power, 1e-20) /
+                            max(window_clean_power, 1e-20)
+                        )
+                        windows.append(erle_db)
+                    window_raw_power = window_clean_power = window_cross = 0.0
+                    window_input_power = 0.0
+            previous_raw = raw_samples
+            frames += 1
+            if fault_mode != "none" and not fault_triggered and frames == 10:
+                fault_triggered = True
+                fault_at_frame = frames
+                if fault_mode in ("raw-unlink", "reference-unlink", "output-unlink"):
+                    endpoints = {
+                        "raw-unlink": (fixture_name + ":raw", backend_name + ":raw"),
+                        "reference-unlink": (
+                            fixture_name + ":reference", backend_name + ":reference"
+                        ),
+                        "output-unlink": (backend_name + ":clean", sink_port),
+                    }
+                    output, input_ = endpoints[fault_mode]
+                    removed = subprocess.run(
+                        ["/usr/bin/pw-link", "-d", output, input_],
+                        env=env, capture_output=True, timeout=2, check=False,
+                    )
+                    ensure(removed.returncode == 0,
+                           "exact private graph link fault injection failed")
+                    fault_confirmed = True
+                elif fault_mode == "helper-crash":
+                    backend.kill()
+                    fault_confirmed = True
+                elif fault_mode == "server-stop":
+                    server.terminate()
+                    fault_confirmed = True
+                elif fault_mode == "queue-overflow":
+                    time.sleep(5)
+                    fault_confirmed = True
+                elif fault_mode == "aec-error":
+                    ipc.sendall(INJECT_AEC_ERROR)
+            if mode == "stream":
+                forward(wire)
+            if frames >= target_frames:
+                break
+        if fault_mode != "none":
+            raise RuntimeError("live fault did not invalidate session")
+        if mode in ("check", "trial"):
+            ensure(frames >= target_frames and raw_peak > 0 and clean_peak > 0
+                   and changed > 0, "AEC DSP fixture did not produce changed nonzero PCM")
+            if fixture_mode not in ("near-only", "speech-near"):
+                ensure(reference_peak > 0, "AEC reference fixture silent")
+            else:
+                ensure(reference_peak == 0, "near-only reference is nonzero")
+            metric = None
+            if target_frames == 4500:
+                ensure(len(windows) == 30, "AEC scorer did not collect 30 fixed windows")
+                if fixture_mode in ("near-only", "speech-near"):
+                    active_windows = [
+                        (index, level, corr)
+                        for index, (level, corr, active) in enumerate(windows) if active
+                    ]
+                    active_correlations = sorted(corr for _, _, corr in active_windows)
+                    active_levels = sorted(level for _, level, _ in active_windows)
+                    metric = {
+                        "active_seconds": len(active_windows),
+                        "active_power_threshold": active_power_threshold,
+                        "lag_calibration": "highest_input_rms_0.5s_of_first_14s_integer_xcorr_0_480_stride16",
+                        "declared_raw_to_clean_lag_samples": fixed_lag,
+                        "lag_calibration_correlation": calibration_correlation,
+                        "maximum_1s_adaptation_raw_power": max(adaptation_powers),
+                        "median_level_change_db": statistics.median(
+                            active_levels
+                        ) if active_windows else None,
+                        "minimum_level_change_db_diagnostic": min(
+                            active_levels
+                        ) if active_windows else None,
+                        "p10_level_change_db_diagnostic": active_levels[
+                            max(0, math.ceil(len(active_levels) * 0.1) - 1)
+                        ] if active_windows else None,
+                        "maximum_level_change_db_diagnostic": max(
+                            active_levels
+                        ) if active_windows else None,
+                        "minimum_waveform_correlation": min(
+                            active_correlations
+                        ) if active_windows else None,
+                        "p10_waveform_correlation_diagnostic": active_correlations[
+                            max(0, math.ceil(len(active_correlations) * 0.1) - 1)
+                        ] if active_windows else None,
+                        "median_waveform_correlation_diagnostic": statistics.median(
+                            active_correlations
+                        ) if active_windows else None,
+                        "maximum_waveform_correlation_diagnostic": max(
+                            active_correlations
+                        ) if active_windows else None,
+                        "worst_scored_second_diagnostic": min(
+                            active_windows, key=lambda item: item[2]
+                        )[0] if active_windows else None,
+                        "worst_second_best_lag_diagnostic": (
+                            {"second": worst_second,
+                             **diagnose_window_lag(worst_raw, worst_clean)}
+                            if worst_raw is not None else None
+                        ),
+                        "plugin_internal_errors": "UNOBSERVED",
+                        "all_active_correlations_diagnostic": [
+                            round(corr, 4) for _, _, corr in active_windows
+                        ],
+                    }
+                    ensure(len(active_windows) >= 20,
+                           "near speech input has insufficient active coverage "
+                           + json.dumps(metric))
+                    ensure(all(abs(level) <= 3 and correlation >= 0.90
+                               for _, level, correlation in active_windows),
+                           "near-only preservation below predeclared threshold "
+                           + json.dumps(metric))
+                else:
+                    metric = {"median_erle_db": statistics.median(windows)}
+                    if fixture_mode in ("far-only", "speech-far"):
+                        ensure(metric["median_erle_db"] >= 15,
+                               "far-only ERLE below predeclared 15 dB")
+                    elif fixture_mode in ("wrong-reference", "speech-wrong-reference"):
+                        ensure(metric["median_erle_db"] < 15,
+                               "wrong-reference negative control unexpectedly passed")
+            report = {
+                "status": "NONPHYSICAL_TRIAL_PASS" if mode == "trial" else "NOT_DONE",
+                "reason": "isolated native graph only; no production AEC proof",
+                "aec_proof": False,
+                "fixture_mode": fixture_mode,
+                "frames": frames, "raw_peak": raw_peak,
+                "reference_peak": reference_peak, "clean_peak": clean_peak,
+                "changed_samples": changed,
+                "witness_position_delta_samples": witness_position_delta,
+                "metric": metric,
+                "speech": speech_receipt,
+                "identity": identity,
+                "plugin_mapped": True,
+                "fixture_delay_ms": fixture_delay_ms,
+            }
+        else:
+            ensure(frames == target_frames and target_frames % 100 == 0,
+                   "AEC stream did not complete its declared whole-window interval")
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
+        native_detail = "diagnostics=structured-only"
+        changed_links = "not_checked"
+        after_states = "not_checked"
+        if server is not None and server.poll() is None and inventory:
+            try:
+                after = snapshot(env, min(END_AT, time.monotonic() + 3))
+                before_ids = {obj["id"] for obj in inventory if str(obj.get("type", "")).endswith("Link")}
+                after_ids = {obj["id"] for obj in after if str(obj.get("type", "")).endswith("Link")}
+                changed_links = {"removed": sorted(before_ids - after_ids),
+                                 "added": sorted(after_ids - before_ids)}
+                after_states = [
+                    {"id": obj.get("id"), "state": obj.get("info", {}).get("state"),
+                     "name": obj.get("info", {}).get("props", {}).get("node.name")}
+                    for obj in after if str(obj.get("type", "")).endswith("Node")
+                ]
+            except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError):
+                changed_links = "snapshot_unavailable"
+        if control is not None and fixture is not None:
+            try:
+                control.settimeout(0.1)
+                control.sendall(b"X")
+                fixture.wait(timeout=0.2)
+                native_detail += " fixture=teardown-attempted"
+            except (OSError, subprocess.TimeoutExpired):
+                native_detail += " fixture=teardown-report-unavailable"
+        failure = (f"{error}; fault={fault_mode} phase={phase} frames={frames} last_type={last_type} "
+                   f"native={native_detail} link_delta={changed_links} "
+                   f"node_states={after_states} registry={registry_counts(inventory)}")
+    finally:
+        for descriptor in (far_fd, near_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+        if ipc is not None:
+            try:
+                ipc.settimeout(0.2)
+                ipc.sendall(STOP)
+            except OSError:
+                pass
+            ipc.close()
+        if control is not None:
+            try:
+                control.settimeout(0.2)
+                control.sendall(b"X")
+            except OSError:
+                pass
+            control.close()
+        if witness_control is not None:
+            try:
+                witness_control.settimeout(0.2)
+                witness_control.sendall(b"X")
+            except OSError:
+                pass
+            witness_control.close()
+        cleanup_started = time.monotonic()
+        cleanup_ok = shutdown_all(backend, fixture, witness, server)
+        cleanup_ms = round((time.monotonic() - cleanup_started) * 1000)
+        if not cleanup_ok:
+            failure = "private graph cleanup uncertain"
+    if failure is None and backend is not None and report is not None:
+        marker_bytes = diagnostic_bytes(diagnostic_files.get("backend"))
+        if marker_bytes is None:
+            failure = "native diagnostic overflow"
+            marker = ""
+        else:
+            marker = marker_bytes.decode("ascii", errors="replace")
+        lines = [
+            line for line in marker.splitlines()
+            if line.startswith("AEC_PREVALID ")
+        ]
+        counters = None
+        if len(lines) == 1:
+            try:
+                fields = dict(field.split("=", 1) for field in lines[0].split()[1:])
+                if set(fields) == {"quarantined", "empty", "sentinel"}:
+                    counters = {key: int(value) for key, value in fields.items()}
+            except ValueError:
+                counters = None
+        if lines and (
+            counters is None or min(counters.values()) < 0 or
+            counters["quarantined"] != counters["empty"] + counters["sentinel"]
+        ):
+            failure = "native premeasurement counter malformed"
+        elif fixture_mode == "prevalid-once" and (
+            counters is None or counters["sentinel"] < 1
+        ):
+            failure = "native premeasurement sentinel quarantine not witnessed"
+        elif fixture_delay_ms and (
+            counters is None or counters["empty"] < 1
+        ):
+            failure = "native premeasurement empty-input quarantine not witnessed"
+        elif counters is not None:
+            report["prevalid"] = counters
+    if failure is not None:
+        diagnostic = read_native_diagnostics(
+            diagnostic_files.get("backend"), "backend", session
+        )
+        diagnostic.update({
+            "fatal_reason": fatal_reason,
+            "fatal_processed": fatal_processed,
+        })
+        print("AEC_NATIVE_DIAGNOSTICS=" + json.dumps(diagnostic), file=sys.stderr)
+        fixture_diagnostic = read_fixture_diagnostics(
+            diagnostic_files.get("fixture"), session
+        )
+        print("AEC_FIXTURE_DIAGNOSTICS=" + json.dumps(fixture_diagnostic), file=sys.stderr)
+        if mutant_mode != "none":
+            expected_rejection = ("far-only ERLE below predeclared 15 dB"
+                                  if mutant_mode == "passthrough"
+                                  else "near-only preservation below predeclared threshold")
+            print("AEC_MUTANT_RECEIPT=" + json.dumps({
+                "session": session, "mutant": mutant_mode,
+                "applied_frames": mutant_applied_frames,
+                "scorer_rejected": expected_rejection in failure
+                and mutant_applied_frames == target_frames,
+                "cleanup_reaped": cleanup_ok,
+            }, sort_keys=True), file=sys.stderr)
+        if fault_mode == "aec-error":
+            native_bytes = diagnostic_bytes(diagnostic_files.get("backend"))
+            marker = f"AEC_FAULT_ARMED kind=aec-error session={session}\n".encode("ascii")
+            fault_confirmed = native_bytes is not None and marker in native_bytes
+        if fault_mode != "none":
+            print("AEC_FAULT_RECEIPT=" + json.dumps({
+                "session": session, "fault": fault_mode,
+                "injection_at_frame": fault_at_frame,
+                "injection_confirmed": fault_confirmed,
+                "post_injection_failure": fault_confirmed and frames >= 10
+                and "live fault did not invalidate" not in failure,
+                "fatal_reason": fatal_reason,
+                "cleanup_reaped": cleanup_ok,
+            }, sort_keys=True), file=sys.stderr)
+        print(f"AEC isolated session NOT_DONE: {failure}; cleanup_reaped={cleanup_ok} "
+              f"cleanup_ms={cleanup_ms}", file=sys.stderr)
+        for descriptor in diagnostic_files.values():
+            descriptor.close()
+        return 2
+    for descriptor in diagnostic_files.values():
+        descriptor.close()
+    if report is not None:
+        report.update({"cleanup_reaped": cleanup_ok, "cleanup_ms": cleanup_ms})
+        print(json.dumps(report))
+    return 4 if mode == "check" else 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+class UnsafeInvocation(Exception):
+    pass
+
+
+class ScopeCancelled(Exception):
+    pass
+
+
+class ScopeRejected(UnsafeInvocation):
+    pass
+
+
+class ScopeCreationUnknown(UnsafeInvocation):
+    pass
+
+
+SCOPE_BOOTSTRAP = (
+    "import os,sys;"
+    "fd=int(sys.argv[1]);"
+    "permit=os.read(fd,1);"
+    "os.close(fd);"
+    "sys.exit(75) if permit!=b'G' else None;"
+    "[os.close(int(name)) for name in os.listdir('/proc/self/fd') "
+    "if name.isdecimal() and int(name)>2 and os.path.exists('/proc/self/fd/'+name)];"
+    "os.execv(sys.argv[2],sys.argv[2:])"
+)
+
+
+def read_scope(pid: int, unit: str) -> Path | None:
+    expected = (
+        f"/user.slice/user-{os.getuid()}.slice/"
+        f"user@{os.getuid()}.service/app.slice/{unit}.scope"
+    )
+    try:
+        membership = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return None
+    if membership != f"0::{expected}":
+        return None
+    scope = Path("/sys/fs/cgroup") / expected.lstrip("/")
+    try:
+        memory_limit = (scope / "memory.max").read_text(encoding="ascii").strip()
+        swap_limit = (scope / "memory.swap.max").read_text(encoding="ascii").strip()
+        task_limit = (scope / "pids.max").read_text(encoding="ascii").strip()
+        members = {
+            int(item) for item in (scope / "cgroup.procs").read_text(
+                encoding="ascii"
+            ).split()
+        }
+    except (FileNotFoundError, ValueError):
+        return None
+    if (
+        memory_limit != str(1 << 30)
+        or swap_limit != "0"
+        or task_limit != "32"
+        or members != {pid}
+    ):
+        raise UnsafeInvocation("transient AEC scope limits or ownership invalid")
+    return scope
+
+
+def await_scope(
+    pid: int, unit: str, process: subprocess.Popen[bytes], check_cancel: Callable[[], None]
+) -> Path:
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        check_cancel()
+        if process.poll() is not None:
+            raise UnsafeInvocation("transient AEC scope exited before admission")
+        scope = read_scope(pid, unit)
+        check_cancel()
+        if scope is not None:
+            return scope
+        time.sleep(0.02)
+    check_cancel()
+    raise UnsafeInvocation("transient AEC scope membership unavailable")
+
+
+
+def acquire_scope(
+    pid: int, unit: str, process: subprocess.Popen[bytes],
+    check_cancel: Callable[[], None], on_created: Callable[[], None] = lambda: None,
+    on_request: Callable[[], None] = lambda: None,
+) -> Path:
+    """Keep the manager transaction owned until its exact job terminates."""
+    try:
+        from gi.repository import Gio, GLib
+        pre_request = Gio.Cancellable()
+        pre_request_timer = threading.Timer(
+            MANAGER_PRE_REQUEST_TIMEOUT_SECONDS, pre_request.cancel
+        )
+        pre_request_timer.daemon = True
+        pre_request_timer.start()
+        try:
+            bus = f"unix:path=/run/user/{os.getuid()}/bus"
+            connection = Gio.DBusConnection.new_for_address_sync(
+                bus,
+                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                None, pre_request,
+            )
+        except Exception:
+            pre_request_timer.cancel()
+            pre_request_timer.join(timeout=0.1)
+            raise
+    except Exception as error:
+        raise ScopeRejected("AEC manager request was not sent") from error
+
+    name = f"{unit}.scope"
+    manager_path = "/org/freedesktop/systemd1"
+    manager_interface = "org.freedesktop.systemd1.Manager"
+    subscription = None
+    manager_subscribed = False
+    request_started = False
+
+    def call(
+        owner: str, method: str, params: GLib.Variant | None = None,
+        cancellable: Gio.Cancellable | None = None,
+    ) -> GLib.Variant:
+        return connection.call_sync(
+            owner, manager_path, manager_interface, method, params, None,
+            Gio.DBusCallFlags.NONE, 2_147_483_647, cancellable,
+        )
+
+    def rejected_without_unit(owner: str) -> bool:
+        try:
+            call(owner, "GetUnit", GLib.Variant("(s)", (name,)))
+        except GLib.Error as lookup:
+            if Gio.DBusError.get_remote_error(lookup) != (
+                "org.freedesktop.systemd1.NoSuchUnit"
+            ):
+                raise UnsafeInvocation("AEC manager rejection not settled") from lookup
+        else:
+            return False
+        jobs = call(owner, "ListJobs").unpack()[0]
+        return not any(entry[1] == name for entry in jobs)
+
+    try:
+        owner = connection.call_sync(
+            "org.freedesktop.DBus", "/org/freedesktop/DBus",
+            "org.freedesktop.DBus", "GetNameOwner",
+            GLib.Variant("(s)", ("org.freedesktop.systemd1",)),
+            GLib.VariantType("(s)"), Gio.DBusCallFlags.NONE,
+            2_147_483_647, pre_request,
+        ).unpack()[0]
+        removed: list[tuple[int, str, str, str]] = []
+
+        def on_job_removed(
+            _connection: Gio.DBusConnection, _sender: str, _path: str,
+            _interface: str, _member: str, parameters: GLib.Variant,
+        ) -> None:
+            removed.append(parameters.unpack())
+
+        subscription = connection.signal_subscribe(
+            owner, manager_interface, "JobRemoved", manager_path, None,
+            Gio.DBusSignalFlags.NONE, on_job_removed,
+        )
+        call(owner, "Subscribe", cancellable=pre_request)
+        manager_subscribed = True
+        check_cancel()
+        properties = [
+            ("PIDs", GLib.Variant("au", [pid])),
+            ("Slice", GLib.Variant("s", "app.slice")),
+            ("MemoryMax", GLib.Variant("t", 1 << 30)),
+            ("MemorySwapMax", GLib.Variant("t", 0)),
+            ("TasksMax", GLib.Variant("t", 32)),
+            ("CollectMode", GLib.Variant("s", "inactive-or-failed")),
+        ]
+        start_parameters = GLib.Variant(
+            "(ssa(sv)a(sa(sv)))", (name, "fail", properties, [])
+        )
+        pre_request_timer.cancel()
+        if pre_request.is_cancelled():
+            raise ScopeRejected("AEC manager pre-request deadline elapsed")
+        on_request()
+        request_started = True
+        try:
+            job = call(owner, "StartTransientUnit", start_parameters).unpack()[0]
+        except GLib.Error as error:
+            if not Gio.DBusError.is_remote_error(error):
+                raise UnsafeInvocation("AEC manager transaction outcome unknown") from error
+            if not rejected_without_unit(owner):
+                raise UnsafeInvocation("AEC unit or job remains after manager rejection") from error
+            raise ScopeRejected("AEC manager definitively rejected scope") from error
+
+        while True:
+            context = GLib.MainContext.default()
+            while context.pending():
+                context.iteration(False)
+            matches = [event for event in removed if event[1] == job]
+            if matches:
+                if len(matches) != 1 or matches[0][2] != name:
+                    raise UnsafeInvocation("AEC manager job identity mismatched")
+                if matches[0][3] != "done":
+                    if rejected_without_unit(owner):
+                        raise ScopeRejected("AEC manager job failed without unit")
+                    raise UnsafeInvocation("AEC manager job failed with unit present")
+                break
+            if connection.is_closed():
+                raise UnsafeInvocation("AEC manager connection closed before job result")
+            time.sleep(0.02)
+        on_created()
+        return await_scope(pid, unit, process, lambda: None)
+    except ScopeRejected:
+        raise
+    except (GLib.Error, ScopeCancelled, UnsafeInvocation, OSError, ValueError) as error:
+        if request_started:
+            raise ScopeCreationUnknown("AEC manager creation outcome unknown") from error
+        raise ScopeRejected("AEC manager request was not sent") from error
+    finally:
+        pre_request_timer.cancel()
+        pre_request_timer.join(timeout=0.1)
+        if subscription is not None:
+            connection.signal_unsubscribe(subscription)
+        if manager_subscribed and request_started:
+            try:
+                call(owner, "Unsubscribe")
+            except GLib.Error:
+                pass
+        if not request_started:
+            pre_request.cancel()
+        try:
+            connection.close_sync(pre_request if not request_started else None)
+        except GLib.Error:
+            pass
+
+
+def cleanup_scope(
+    process: subprocess.Popen[bytes],
+    scope: Path | None,
+    unit: str,
+    environment: dict[str, str],
+) -> tuple[bool, int]:
+    started = time.monotonic()
+    deadline = started + 8
+    presence_uncertain = False
+
+    def present() -> bool:
+        nonlocal presence_uncertain
+        if scope is None:
+            return False
+        try:
+            return scope_present(scope)
+        except OSError:
+            presence_uncertain = True
+            return True
+
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=min(2, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            process.kill()
+    if process.poll() is None:
+        try:
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+    if present():
+        try:
+            members = (scope / "cgroup.procs").read_text(encoding="ascii").split()
+        except FileNotFoundError:
+            members = []
+        except OSError:
+            presence_uncertain = True
+            members = ["unverified"]
+        if members:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    subprocess.run(
+                        ["/usr/bin/systemctl", "--user", "stop", f"{unit}.scope"],
+                        env=environment, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=min(2, remaining), check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+    while present() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    first_absent = not present()
+    if first_absent and time.monotonic() + 0.02 < deadline:
+        time.sleep(0.02)
+    second_absent = not present()
+    return (
+        process.poll() is not None and first_absent and second_absent
+        and time.monotonic() <= deadline,
+        round((time.monotonic() - started) * 1000),
+    )
+
+
+
+def retain_ambiguous_scope(
+    process: subprocess.Popen[bytes], scope: Path, unit: str,
+    environment: dict[str, str], terminal: bool = False,
+) -> None:
+    """Do not abandon a possibly delayed manager-created scope."""
+    while True:
+        try:
+            present = scope_present(scope)
+        except OSError:
+            present = True
+        if present or terminal:
+            cleaned, _ = cleanup_scope(process, scope, unit, environment)
+            if terminal and cleaned:
+                return
+        time.sleep(0.1)
+
+
+def run_scoped(command: list[str], stream: bool, quick: bool) -> int:
+    runtime = f"/run/user/{os.getuid()}"
+    bus = f"{runtime}/bus"
+    if not Path(bus).is_socket():
+        raise UnsafeInvocation("user scope bus unavailable")
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "XDG_RUNTIME_DIR": runtime,
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={bus}",
+    }
+    unit = os.environ.get("TRANSLATOR_AEC_SCOPE_UNIT")
+    if unit is None:
+        unit = "translator-aec-" + secrets.token_hex(16)
+    if re.fullmatch(r"translator-aec-[0-9a-f]{32}", unit) is None:
+        raise UnsafeInvocation("invalid AEC scope unit identity")
+    expected_scope = (
+        Path("/sys/fs/cgroup/user.slice")
+        / f"user-{os.getuid()}.slice"
+        / f"user@{os.getuid()}.service"
+        / "app.slice"
+        / f"{unit}.scope"
+    )
+    if scope_present(expected_scope):
+        raise UnsafeInvocation("AEC scope unit identity already exists")
+    gate_read, gate_write = os.pipe()
+    lifecycle_fd = os.environ.get("TRANSLATOR_AEC_LIFECYCLE_FD")
+    lifecycle_fd = int(lifecycle_fd) if lifecycle_fd is not None else None
+    process = None
+    result = None
+    failure = None
+    cleanup_ok = False
+    cleanup_ms = None
+    admitted = False
+    manager_created = False
+    acquisition_started = False
+    cancel_requested = False
+    started = time.monotonic()
+    prior_handler = signal.getsignal(signal.SIGTERM)
+
+    def cancel(_signum: int, _frame: object) -> None:
+        nonlocal cancel_requested
+        cancel_requested = True
+
+    def check_cancel() -> None:
+        if cancel_requested:
+            raise ScopeCancelled("AEC scope cancelled")
+
+    def on_created() -> None:
+        nonlocal manager_created
+        manager_created = True
+        if lifecycle_fd is not None:
+            os.write(lifecycle_fd, b"A")
+
+    def on_request() -> None:
+        if lifecycle_fd is not None:
+            os.write(lifecycle_fd, b"P")
+
+    signal.signal(signal.SIGTERM, cancel)
+    try:
+        process = subprocess.Popen(
+            ["/usr/bin/python3", "-I", "-c", SCOPE_BOOTSTRAP,
+             str(gate_read), *command],
+            env=environment, stdin=subprocess.DEVNULL,
+            stdout=sys.stdout.buffer if stream else subprocess.PIPE,
+            stderr=sys.stderr if stream else subprocess.PIPE,
+            pass_fds=(gate_read,), close_fds=True,
+            preexec_fn=limit_child,
+        )
+        check_cancel()
+        os.close(gate_read)
+        gate_read = -1
+        acquisition_started = True
+        acquire_scope(process.pid, unit, process, check_cancel, on_created, on_request)
+        admitted = True
+        check_cancel()
+        os.write(gate_write, b"G")
+        os.close(gate_write)
+        gate_write = -1
+        work_budget = 8 if quick else 172
+        timeout = max(0.01, work_budget - (time.monotonic() - started))
+        work_deadline = time.monotonic() + timeout
+        while True:
+            check_cancel()
+            remaining = work_deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                if stream:
+                    process.wait(timeout=min(0.1, remaining))
+                else:
+                    result = process.communicate(timeout=min(0.1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except (ScopeCancelled, OSError, UnsafeInvocation, subprocess.TimeoutExpired) as error:
+        failure = error
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            if gate_read >= 0:
+                os.close(gate_read)
+            if gate_write >= 0:
+                os.close(gate_write)
+            if process is None:
+                if lifecycle_fd is not None:
+                    os.write(lifecycle_fd, b"N")
+            else:
+                cleanup_ok, cleanup_ms = cleanup_scope(process, expected_scope, unit, environment)
+                no_request = not acquisition_started or isinstance(failure, ScopeRejected)
+                cleanup_ok = cleanup_ok and (admitted or manager_created or no_request)
+                if no_request and cleanup_ok and lifecycle_fd is not None:
+                    os.write(lifecycle_fd, b"N")
+                if isinstance(failure, ScopeCreationUnknown) and not manager_created:
+                    retain_ambiguous_scope(process, expected_scope, unit, environment)
+                elif (manager_created or no_request) and not cleanup_ok:
+                    retain_ambiguous_scope(
+                        process, expected_scope, unit, environment, terminal=True
+                    )
+        finally:
+            if lifecycle_fd is not None:
+                os.close(lifecycle_fd)
+            signal.signal(signal.SIGTERM, prior_handler)
+    if process is None:
+        raise UnsafeInvocation(f"transient AEC scope could not launch: {failure}")
+    if result is not None:
+        sys.stderr.buffer.write(result[1])
+        if failure is None and cleanup_ok:
+            sys.stdout.buffer.write(result[0])
+    if failure is not None or not cleanup_ok:
+        print(
+            f"AEC scope NOT_DONE: {type(failure).__name__ if failure else 'cleanup uncertain'}; "
+            f"scope={unit}.scope cleanup_reaped={cleanup_ok} cleanup_ms={cleanup_ms}",
+            file=sys.stderr,
+        )
+        return 2
+    return process.returncode
+
+
+def child_die_with_parent(owner_pid: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0 or os.getppid() != owner_pid:
+        os._exit(75)
+
+
+def scope_present(scope: Path) -> bool:
+    try:
+        scope.stat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def owned_scope_path(unit: str) -> Path:
+    uid = os.getuid()
+    return (
+        Path("/sys/fs/cgroup/user.slice")
+        / f"user-{uid}.slice"
+        / f"user@{uid}.service"
+        / "app.slice"
+        / f"{unit}.scope"
+    )
+
+
+def pipe_exact(fd: int, count: int, deadline: float) -> bytes:
+    data = bytearray()
+    while len(data) < count:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise UnsafeInvocation("AEC lifecycle stream made no verified progress")
+        chunk = os.read(fd, count - len(data))
+        if not chunk:
+            raise UnsafeInvocation("AEC lifecycle stream closed early")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def seq_skew_rejected_and_reaped(exit_code: int | None, stderr: str) -> bool:
+    if exit_code != 2 or not any(
+        line.startswith("AEC isolated session NOT_DONE:") and "cleanup_reaped=True" in line
+        for line in stderr.splitlines()
+    ):
+        return False
+    markers = [
+        line.removeprefix("AEC_NATIVE_DIAGNOSTICS=")
+        for line in stderr.splitlines()
+        if line.startswith("AEC_NATIVE_DIAGNOSTICS=")
+    ]
+    if len(markers) != 1:
+        return False
+    try:
+        report = json.loads(markers[0])
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(report, dict):
+        return False
+    expected = report.get("expected_sequences")
+    observed = report.get("observed_sequences")
+    return (
+        report.get("status") == "OBSERVED"
+        and report.get("source") == "backend"
+        and report.get("gap_kind") == 2
+        and report.get("fatal_reason") == 3
+        and report.get("fatal_processed") == 0
+        and isinstance(expected, list)
+        and isinstance(observed, list)
+        and len(expected) == len(observed) == 2
+        and all(type(value) is int for value in expected + observed)
+        and expected[0] == expected[1]
+        and observed == [expected[0], expected[1] + 1]
+    )
+
+
+def run_lifecycle_suite(script: Path, cycles: int, only_case: str | None) -> int:
+    if only_case not in (None, "cancel", "seq-skew", "normal"):
+        raise UnsafeInvocation("AEC lifecycle case invalid")
+    if not 1 <= cycles <= 100:
+        raise UnsafeInvocation("AEC lifecycle cycle count invalid")
+    owner_pid = os.getpid()
+    before_fds = len(os.listdir("/proc/self/fd"))
+    before_threads = len(os.listdir("/proc/self/task"))
+    events: list[dict[str, object]] = []
+    for index in range(cycles):
+        unit = "translator-aec-" + secrets.token_hex(16)
+        scope = owned_scope_path(unit)
+        if scope_present(scope):
+            raise UnsafeInvocation("AEC lifecycle scope identity collision")
+        environment = {
+            "PATH": "/usr/bin:/bin",
+            "TRANSLATOR_AEC_SCOPE_UNIT": unit,
+        }
+        case = only_case or (
+            "cancel" if index % 5 == 0 else "seq-skew" if index % 5 == 1 else "normal"
+        )
+        started = time.monotonic()
+        failure = None
+        exit_code = None
+        cleanup_ms = None
+        if case == "cancel":
+            child = subprocess.Popen(
+                [str(script), "--isolated", "--stream"],
+                env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                close_fds=True,
+                preexec_fn=lambda: child_die_with_parent(owner_pid),
+            )
+            try:
+                ensure_deadline = time.monotonic() + 4
+                seen_frames = 0
+                seen_hello = seen_links = seen_armed = False
+                if child.stdout is None:
+                    raise UnsafeInvocation("AEC lifecycle stream pipe missing")
+                while seen_frames < 10:
+                    prefix = pipe_exact(child.stdout.fileno(), 4, ensure_deadline)
+                    length = struct.unpack("<I", prefix)[0]
+                    if not 4 <= length <= 72 + 480 * 12:
+                        raise UnsafeInvocation("AEC lifecycle IPC length invalid")
+                    body = pipe_exact(child.stdout.fileno(), length, ensure_deadline)
+                    if body[0] == 1:
+                        if seen_hello or seen_links or seen_armed:
+                            raise UnsafeInvocation("AEC lifecycle HELLO out of order")
+                        seen_hello = True
+                    elif body[0] == 6:
+                        if not seen_hello or seen_links or seen_armed:
+                            raise UnsafeInvocation("AEC lifecycle LINKS out of order")
+                        seen_links = True
+                    elif body[0] == 7:
+                        if not seen_links or seen_armed:
+                            raise UnsafeInvocation("AEC lifecycle ARMED out of order")
+                        seen_armed = True
+                    elif body[0] == 2:
+                        if not seen_armed:
+                            raise UnsafeInvocation("AEC lifecycle FRAME before ARMED")
+                        seen_frames += 1
+                    else:
+                        raise UnsafeInvocation(f"AEC lifecycle IPC type invalid: {body[0]}")
+                child.terminate()
+                _, stderr = child.communicate(timeout=8)
+                exit_code = child.returncode
+                if exit_code != 2 or b"ScopeCancelled" not in stderr or b"cleanup_reaped=True" not in stderr:
+                    failure = "cancel custody did not report bounded cleanup"
+            except (UnsafeInvocation, OSError, subprocess.TimeoutExpired) as error:
+                failure = (type(error).__name__ + ": " + str(error))[:512]
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=2)
+                try:
+                    _, detail = child.communicate(timeout=1)
+                    lines = detail.decode(errors="replace").replace(
+                        "/stage", "[stage]"
+                    ).splitlines()
+                    markers = [
+                        line.split(" link_delta=", 1)[0]
+                        for line in lines
+                        if "AEC_GAP" in line or "AEC_FIXTURE" in line
+                        or "AEC helper FATAL" in line
+                    ]
+                    failure += " stderr=" + " | ".join(markers)[:1500]
+                except (OSError, subprocess.TimeoutExpired):
+                    failure += " stderr=unavailable"
+            finally:
+                if child.stdout is not None:
+                    child.stdout.close()
+                if child.stderr is not None:
+                    child.stderr.close()
+        else:
+            command = [
+                str(script), "--isolated", "--trial-mode",
+                "seq-skew" if case == "seq-skew" else "far-only",
+                "--trial-frames", "10",
+            ]
+            try:
+                result = subprocess.run(
+                    command, env=environment, stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=12, check=False,
+                    preexec_fn=lambda: child_die_with_parent(owner_pid),
+                )
+                exit_code = result.returncode
+                if case == "seq-skew":
+                    if not seq_skew_rejected_and_reaped(exit_code, result.stderr):
+                        failure = "sequence-skew fault not rejected and reaped: " + result.stderr.replace("/stage", "[stage]").split(" link_delta=", 1)[0][:1800]
+                else:
+                    if exit_code != 0:
+                        failure = "normal trial failed: " + " | ".join(
+                            result.stderr.replace("/stage", "[stage]").split(" link_delta=", 1)[:1]
+                        )[:1800]
+                    else:
+                        payload = json.loads(result.stdout)
+                        cleanup_ms = payload.get("cleanup_ms")
+                        if (
+                            payload.get("status") != "NONPHYSICAL_TRIAL_PASS"
+                            or payload.get("frames") != 10
+                            or payload.get("aec_proof") is not False
+                            or payload.get("cleanup_reaped") is not True
+                        ):
+                            failure = "normal trial did not complete with verified cleanup"
+            except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+                failure = type(error).__name__
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        fd_delta = len(os.listdir("/proc/self/fd")) - before_fds
+        thread_delta = len(os.listdir("/proc/self/task")) - before_threads
+        try:
+            scope_absent = not scope_present(scope)
+        except OSError:
+            scope_absent = False
+        if not scope_absent or fd_delta or thread_delta:
+            failure = failure or "scope, FD, or thread baseline not restored"
+        events.append({
+            "cycle": index, "case": case, "exit": exit_code,
+            "elapsed_ms": elapsed_ms, "cleanup_ms": cleanup_ms,
+            "scope_absent": scope_absent,
+            "owned_process_count": 0 if scope_absent else None,
+            "owned_graph_count": 0 if scope_absent else None,
+            "ownership_basis": "owned scope absent after private server reap",
+            "fd_delta": fd_delta,
+            "thread_delta": thread_delta, "failure": failure,
+        })
+        if failure is not None:
+            print(json.dumps({
+                "status": "NOT_DONE", "aec_proof": False,
+                "completed_cycles": index + 1, "events": events,
+            }))
+            return 2
+    print(json.dumps({
+        "status": "NONPHYSICAL_LIFECYCLE_PASS" if cycles == 100 and only_case is None else "NOT_DONE",
+        "aec_proof": False, "completed_cycles": cycles, "events": events,
+    }))
+    return 0 if cycles == 100 and only_case is None else 4
+
+
+def reject_inherited_authority() -> None:
+    lifecycle_fd = os.environ.get("TRANSLATOR_AEC_LIFECYCLE_FD")
+    allowed_fd = None
+    if lifecycle_fd is not None:
+        if re.fullmatch(r"[1-9][0-9]*", lifecycle_fd) is None or int(lifecycle_fd) < 3:
+            raise UnsafeInvocation("invalid AEC lifecycle descriptor")
+        allowed_fd = int(lifecycle_fd)
+        try:
+            mode = os.fstat(allowed_fd).st_mode
+            access = fcntl.fcntl(allowed_fd, fcntl.F_GETFL) & os.O_ACCMODE
+        except OSError as error:
+            raise UnsafeInvocation("invalid AEC lifecycle descriptor") from error
+        if not stat.S_ISFIFO(mode) or access != os.O_WRONLY:
+            raise UnsafeInvocation("invalid AEC lifecycle descriptor")
+    inherited = []
+    for name in os.listdir("/proc/self/fd"):
+        fd = int(name)
+        if fd <= 2 or fd == allowed_fd:
+            continue
+        try:
+            os.fstat(fd)
+        except OSError as error:
+            if error.errno == errno.EBADF:
+                continue
+            raise
+        inherited.append(fd)
+    if inherited:
+        raise UnsafeInvocation(f"unsafe inherited descriptor(s): {sorted(inherited)}")
+    overridden = [name for name in SERVER_OVERRIDES if name in os.environ]
+    if overridden:
+        raise UnsafeInvocation(
+            "unsafe default server override: " + ", ".join(overridden)
+        )
+
+
+def stage_probe(source: Path, destination: Path) -> None:
+    fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_PROBE_BYTES:
+            raise UnsafeInvocation("probe must be a regular file at most 1 MiB")
+        with os.fdopen(fd, "rb", closefd=False) as readable:
+            payload = readable.read(MAX_PROBE_BYTES + 1)
+        if len(payload) > MAX_PROBE_BYTES:
+            raise UnsafeInvocation("probe exceeds 1 MiB")
+        destination.write_bytes(payload)
+    finally:
+        os.close(fd)
+
+
+def stage_speech_sources(stage: Path) -> None:
+    source_dir = (
+        Path(pwd.getpwuid(os.getuid()).pw_dir)
+        / ".local/state/translator-product-evidence-20260923"
+        / "fleurs-validation-asr-20260923"
+    )
+    manifest = {
+        "dataset": "Google FLEURS",
+        "license": "CC-BY-4.0",
+        "attribution": "Conneau et al.",
+        "ffmpeg_version": "6.1.1-3ubuntu5",
+        "resampler": "aresample=48000:resampler=soxr:precision=28",
+        "sources": {},
+    }
+    for role, (name, expected) in SPEECH_SOURCES.items():
+        destination = stage / f"{role}.wav"
+        stage_probe(source_dir / name, destination)
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        if digest != expected:
+            raise UnsafeInvocation(f"frozen public {role} speech source hash mismatch")
+        manifest["sources"][role] = {"id": name, "sha256": digest}
+    (stage / "speech.json").write_text(
+        json.dumps(manifest, sort_keys=True), encoding="ascii"
+    )
+
+
+def isolated_argv(stage: Path, program: list[str]) -> list[str]:
+    """All modes enter exactly this device-free namespace."""
+    return [
+        "/usr/bin/bwrap",
+        "--unshare-all",
+        "--cap-drop", "ALL",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
+        "--symlink", "usr/bin", "/bin",
+        "--tmpfs", "/tmp",
+        "--tmpfs", "/run",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--ro-bind", str(stage), "/stage",
+        "--chdir", "/stage",
+        "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "HOME", "/nonexistent",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        "--setenv", "PARENT_NET_NS", os.readlink("/proc/self/ns/net"),
+        "--setenv", "PARENT_MNT_NS", os.readlink("/proc/self/ns/mnt"),
+        *program,
+    ]
+
+
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as readable:
+        return hashlib.file_digest(readable, "sha256").hexdigest()
+
+
+def stage_executable(source: Path, destination: Path) -> str:
+    fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not (info.st_mode & 0o111):
+            raise UnsafeInvocation("AEC binary must be a regular executable")
+        if info.st_size > 40 * 1024 * 1024:
+            raise UnsafeInvocation("AEC binary exceeds 40 MiB")
+        digest = hashlib.sha256()
+        count = 0
+        with os.fdopen(fd, "rb", closefd=False) as readable:
+            with destination.open("wb") as writable:
+                while block := readable.read(1024 * 1024):
+                    count += len(block)
+                    if count > 40 * 1024 * 1024:
+                        raise UnsafeInvocation("AEC binary exceeds 40 MiB")
+                    writable.write(block)
+                    digest.update(block)
+        destination.chmod(0o500)
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def limit_child() -> None:
+    allowed = sorted(os.sched_getaffinity(0))
+    os.sched_setaffinity(0, allowed[:2])
+    resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--isolated", action="store_true", required=True)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--preflight-only", action="store_true")
+    mode.add_argument("--probe", type=Path)
+    mode.add_argument("--stream", action="store_true")
+    mode.add_argument("--native-backtrace", action="store_true")
+    mode.add_argument("--lifecycle-only", action="store_true")
+    mode.add_argument("--single-check", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--lifecycle-cycles", type=int, default=100,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--lifecycle-case", choices=("cancel", "seq-skew", "normal"),
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--trial-mode", choices=("far-only", "near-only", "wrong-reference", "seq-skew",
+                                                 "speech-far", "speech-near", "speech-wrong-reference",
+                            "meta-gap", "default-header", "prevalid-once"),
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--trial-frames", type=int, default=100, help=argparse.SUPPRESS)
+    parser.add_argument("--fixture-delay-ms", type=int, default=0,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--scorer-mutant", choices=("passthrough", "zero-clean"),
+                        help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--fault-mode",
+        choices=("raw-unlink", "reference-unlink", "output-unlink",
+                 "helper-crash", "server-stop", "corrupt-ipc", "queue-overflow",
+                 "clock-reset", "generation-replacement", "aec-error"),
+        help=argparse.SUPPRESS,
+    )
+    root = Path(__file__).resolve().parents[1]
+    build = root / "target" / "debug"
+    parser.add_argument("--backend-bin", type=Path, default=build / "translator-aec-backend")
+    parser.add_argument("--fixture-bin", type=Path, default=build / "translator-aec-fixture")
+    parser.add_argument("--witness-bin", type=Path, default=build / "translator-aec-witness")
+    args = parser.parse_args()
+    try:
+        reject_inherited_authority()
+        expected_session = os.environ.get("TRANSLATOR_AEC_EXPECTED_SESSION", "-")
+        if expected_session != "-" and (re.fullmatch(r"[0-9a-f]{16}", expected_session) is None
+                                        or int(expected_session, 16) == 0):
+            raise UnsafeInvocation("invalid owner-provided AEC session")
+        if args.trial_mode is not None and args.fault_mode is not None:
+            raise UnsafeInvocation("trial and fault modes must not be combined")
+        if args.scorer_mutant is not None and args.trial_mode is None:
+            raise UnsafeInvocation("scorer mutant requires a full trial")
+        if args.fixture_delay_ms and (
+            args.trial_mode is None or not 0 < args.fixture_delay_ms <= 1000
+        ):
+            raise UnsafeInvocation("fixture delay requires bounded trial")
+        if not any((args.preflight_only, args.probe is not None, args.stream,
+                    args.native_backtrace, args.lifecycle_only,
+                    args.trial_mode is not None, args.fault_mode is not None,
+                    args.single_check)):
+            stage = Path(__file__).with_name("translator-aec-backend-stage")
+            return subprocess.call(["/usr/bin/python3", str(stage), "--isolated"])
+        if args.lifecycle_only:
+            return run_lifecycle_suite(Path(__file__).resolve(), args.lifecycle_cycles,
+                                       args.lifecycle_case)
+        with tempfile.TemporaryDirectory(prefix="translator-aec-") as temporary:
+            stage = Path(temporary)
+            if args.probe is not None:
+                stage_probe(args.probe, stage / "probe.py")
+                program = ["/usr/bin/python3", "-I", "/stage/probe.py"]
+            elif args.preflight_only:
+                program = ["/usr/bin/python3", "-I", "-c", PREFLIGHT]
+            else:
+                identity = {
+                    "backend": stage_executable(args.backend_bin, stage / "backend"),
+                    "fixture": stage_executable(args.fixture_bin, stage / "fixture"),
+                    "witness": stage_executable(args.witness_bin, stage / "witness"),
+                    "aec_plugin": file_sha256(AEC_PLUGIN),
+                }
+                (stage / "identity.json").write_text(
+                    json.dumps(identity, sort_keys=True), encoding="ascii"
+                )
+                if args.trial_mode is not None and args.trial_mode.startswith("speech-"):
+                    stage_speech_sources(stage)
+                (stage / "private.conf").write_text(PRIVATE_CONFIG)
+                (stage / "client.conf").write_text(CLIENT_CONFIG)
+                (stage / "session.py").write_text(SESSION)
+                program = ["/usr/bin/python3", "-I", "/stage/session.py",
+                           "stream" if args.stream else "debug" if args.native_backtrace else
+                           "trial" if args.trial_mode or args.fault_mode else "check",
+                           args.trial_mode or "far-only", str(args.trial_frames),
+                           args.fault_mode or "none", str(args.fixture_delay_ms),
+                           expected_session, args.scorer_mutant or "none"]
+            command = isolated_argv(stage, program)
+            return run_scoped(
+                command, stream=args.stream,
+                quick=args.preflight_only or args.probe is not None,
+            )
+    except (OSError, UnsafeInvocation, subprocess.TimeoutExpired) as error:
+        print(f"AEC isolation unavailable: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -16,11 +16,11 @@ use tokio::{
 use translator_core::AudioDirection;
 
 use crate::{
-    AdmittedDuplex, AecRuntimeAuthority, AudioMixController, AudioMixPatch, AudioOperationGate,
-    AudioOperationLease, DirectionPatch, DirectionRuntimeFailure, DirectionRuntimeStatus,
-    DuplexCompletionObserver, DuplexRunner, DuplexRuntimeError, FactsError, ProviderPatch,
-    RuntimeFactsSource, RuntimeMutationError, RuntimeSnapshot, RuntimeStore, TranslationMixMode,
-    VoiceProfilePatch,
+    AdmittedDuplex, AecRuntimeAuthority, AudioMixController, AudioMixPatch, AudioMixState,
+    AudioOperationGate, AudioOperationLease, DirectionPatch, DirectionRuntimeFailure,
+    DirectionRuntimeStatus, DuplexCompletionObserver, DuplexRunner, DuplexRuntimeError, FactsError,
+    ProviderPatch, RuntimeFactsSource, RuntimeMutationError, RuntimeSnapshot, RuntimeStore,
+    TranslationMixMode, VoiceProfilePatch,
     acoustic_admission::{admit_translation_with_reservation, enabled_directions},
     api::ControlFailure,
     runtime_state::{AudioMixKnowledge, RuntimeStatus},
@@ -46,6 +46,26 @@ pub enum ControlCommand {
 
 pub trait RuntimeMaintenance: Send + Sync {
     fn refresh(&self, store: &RuntimeStore) -> Result<(), ControlFailure>;
+
+    fn refresh_bypass_facts(&self, _store: &RuntimeStore) -> Result<(), ControlFailure> {
+        Err(unavailable())
+    }
+
+    fn verify_bypass_custody(
+        &self,
+        _snapshot: &RuntimeSnapshot,
+        _permit_mic_original: bool,
+    ) -> Result<(), ControlFailure> {
+        Err(unavailable())
+    }
+
+    fn prepare_start(&self, _candidate: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+        Err(unavailable())
+    }
+
+    fn prepare_bypass(&self, _snapshot: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+        Ok(())
+    }
 }
 
 pub struct ControlApplication {
@@ -215,6 +235,7 @@ enum SupervisorState {
     Stopped,
     Running(OwnedRuntime),
     CleanupPending(OwnedRuntime),
+    BypassPending { _lease: AudioOperationLease },
 }
 
 struct OwnedRuntime {
@@ -425,18 +446,29 @@ impl RuntimeSupervisor {
                     code: "translation_already_running",
                 });
             }
-            SupervisorState::CleanupPending(_) => return Err(cleanup_pending()),
+            SupervisorState::CleanupPending(_) | SupervisorState::BypassPending { .. } => {
+                return Err(cleanup_pending());
+            }
         }
         Ok(())
     }
 
-    fn start(&mut self, admitted: AdmittedDuplex, deadline: Instant) -> Result<(), ControlFailure> {
+    fn reserve_start(&self) -> Result<AudioOperationLease, ControlFailure> {
         self.check_start()?;
-        admission_deadline(deadline)?;
-        let lease = self.gate.acquire_production().map_err(|_| ControlFailure {
+        self.gate.acquire_production().map_err(|_| ControlFailure {
             status: StatusCode::CONFLICT,
             code: "audio_operation_busy",
-        })?;
+        })
+    }
+
+    fn start(
+        &mut self,
+        admitted: AdmittedDuplex,
+        lease: AudioOperationLease,
+        deadline: Instant,
+    ) -> Result<(), ControlFailure> {
+        self.check_start()?;
+        admission_deadline(deadline)?;
         let generation = self
             .next_generation
             .checked_add(1)
@@ -452,6 +484,7 @@ impl RuntimeSupervisor {
             Err(failure) => {
                 let (error, cleanup) = failure.into_parts();
                 let Some(runtime) = cleanup else {
+                    self.state = SupervisorState::BypassPending { _lease: lease };
                     return Err(map_start_error(error));
                 };
                 self.state = SupervisorState::CleanupPending(OwnedRuntime {
@@ -481,7 +514,9 @@ impl RuntimeSupervisor {
     ) -> Result<(), ControlFailure> {
         let SupervisorState::Running(active) = &mut self.state else {
             return match self.state {
-                SupervisorState::CleanupPending(_) => Err(cleanup_pending()),
+                SupervisorState::CleanupPending(_) | SupervisorState::BypassPending { .. } => {
+                    Err(cleanup_pending())
+                }
                 SupervisorState::Stopped => Err(ControlFailure {
                     status: StatusCode::CONFLICT,
                     code: "translation_not_running",
@@ -507,6 +542,7 @@ impl RuntimeSupervisor {
     fn stop(&mut self, deadline: Instant) -> Result<(), ControlFailure> {
         let active = match &mut self.state {
             SupervisorState::Stopped => return Ok(()),
+            SupervisorState::BypassPending { .. } => return Ok(()),
             SupervisorState::Running(active) | SupervisorState::CleanupPending(active) => active,
         };
         if active.runtime.stop(deadline).is_err() {
@@ -517,8 +553,35 @@ impl RuntimeSupervisor {
                 code: "translation_stop_failed",
             });
         }
-        self.state = SupervisorState::Stopped;
+        let state = std::mem::replace(&mut self.state, SupervisorState::Stopped);
+        let active = match state {
+            SupervisorState::Running(active) | SupervisorState::CleanupPending(active) => active,
+            _ => unreachable!(),
+        };
+        let OwnedRuntime { _lease, .. } = active;
+        self.state = SupervisorState::BypassPending { _lease };
         Ok(())
+    }
+
+    fn complete_bypass(&mut self) {
+        if matches!(self.state, SupervisorState::BypassPending { .. }) {
+            self.state = SupervisorState::Stopped;
+        }
+    }
+
+    fn reserve_bypass(&mut self) -> Result<(), ControlFailure> {
+        if matches!(self.state, SupervisorState::Stopped) {
+            let lease = self.gate.acquire_production().map_err(|_| ControlFailure {
+                status: StatusCode::CONFLICT,
+                code: "audio_operation_busy",
+            })?;
+            self.state = SupervisorState::BypassPending { _lease: lease };
+        }
+        Ok(())
+    }
+
+    fn native_cleanup_pending(&self) -> bool {
+        matches!(self.state, SupervisorState::CleanupPending(_))
     }
 
     fn cleanup_started(&mut self, generation: u64) -> Option<RuntimeStatus> {
@@ -545,7 +608,7 @@ impl RuntimeSupervisor {
         }
         let mut active = match std::mem::replace(&mut self.state, SupervisorState::Stopped) {
             SupervisorState::Running(active) | SupervisorState::CleanupPending(active) => active,
-            SupervisorState::Stopped => unreachable!(),
+            SupervisorState::Stopped | SupervisorState::BypassPending { .. } => unreachable!(),
         };
         let deadline = active
             .cleanup_deadline
@@ -554,6 +617,9 @@ impl RuntimeSupervisor {
             self.state = SupervisorState::CleanupPending(active);
             Some(RuntimeStatus::CleanupPending)
         } else {
+            self.state = SupervisorState::BypassPending {
+                _lease: active._lease,
+            };
             Some(RuntimeStatus::Failed)
         }
     }
@@ -586,7 +652,7 @@ impl RuntimeSupervisor {
         let state = std::mem::replace(&mut self.state, SupervisorState::Stopped);
         let active = match state {
             SupervisorState::Running(active) | SupervisorState::CleanupPending(active) => active,
-            SupervisorState::Stopped => unreachable!(),
+            SupervisorState::Stopped | SupervisorState::BypassPending { .. } => unreachable!(),
         };
         self.state = SupervisorState::CleanupPending(active);
     }
@@ -597,6 +663,9 @@ impl RuntimeSupervisor {
             SupervisorState::Running(_) | SupervisorState::CleanupPending(_) => {
                 TranslationMixMode::Translating
             }
+            SupervisorState::BypassPending { .. } => TranslationMixMode::Quarantine {
+                mic_original_expected: false,
+            },
         }
     }
 
@@ -604,14 +673,18 @@ impl RuntimeSupervisor {
         match self.state {
             SupervisorState::Stopped => RuntimeStatus::Stopped,
             SupervisorState::Running(_) => RuntimeStatus::Running,
-            SupervisorState::CleanupPending(_) => RuntimeStatus::CleanupPending,
+            SupervisorState::CleanupPending(_) | SupervisorState::BypassPending { .. } => {
+                RuntimeStatus::CleanupPending
+            }
         }
     }
 
     fn running_generation(&self) -> Option<u64> {
         match &self.state {
             SupervisorState::Running(active) => Some(active.generation),
-            SupervisorState::Stopped | SupervisorState::CleanupPending(_) => None,
+            SupervisorState::Stopped
+            | SupervisorState::CleanupPending(_)
+            | SupervisorState::BypassPending { .. } => None,
         }
     }
 }
@@ -816,6 +889,17 @@ impl ControlOwner {
             terminal_seen: _,
         } = self;
         let audio_mix = audio_mix.as_deref();
+        let candidate_services = CandidateServices {
+            facts: facts.as_ref(),
+            aec_authority: aec_authority.as_ref(),
+            audio_mix,
+            maintenance: maintenance.as_ref(),
+        };
+        let bypass_services = BypassServices {
+            facts: facts.as_ref(),
+            maintenance: maintenance.as_ref(),
+            audio_mix,
+        };
         match command {
             ControlCommand::Start => {
                 supervisor.check_start()?;
@@ -833,9 +917,39 @@ impl ControlOwner {
                 }
                 let mut candidate = admitted.snapshot().clone();
                 let aec_protected = admitted.requires_aec_authority();
-                if let Err(error) = supervisor.start(admitted, deadline) {
-                    if supervisor.status() == RuntimeStatus::CleanupPending {
-                        commit_projection(store, RuntimeStatus::CleanupPending, None);
+                let microphone_enabled = enabled_directions(&candidate)?.microphone;
+                let lease = supervisor.reserve_start()?;
+                maintenance.prepare_start(&candidate)?;
+                admission_deadline(deadline)?;
+                if microphone_enabled {
+                    if let Some(audio_mix) = audio_mix {
+                        let mic_original_expected =
+                            candidate.devices.as_ref().is_some_and(|devices| {
+                                devices.acoustic.mode == translator_audio::OutputMode::Headphones
+                                    && candidate.audio_mix.microphone_original_percent > 0
+                            });
+                        if let Err(error) =
+                            audio_mix.reconcile_committed(TranslationMixMode::Quarantine {
+                                mic_original_expected,
+                            })
+                        {
+                            if error.code == "audio_mix_state_unknown" {
+                                commit_projection(
+                                    store,
+                                    RuntimeStatus::Failed,
+                                    Some(AudioMixKnowledge::AudioMixStateUnknown),
+                                );
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                if let Err(error) = supervisor.start(admitted, lease, deadline) {
+                    let mut pending = candidate.clone();
+                    set_status(&mut pending, RuntimeStatus::CleanupPending);
+                    store.commit_admitted_control(pending);
+                    if !supervisor.native_cleanup_pending() {
+                        stop_and_bypass(supervisor, store, bypass_services, false, deadline, None)?;
                     }
                     return Err(error);
                 }
@@ -846,26 +960,22 @@ impl ControlOwner {
                     && let Err(error) =
                         audio_mix.reconcile_committed(TranslationMixMode::Translating)
                 {
-                    let cleanup = supervisor.stop(deadline);
                     *aec_runtime_generation = None;
-                    let knowledge = (error.code == "audio_mix_state_unknown")
-                        .then_some(AudioMixKnowledge::AudioMixStateUnknown);
-                    if cleanup.is_err() || knowledge.is_some() {
+                    if error.code == "audio_mix_state_unknown" {
+                        let cleanup = supervisor.stop(deadline);
                         commit_projection(
                             store,
-                            if cleanup.is_err() {
-                                RuntimeStatus::CleanupPending
-                            } else {
-                                RuntimeStatus::Failed
-                            },
-                            knowledge,
+                            RuntimeStatus::CleanupPending,
+                            Some(AudioMixKnowledge::AudioMixStateUnknown),
                         );
+                        return Err(if cleanup.is_err() {
+                            cleanup_pending()
+                        } else {
+                            error
+                        });
                     }
-                    return Err(if cleanup.is_err() {
-                        cleanup_pending()
-                    } else {
-                        error
-                    });
+                    stop_and_bypass(supervisor, store, bypass_services, false, deadline, None)?;
+                    return Err(error);
                 }
                 set_status(&mut candidate, RuntimeStatus::Running);
                 if audio_mix.is_some() {
@@ -874,17 +984,15 @@ impl ControlOwner {
                 store.commit_admitted_control(candidate);
             }
             ControlCommand::Stop => {
-                stop_and_bypass(supervisor, store, audio_mix, false, deadline)?;
+                stop_and_bypass(supervisor, store, bypass_services, false, deadline, None)?;
                 *aec_runtime_generation = None;
-                maintenance.refresh(store)?;
             }
             ControlCommand::PatchDirection(patch) => {
                 apply_candidate(
                     supervisor,
                     store,
                     store.direction_candidate(patch)?,
-                    facts.as_ref(),
-                    aec_authority.as_ref(),
+                    candidate_services,
                     aec_runtime_generation,
                     deadline,
                 )?;
@@ -894,8 +1002,7 @@ impl ControlOwner {
                     supervisor,
                     store,
                     store.provider_candidate(patch)?,
-                    facts.as_ref(),
-                    aec_authority.as_ref(),
+                    candidate_services,
                     aec_runtime_generation,
                     deadline,
                 )?;
@@ -905,8 +1012,7 @@ impl ControlOwner {
                     supervisor,
                     store,
                     store.voice_candidate(patch)?,
-                    facts.as_ref(),
-                    aec_authority.as_ref(),
+                    candidate_services,
                     aec_runtime_generation,
                     deadline,
                 )?;
@@ -914,16 +1020,69 @@ impl ControlOwner {
             ControlCommand::PatchAudioMix(patch) => {
                 let mut candidate = store.audio_mix_candidate(patch)?;
                 let audio_mix = audio_mix.ok_or_else(audio_mix_unavailable)?;
-                if let Err(error) =
-                    audio_mix.apply_desired(candidate.audio_mix, supervisor.mix_mode())
-                {
-                    return Err(handle_mix_failure(supervisor, store, error, deadline));
+                if supervisor.status() == RuntimeStatus::Stopped {
+                    supervisor.reserve_bypass()?;
+                    if let Err(error) = audio_mix.validate_desired(candidate.audio_mix) {
+                        supervisor.complete_bypass();
+                        return Err(error);
+                    }
+                    stop_and_bypass(
+                        supervisor,
+                        store,
+                        bypass_services,
+                        false,
+                        deadline,
+                        Some(candidate.audio_mix),
+                    )?;
+                } else {
+                    if supervisor.status() == RuntimeStatus::CleanupPending {
+                        return Err(cleanup_pending());
+                    }
+                    if let Err(error) =
+                        audio_mix.apply_desired(candidate.audio_mix, supervisor.mix_mode())
+                    {
+                        return Err(handle_mix_failure(supervisor, store, error, deadline));
+                    }
                 }
                 candidate.audio_mix_knowledge = AudioMixKnowledge::Known;
                 store.commit_control(candidate);
             }
             ControlCommand::ReconcileAudio => {
-                maintenance.refresh(store)?;
+                if supervisor.status() == RuntimeStatus::CleanupPending {
+                    return Err(cleanup_pending());
+                }
+                if supervisor.status() == RuntimeStatus::Stopped {
+                    let _ = audio_mix.ok_or_else(audio_mix_unavailable)?;
+                    stop_and_bypass(supervisor, store, bypass_services, false, deadline, None)?;
+                    return Ok(store.snapshot());
+                }
+                let previous = store.snapshot();
+                let refreshed = maintenance.refresh(store);
+                let current = store.snapshot();
+                let running = supervisor.status() == RuntimeStatus::Running;
+                let microphone_running = running && enabled_directions(&previous)?.microphone;
+                if (running
+                    && (refreshed.is_err()
+                        || current.audio_graph.as_ref().is_none_or(|graph| {
+                            graph.health != translator_audio::GraphHealth::Ready
+                        })
+                        || current.routes.is_none()))
+                    || (microphone_running
+                        && (active_acoustic_path_changed(&previous, &current)
+                            || current
+                                .devices
+                                .as_ref()
+                                .is_none_or(|devices| !devices.acoustic.full_duplex_allowed)))
+                {
+                    return Err(stop_unsafe_runtime(
+                        supervisor,
+                        store,
+                        audio_mix,
+                        aec_runtime_generation,
+                        deadline,
+                    ));
+                }
+                refreshed?;
                 let audio_mix = audio_mix.ok_or_else(audio_mix_unavailable)?;
                 if let Err(error) = audio_mix.reconcile_committed(supervisor.mix_mode()) {
                     return Err(handle_mix_failure(supervisor, store, error, deadline));
@@ -933,25 +1092,9 @@ impl ControlOwner {
                 }
             }
             ControlCommand::RecoverAudioMix => {
-                if let Err(error) = supervisor.stop(deadline) {
-                    commit_projection(store, RuntimeStatus::CleanupPending, None);
-                    return Err(error);
-                }
+                let _ = audio_mix.ok_or_else(audio_mix_unavailable)?;
+                stop_and_bypass(supervisor, store, bypass_services, true, deadline, None)?;
                 *aec_runtime_generation = None;
-                let audio_mix = audio_mix.ok_or_else(audio_mix_unavailable)?;
-                if let Err(error) = audio_mix.recover_committed(TranslationMixMode::Bypass) {
-                    commit_projection(
-                        store,
-                        RuntimeStatus::Failed,
-                        Some(AudioMixKnowledge::AudioMixStateUnknown),
-                    );
-                    return Err(error);
-                }
-                commit_projection(
-                    store,
-                    RuntimeStatus::Stopped,
-                    Some(AudioMixKnowledge::Known),
-                );
             }
         }
         Ok(store.snapshot())
@@ -975,7 +1118,11 @@ impl ControlOwner {
                 TerminalPhase::Completed => finish_terminal(
                     &mut self.supervisor,
                     &self.store,
-                    self.audio_mix.as_deref(),
+                    BypassServices {
+                        facts: self.facts.as_ref(),
+                        maintenance: self.maintenance.as_ref(),
+                        audio_mix: self.audio_mix.as_deref(),
+                    },
                     terminal.generation,
                 ),
             };
@@ -1018,19 +1165,99 @@ impl ControlOwner {
         stop_and_bypass(
             &mut self.supervisor,
             &self.store,
-            self.audio_mix.as_deref(),
+            BypassServices {
+                facts: self.facts.as_ref(),
+                maintenance: self.maintenance.as_ref(),
+                audio_mix: self.audio_mix.as_deref(),
+            },
             recover_unknown,
             deadline,
+            None,
         )
     }
+}
+
+fn stop_unsafe_runtime(
+    supervisor: &mut RuntimeSupervisor,
+    store: &RuntimeStore,
+    audio_mix: Option<&dyn AudioMixController>,
+    aec_runtime_generation: &mut Option<u64>,
+    deadline: Instant,
+) -> ControlFailure {
+    let mix = audio_mix.map(|mix| {
+        mix.reconcile_committed(TranslationMixMode::Quarantine {
+            mic_original_expected: false,
+        })
+    });
+    let stopped = supervisor.stop(deadline);
+    if stopped.is_ok() && audio_mix.is_none() {
+        supervisor.complete_bypass();
+    }
+    *aec_runtime_generation = None;
+    let knowledge = mix.as_ref().map(|result| {
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == "audio_mix_state_unknown")
+        {
+            AudioMixKnowledge::AudioMixStateUnknown
+        } else {
+            AudioMixKnowledge::Known
+        }
+    });
+    commit_projection(
+        store,
+        if supervisor.status() == RuntimeStatus::CleanupPending {
+            RuntimeStatus::CleanupPending
+        } else {
+            RuntimeStatus::Failed
+        },
+        knowledge,
+    );
+    if stopped.is_err() {
+        cleanup_pending()
+    } else if let Some(Err(error)) = mix {
+        error
+    } else {
+        ControlFailure {
+            status: StatusCode::CONFLICT,
+            code: "translation_precondition_failed",
+        }
+    }
+}
+
+fn active_acoustic_path_changed(before: &RuntimeSnapshot, after: &RuntimeSnapshot) -> bool {
+    let (Some(before), Some(after)) = (&before.devices, &after.devices) else {
+        return true;
+    };
+    before.source.health != after.source.health
+        || before.source.selected != after.source.selected
+        || before.source.pinned_name != after.source.pinned_name
+        || before.sink.health != after.sink.health
+        || before.sink.selected != after.sink.selected
+        || before.sink.pinned_name != after.sink.pinned_name
+        || before.acoustic != after.acoustic
+}
+
+#[derive(Clone, Copy)]
+struct CandidateServices<'a> {
+    facts: &'a dyn RuntimeFactsSource,
+    aec_authority: Option<&'a AecRuntimeAuthority>,
+    audio_mix: Option<&'a dyn AudioMixController>,
+    maintenance: &'a dyn RuntimeMaintenance,
+}
+
+#[derive(Clone, Copy)]
+struct BypassServices<'a> {
+    facts: &'a dyn RuntimeFactsSource,
+    maintenance: &'a dyn RuntimeMaintenance,
+    audio_mix: Option<&'a dyn AudioMixController>,
 }
 
 fn apply_candidate(
     supervisor: &mut RuntimeSupervisor,
     store: &RuntimeStore,
     mut candidate: RuntimeSnapshot,
-    facts: &dyn RuntimeFactsSource,
-    aec_authority: Option<&AecRuntimeAuthority>,
+    services: CandidateServices<'_>,
     aec_runtime_generation: &mut Option<u64>,
     deadline: Instant,
 ) -> Result<(), ControlFailure> {
@@ -1039,7 +1266,8 @@ fn apply_candidate(
         return Err(cleanup_pending());
     }
     if supervisor.status() == RuntimeStatus::Running {
-        let admitted = admit_candidate(candidate, facts, aec_authority, deadline)?;
+        let admitted =
+            admit_candidate(candidate, services.facts, services.aec_authority, deadline)?;
         let aec_protected = admitted.requires_aec_authority();
         candidate = admitted.snapshot().clone();
         if let Err(error) = supervisor.reconfigure(admitted, deadline) {
@@ -1051,6 +1279,25 @@ fn apply_candidate(
         *aec_runtime_generation = aec_protected
             .then(|| supervisor.running_generation())
             .flatten();
+        if let Some(audio_mix) = services.audio_mix
+            && let Err(error) = audio_mix.reconcile_committed(TranslationMixMode::Translating)
+        {
+            *aec_runtime_generation = None;
+            stop_and_bypass(
+                supervisor,
+                store,
+                BypassServices {
+                    facts: services.facts,
+                    maintenance: services.maintenance,
+                    audio_mix: Some(audio_mix),
+                },
+                false,
+                deadline,
+                None,
+            )?;
+            commit_projection(store, RuntimeStatus::Failed, Some(AudioMixKnowledge::Known));
+            return Err(error);
+        }
         let changed = changed_directions(&current, &candidate).collect::<Vec<_>>();
         for direction in changed {
             let state = candidate
@@ -1143,7 +1390,7 @@ fn changed_directions<'a>(
 fn finish_terminal(
     supervisor: &mut RuntimeSupervisor,
     store: &RuntimeStore,
-    audio_mix: Option<&dyn AudioMixController>,
+    services: BypassServices<'_>,
     generation: u64,
 ) -> Option<ControlFailure> {
     let status = supervisor.complete(generation)?;
@@ -1151,60 +1398,201 @@ fn finish_terminal(
         commit_projection(store, status, None);
         return None;
     }
-    let error = audio_mix.and_then(|mix| mix.reconcile_committed(TranslationMixMode::Bypass).err());
-    commit_projection(
+    if services.audio_mix.is_none() {
+        supervisor.complete_bypass();
+        commit_projection(store, RuntimeStatus::Failed, None);
+        return None;
+    }
+    match stop_and_bypass(
+        supervisor,
         store,
-        RuntimeStatus::Failed,
-        error
-            .filter(|error| error.code == "audio_mix_state_unknown")
-            .map(|_| AudioMixKnowledge::AudioMixStateUnknown)
-            .or_else(|| audio_mix.map(|_| AudioMixKnowledge::Known)),
-    );
-    error
+        services,
+        false,
+        Instant::now() + crate::RUNTIME_CLEANUP_BUDGET,
+        None,
+    ) {
+        Ok(()) => {
+            commit_projection(store, RuntimeStatus::Failed, None);
+            None
+        }
+        Err(error) => Some(error),
+    }
 }
 
 fn stop_and_bypass(
     supervisor: &mut RuntimeSupervisor,
     store: &RuntimeStore,
-    audio_mix: Option<&dyn AudioMixController>,
+    services: BypassServices<'_>,
     recover_unknown: bool,
     deadline: Instant,
+    desired: Option<AudioMixState>,
 ) -> Result<(), ControlFailure> {
-    if let Err(error) = supervisor.stop(deadline) {
-        commit_projection(store, RuntimeStatus::CleanupPending, None);
-        return Err(error);
+    if supervisor.status() == RuntimeStatus::Stopped && services.audio_mix.is_none() {
+        return Ok(());
     }
-    let result = audio_mix.map_or(Ok(()), |mix| {
-        let result = mix.reconcile_committed(TranslationMixMode::Bypass);
+    supervisor.reserve_bypass()?;
+    let quarantine = services.audio_mix.map(|mix| {
+        let mode = TranslationMixMode::Quarantine {
+            mic_original_expected: false,
+        };
+        let result = mix.reconcile_committed(mode);
         if recover_unknown
             && result
                 .as_ref()
                 .is_err_and(|error| error.code == "audio_mix_state_unknown")
         {
-            mix.recover_committed(TranslationMixMode::Bypass)
+            mix.recover_committed(mode)
         } else {
             result
         }
     });
+    if let Err(error) = supervisor.stop(deadline) {
+        commit_projection(
+            store,
+            RuntimeStatus::CleanupPending,
+            quarantine
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .filter(|error| error.code == "audio_mix_state_unknown")
+                .map(|_| AudioMixKnowledge::AudioMixStateUnknown),
+        );
+        return Err(error);
+    }
+    if services.audio_mix.is_none() {
+        commit_projection(store, RuntimeStatus::CleanupPending, None);
+        services.maintenance.refresh_bypass_facts(store)?;
+        supervisor.complete_bypass();
+        commit_projection(store, RuntimeStatus::Stopped, None);
+        return Ok(());
+    }
+    commit_projection(store, RuntimeStatus::CleanupPending, None);
+    if let Some(Err(error)) = quarantine {
+        if error.code == "audio_mix_state_unknown" {
+            commit_projection(
+                store,
+                RuntimeStatus::CleanupPending,
+                Some(AudioMixKnowledge::AudioMixStateUnknown),
+            );
+        }
+        return Err(error);
+    }
+    let result = if let Some(mix) = services.audio_mix {
+        let mode = verified_bypass_mode(store, services, deadline)?;
+        let result = if let Some(volumes) = desired {
+            mix.apply_desired(volumes, mode)
+        } else {
+            mix.reconcile_committed(mode)
+        };
+        if recover_unknown
+            && result
+                .as_ref()
+                .is_err_and(|error| error.code == "audio_mix_state_unknown")
+        {
+            mix.recover_committed(mode)
+        } else {
+            result
+        }
+    } else {
+        Ok(())
+    };
     match result {
         Ok(()) => {
+            supervisor.complete_bypass();
             commit_projection(
                 store,
                 RuntimeStatus::Stopped,
-                audio_mix.map(|_| AudioMixKnowledge::Known),
+                services.audio_mix.map(|_| AudioMixKnowledge::Known),
             );
             Ok(())
         }
         Err(error) => {
             commit_projection(
                 store,
-                RuntimeStatus::Failed,
+                RuntimeStatus::CleanupPending,
                 (error.code == "audio_mix_state_unknown")
                     .then_some(AudioMixKnowledge::AudioMixStateUnknown),
             );
             Err(error)
         }
     }
+}
+
+fn verified_bypass_mode(
+    store: &RuntimeStore,
+    services: BypassServices<'_>,
+    deadline: Instant,
+) -> Result<TranslationMixMode, ControlFailure> {
+    let (before_repair, _) = admitted_bypass_snapshot(store, services, deadline)?;
+    services.maintenance.prepare_bypass(&before_repair)?;
+    let (current, headphones) = admitted_bypass_snapshot(store, services, deadline)?;
+    let mode = if headphones
+        && services
+            .maintenance
+            .verify_bypass_custody(&current, true)
+            .is_ok()
+    {
+        TranslationMixMode::Bypass
+    } else {
+        services
+            .maintenance
+            .verify_bypass_custody(&current, false)?;
+        TranslationMixMode::MicrophoneMutedBypass
+    };
+    admission_deadline(deadline)?;
+    Ok(mode)
+}
+
+fn admitted_bypass_snapshot(
+    store: &RuntimeStore,
+    services: BypassServices<'_>,
+    deadline: Instant,
+) -> Result<(RuntimeSnapshot, bool), ControlFailure> {
+    services.maintenance.refresh_bypass_facts(store)?;
+    admission_deadline(deadline)?;
+    let current = store.snapshot();
+    let observed = services
+        .facts
+        .inspect(deadline.into_std())
+        .map_err(FactsError::translation_failure)?;
+    admission_deadline(deadline)?;
+    let devices = current.devices.as_ref().ok_or(ControlFailure {
+        status: StatusCode::CONFLICT,
+        code: "translation_precondition_failed",
+    })?;
+    let source_matches = devices.source.health == observed.devices.source.health
+        && devices.source.selected == observed.devices.source.selected
+        && devices.source.pinned_name == observed.devices.source.pinned_name;
+    let sink_matches = devices.sink.health == observed.devices.sink.health
+        && devices.sink.selected == observed.devices.sink.selected
+        && devices.sink.pinned_name == observed.devices.sink.pinned_name;
+    if !source_matches
+        || !sink_matches
+        || devices.acoustic.mode != observed.devices.output_mode
+        || current.routes.is_none()
+        || current
+            .audio_graph
+            .as_ref()
+            .is_none_or(|graph| graph.health != translator_audio::GraphHealth::Ready)
+    {
+        return Err(ControlFailure {
+            status: StatusCode::CONFLICT,
+            code: "translation_precondition_failed",
+        });
+    }
+    let mut candidate = RuntimeSnapshot::default();
+    let headphones = observed.devices.output_mode == translator_audio::OutputMode::Headphones;
+    let microphone = candidate
+        .directions
+        .iter_mut()
+        .find(|direction| direction.direction_id == AudioDirection::Microphone)
+        .ok_or(ControlFailure {
+            status: StatusCode::CONFLICT,
+            code: "translation_precondition_failed",
+        })?;
+    microphone.enabled = false;
+    admit_translation_with_reservation(candidate, observed, None)?;
+    admission_deadline(deadline)?;
+    Ok((current, headphones))
 }
 
 fn handle_mix_failure(
@@ -1214,12 +1602,12 @@ fn handle_mix_failure(
     deadline: Instant,
 ) -> ControlFailure {
     if error.code == "audio_mix_state_unknown" {
-        let status = if supervisor.stop(deadline).is_ok() {
-            RuntimeStatus::Failed
-        } else {
-            RuntimeStatus::CleanupPending
-        };
-        commit_projection(store, status, Some(AudioMixKnowledge::AudioMixStateUnknown));
+        let _ = supervisor.stop(deadline);
+        commit_projection(
+            store,
+            RuntimeStatus::CleanupPending,
+            Some(AudioMixKnowledge::AudioMixStateUnknown),
+        );
     }
     error
 }
@@ -1357,7 +1745,10 @@ const fn audio_mix_unknown() -> ControlFailure {
 #[cfg(test)]
 pub(crate) mod safe_admission_tests {
     use super::*;
-    use std::sync::{Condvar, atomic::AtomicUsize};
+    use std::sync::{
+        Condvar,
+        atomic::{AtomicBool, AtomicUsize},
+    };
     use tokio::sync::broadcast;
     use translator_audio::{
         AecCapability, AudioGraphState, DeviceFacts, DeviceHealth, DeviceSelectionState,
@@ -1422,6 +1813,7 @@ pub(crate) mod safe_admission_tests {
     #[derive(Default)]
     struct Effects {
         maintenance: AtomicUsize,
+        prepares: AtomicUsize,
         starts: AtomicUsize,
         replacements: AtomicUsize,
         stops: AtomicUsize,
@@ -1434,6 +1826,23 @@ pub(crate) mod safe_admission_tests {
             self.0.maintenance.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+
+        fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+            self.refresh(store)
+        }
+
+        fn verify_bypass_custody(
+            &self,
+            _: &RuntimeSnapshot,
+            _: bool,
+        ) -> Result<(), ControlFailure> {
+            Ok(())
+        }
+
+        fn prepare_start(&self, _: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+            self.0.prepares.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     struct Runner(Arc<Effects>);
@@ -1442,6 +1851,74 @@ pub(crate) mod safe_admission_tests {
         fn start(&self, _admitted: AdmittedDuplex, _deadline: Instant) -> crate::DuplexStartResult {
             self.0.starts.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(Active(self.0.clone())))
+        }
+    }
+
+    struct StartOrderRunner {
+        mix_applied: Arc<AtomicBool>,
+        safe_at_start: Arc<AtomicBool>,
+    }
+
+    impl DuplexRunner for StartOrderRunner {
+        fn start(&self, _admitted: AdmittedDuplex, _deadline: Instant) -> crate::DuplexStartResult {
+            self.safe_at_start
+                .store(self.mix_applied.load(Ordering::SeqCst), Ordering::SeqCst);
+            Ok(Box::new(Active(Arc::new(Effects::default()))))
+        }
+    }
+
+    struct StartOrderMix(Arc<AtomicBool>);
+
+    impl AudioMixController for StartOrderMix {
+        fn apply_desired(
+            &self,
+            _volumes: crate::AudioMixState,
+            _mode: TranslationMixMode,
+        ) -> Result<(), ControlFailure> {
+            Ok(())
+        }
+
+        fn reconcile_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            if mode != TranslationMixMode::Bypass {
+                self.0.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        fn recover_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            self.reconcile_committed(mode)
+        }
+    }
+
+    struct ReconfigureMix {
+        translating_calls: Arc<AtomicUsize>,
+        fail_second: bool,
+    }
+
+    impl AudioMixController for ReconfigureMix {
+        fn apply_desired(
+            &self,
+            _: crate::AudioMixState,
+            _: TranslationMixMode,
+        ) -> Result<(), ControlFailure> {
+            Ok(())
+        }
+
+        fn reconcile_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            if mode == TranslationMixMode::Translating {
+                let calls = self.translating_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.fail_second && calls == 2 {
+                    return Err(ControlFailure {
+                        status: StatusCode::CONFLICT,
+                        code: "audio_mix_apply_failed",
+                    });
+                }
+            }
+            Ok(())
+        }
+
+        fn recover_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            self.reconcile_committed(mode)
         }
     }
 
@@ -1488,6 +1965,100 @@ pub(crate) mod safe_admission_tests {
 
     fn deadline() -> Instant {
         Instant::now() + crate::DIRECTION_CLEANUP_BUDGET
+    }
+
+    #[test]
+    fn microphone_start_applies_non_bypass_mix_before_opening_runtime() {
+        let store = RuntimeStore::default();
+        let mix_applied = Arc::new(AtomicBool::new(false));
+        let safe_at_start = Arc::new(AtomicBool::new(false));
+        let mut owner = owner(
+            store,
+            Arc::new(StartOrderRunner {
+                mix_applied: mix_applied.clone(),
+                safe_at_start: safe_at_start.clone(),
+            }),
+            Arc::new(Effects::default()),
+        );
+        owner.audio_mix = Some(Arc::new(StartOrderMix(mix_applied)));
+
+        owner.execute(ControlCommand::Start, deadline()).unwrap();
+        owner.execute(ControlCommand::Stop, deadline()).unwrap();
+
+        assert!(
+            safe_at_start.load(Ordering::SeqCst),
+            "microphone runtime opened before original-mic mix was isolated"
+        );
+    }
+
+    #[test]
+    fn busy_audio_gate_rejects_start_before_route_or_mix_mutation() {
+        let effects = Arc::new(Effects::default());
+        let mix_applied = Arc::new(AtomicBool::new(false));
+        let mut owner = owner(
+            RuntimeStore::default(),
+            Arc::new(Runner(effects.clone())),
+            effects.clone(),
+        );
+        owner.audio_mix = Some(Arc::new(StartOrderMix(mix_applied.clone())));
+        let _calibration = owner
+            .supervisor
+            .gate
+            .acquire_calibration(uuid::Uuid::new_v4())
+            .unwrap();
+
+        assert_eq!(
+            owner
+                .execute(ControlCommand::Start, deadline())
+                .unwrap_err()
+                .code,
+            "audio_operation_busy"
+        );
+        assert_eq!(effects.prepares.load(Ordering::SeqCst), 0);
+        assert_eq!(effects.starts.load(Ordering::SeqCst), 0);
+        assert!(!mix_applied.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn hot_reconfigure_applies_mix_before_commit_and_stops_on_mix_failure() {
+        for fail_second in [false, true] {
+            let store = RuntimeStore::default();
+            let effects = Arc::new(Effects::default());
+            let translating_calls = Arc::new(AtomicUsize::new(0));
+            let mut owner = owner(
+                store.clone(),
+                Arc::new(Runner(effects.clone())),
+                effects.clone(),
+            );
+            owner.audio_mix = Some(Arc::new(ReconfigureMix {
+                translating_calls: translating_calls.clone(),
+                fail_second,
+            }));
+            owner.execute(ControlCommand::Start, deadline()).unwrap();
+            let before = store.snapshot().directions[0].voice_profile.clone();
+            let mut voice = before.clone();
+            voice.gender = translator_core::VoiceGender::Female;
+            let result = owner.execute(
+                ControlCommand::PatchVoice(crate::VoiceProfilePatch {
+                    direction_id: AudioDirection::Microphone,
+                    voice_profile: voice.clone(),
+                }),
+                deadline(),
+            );
+
+            assert_eq!(effects.replacements.load(Ordering::SeqCst), 1);
+            assert_eq!(translating_calls.load(Ordering::SeqCst), 2);
+            if fail_second {
+                assert_eq!(result.unwrap_err().code, "audio_mix_apply_failed");
+                assert_eq!(effects.stops.load(Ordering::SeqCst), 1);
+                assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Failed);
+                assert_eq!(store.snapshot().directions[0].voice_profile, before);
+            } else {
+                assert_eq!(result.unwrap().directions[0].voice_profile, voice);
+                assert_eq!(effects.stops.load(Ordering::SeqCst), 0);
+                owner.execute(ControlCommand::Stop, deadline()).unwrap();
+            }
+        }
     }
 
     struct BlockingInspector {
@@ -1632,7 +2203,9 @@ pub(crate) mod safe_admission_tests {
                 },
             },
         };
-        coordinator.publish(&challenge, input, true, true).unwrap();
+        coordinator
+            .publish(&challenge, input.into(), true, true)
+            .unwrap();
         assert!(matches!(
             coordinator.status(),
             crate::AecProofStatus::Validated { .. }
@@ -2745,6 +3318,7 @@ mod corrective_mailbox_tests {
             gate.clone(),
             Arc::new(CompletionMailbox { sender }),
         );
+        let lease = supervisor.reserve_start().unwrap();
         supervisor
             .start(
                 admit_translation(
@@ -2752,6 +3326,7 @@ mod corrective_mailbox_tests {
                     super::safe_admission_tests::ready_facts(),
                 )
                 .unwrap(),
+                lease,
                 Instant::now() + Duration::from_secs(4),
             )
             .unwrap();
@@ -2789,6 +3364,8 @@ mod corrective_mailbox_tests {
             state.deadlines.lock().unwrap().as_slice(),
             [admitted_deadline, retry_deadline]
         );
+        assert_eq!(gate.state(), crate::AudioOperationState::Production);
+        supervisor.complete_bypass();
         assert_eq!(gate.state(), crate::AudioOperationState::Idle);
     }
 
@@ -2943,6 +3520,22 @@ mod corrective_mailbox_tests {
         fn refresh(&self, _store: &RuntimeStore) -> Result<(), ControlFailure> {
             Ok(())
         }
+
+        fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+            self.refresh(store)
+        }
+
+        fn verify_bypass_custody(
+            &self,
+            _: &RuntimeSnapshot,
+            _: bool,
+        ) -> Result<(), ControlFailure> {
+            Ok(())
+        }
+
+        fn prepare_start(&self, _: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+            Ok(())
+        }
     }
 
     impl RuntimeFactsSource for NoopFacts {
@@ -3029,6 +3622,13 @@ mod corrective_mailbox_tests {
             "translation_controller_unavailable"
         );
         assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while mix.0.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the accepted bypass transaction must finish after actor join abort");
         assert_eq!(
             mix.0.load(Ordering::SeqCst),
             1,
@@ -3075,12 +3675,15 @@ mod corrective_mailbox_tests {
         assert_eq!(state.drops.load(Ordering::SeqCst), 0);
         assert_eq!(gate.state(), crate::AudioOperationState::Production);
 
-        lock_recovering(&application._owner)
+        let mut owner = lock_recovering(&application._owner);
+        owner
             .supervisor
             .stop(Instant::now() + crate::RUNTIME_CLEANUP_BUDGET)
             .expect("the resource-free fixture owner must remain explicitly drainable");
         assert_eq!(state.calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.state(), crate::AudioOperationState::Production);
+        owner.supervisor.complete_bypass();
         assert_eq!(gate.state(), crate::AudioOperationState::Idle);
     }
 
@@ -3129,12 +3732,15 @@ mod corrective_mailbox_tests {
             RuntimeStatus::CleanupPending
         );
 
-        lock_recovering(&application._owner)
+        let mut owner = lock_recovering(&application._owner);
+        owner
             .supervisor
             .stop(Instant::now() + crate::RUNTIME_CLEANUP_BUDGET)
             .expect("the resource-free cleanup owner must remain explicitly drainable");
         assert_eq!(state.calls.load(Ordering::SeqCst), 2);
         assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.state(), crate::AudioOperationState::Production);
+        owner.supervisor.complete_bypass();
         assert_eq!(gate.state(), crate::AudioOperationState::Idle);
     }
 

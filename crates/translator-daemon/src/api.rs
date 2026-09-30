@@ -124,6 +124,10 @@ pub trait ManualRouteController: Send + Sync {
 }
 
 pub trait AudioMixController: Send + Sync {
+    fn validate_desired(&self, _volumes: AudioMixState) -> Result<(), ControlFailure> {
+        Ok(())
+    }
+
     fn apply_desired(
         &self,
         volumes: AudioMixState,

@@ -21,7 +21,7 @@ use tokio::{
 };
 use translator_audio::{
     BoundedPcmQueue, CaptureEvent, PcmFrame, PulsePcmCapture, PulsePcmCommand, PulsePcmPlayback,
-    SpeechSegmenter, VoiceDetector, WebRtcVoiceDetector,
+    PulsePlaybackRegistration, SpeechSegmenter, VoiceDetector, WebRtcVoiceDetector,
 };
 use translator_core::{AudioDirection, TranslationMode};
 use translator_ipc::{
@@ -619,6 +619,22 @@ impl ProcessDuplexConfig {
 pub struct ProcessDuplexRunner {
     config: ProcessDuplexConfig,
     observer: Arc<dyn DuplexRuntimeObserver>,
+    playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackRegistrationPhase {
+    StartMuted,
+    Running,
+}
+
+pub trait PlaybackMixAuthority: Send + Sync {
+    fn admit_registered(
+        &self,
+        registration: &PulsePlaybackRegistration,
+        phase: PlaybackRegistrationPhase,
+        deadline: std::time::Instant,
+    ) -> Result<(), DuplexRuntimeError>;
 }
 
 enum StartAck {
@@ -632,6 +648,7 @@ impl ProcessDuplexRunner {
         Self {
             config,
             observer: Arc::new(NoopDuplexRuntimeObserver),
+            playback_mix_authority: None,
         }
     }
 
@@ -639,7 +656,16 @@ impl ProcessDuplexRunner {
         config: ProcessDuplexConfig,
         observer: Arc<dyn DuplexRuntimeObserver>,
     ) -> Self {
-        Self { config, observer }
+        Self {
+            config,
+            observer,
+            playback_mix_authority: None,
+        }
+    }
+
+    pub fn with_playback_mix_authority(mut self, authority: Arc<dyn PlaybackMixAuthority>) -> Self {
+        self.playback_mix_authority = Some(authority);
+        self
     }
 
     fn start_launch(
@@ -650,6 +676,7 @@ impl ProcessDuplexRunner {
     ) -> DuplexStartResult {
         let config = self.config.clone();
         let observer = self.observer.clone();
+        let playback_mix_authority = self.playback_mix_authority.clone();
         let (stop_sender, stop_receiver) = watch::channel(None);
         let (command_sender, command_receiver) = mpsc::channel(1);
         let (ack_sender, ack_receiver) = std_mpsc::sync_channel(1);
@@ -671,6 +698,7 @@ impl ProcessDuplexRunner {
                             command_receiver,
                             ack_sender,
                             observer,
+                            playback_mix_authority,
                             async_completion.as_ref(),
                             deadline,
                         ),
@@ -1075,6 +1103,7 @@ struct PreparedDirection {
     capture: PulsePcmCapture,
     playback: Option<PulsePcmPlayback>,
     playback_reusable: bool,
+    playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
     runtime_generation: Uuid,
 }
 
@@ -1298,30 +1327,39 @@ async fn run_process_duplex(
     commands: mpsc::Receiver<RuntimeCommand>,
     ack: std_mpsc::SyncSender<StartAck>,
     observer: Arc<dyn DuplexRuntimeObserver>,
+    playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
     completion: Option<&(u64, Arc<dyn DuplexCompletionObserver>)>,
     deadline: Instant,
 ) -> Result<(), DuplexRuntimeError> {
     let lifecycle = completion.map(|(generation, observer)| (*generation, observer.clone()));
-    let coordinator =
-        match DuplexCoordinator::start(config, launch, observer, lifecycle, deadline).await {
-            Ok(coordinator) => coordinator,
-            Err(failure) => {
-                let CoordinatorStartFailure { error, cleanup } = failure;
-                let Some(coordinator) = cleanup else {
-                    let _ = ack.send(StartAck::Rejected(error));
-                    return Err(error);
-                };
-                let _ = ack.send(StartAck::CleanupPending(error));
-                return run_coordinator(
-                    coordinator,
-                    stop,
-                    commands,
-                    completion.cloned(),
-                    Some(error),
-                )
-                .await;
-            }
-        };
+    let coordinator = match DuplexCoordinator::start(
+        config,
+        launch,
+        observer,
+        playback_mix_authority,
+        lifecycle,
+        deadline,
+    )
+    .await
+    {
+        Ok(coordinator) => coordinator,
+        Err(failure) => {
+            let CoordinatorStartFailure { error, cleanup } = failure;
+            let Some(coordinator) = cleanup else {
+                let _ = ack.send(StartAck::Rejected(error));
+                return Err(error);
+            };
+            let _ = ack.send(StartAck::CleanupPending(error));
+            return run_coordinator(
+                coordinator,
+                stop,
+                commands,
+                completion.cloned(),
+                Some(error),
+            )
+            .await;
+        }
+    };
     let _ = ack.send(StartAck::Ready);
     run_coordinator(coordinator, stop, commands, completion.cloned(), None).await
 }
@@ -1442,6 +1480,7 @@ impl DuplexCoordinator<ProcessSidecarRuntime, ProcessDirectionEffects> {
         config: ProcessDuplexConfig,
         desired: DuplexLaunch,
         observer: Arc<dyn DuplexRuntimeObserver>,
+        playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
         lifecycle: Option<(u64, Arc<dyn DuplexCompletionObserver>)>,
         deadline: Instant,
     ) -> Result<Self, CoordinatorStartFailure> {
@@ -1455,7 +1494,10 @@ impl DuplexCoordinator<ProcessSidecarRuntime, ProcessDirectionEffects> {
             error: DuplexRuntimeError::StartFailed,
             cleanup: None,
         })?;
-        let effects = ProcessDirectionEffects::new(config.clone());
+        let effects = ProcessDirectionEffects {
+            config: config.clone(),
+            playback_mix_authority,
+        };
         let mut coordinator = Self::with_dependencies(
             config,
             desired,
@@ -2586,11 +2628,16 @@ fn next_fault_delay(
 #[derive(Clone)]
 struct ProcessDirectionEffects {
     config: ProcessDuplexConfig,
+    playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
 }
 
 impl ProcessDirectionEffects {
+    #[cfg(test)]
     fn new(config: ProcessDuplexConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            playback_mix_authority: None,
+        }
     }
 
     async fn prepare_with_pcm_spawners<C, P>(
@@ -2713,7 +2760,7 @@ impl ProcessDirectionEffects {
                 FaultScope::Local
             })?,
         );
-        tracing::info!(event = "direction_prepare_ready", direction = ?direction);
+        tracing::info!(event = "direction_pcm_spawned", direction = ?direction);
         Ok(())
     }
 }
@@ -2752,7 +2799,33 @@ impl DirectionEffects for ProcessDirectionEffects {
             PulsePcmCapture::spawn,
             PulsePcmPlayback::spawn,
         )
-        .await
+        .await?;
+        let registration = owner
+            .playback
+            .as_mut()
+            .ok_or(FaultScope::Local)?
+            .wait_registered_muted(deadline.into_std())
+            .await
+            .map_err(|_| {
+                direction_start_error(owner.launch.runtime.direction, "playback_registration");
+                FaultScope::Local
+            })?;
+        let authority = self.playback_mix_authority.as_ref().ok_or_else(|| {
+            direction_start_error(owner.launch.runtime.direction, "playback_mix_authority");
+            FaultScope::Local
+        })?;
+        authority
+            .admit_registered(
+                &registration,
+                PlaybackRegistrationPhase::StartMuted,
+                deadline.into_std(),
+            )
+            .map_err(|error| {
+                tracing::error!(event = "playback_admission_failed", error = ?error);
+                FaultScope::Local
+            })?;
+        tracing::info!(event = "direction_prepare_ready", direction = ?owner.launch.runtime.direction);
+        Ok(())
     }
 
     fn finish(&self, mut owner: Self::Acquisition) -> Result<Self::Prepared, Self::Acquisition> {
@@ -2778,6 +2851,7 @@ impl DirectionEffects for ProcessDirectionEffects {
             capture,
             playback: Some(playback),
             playback_reusable: true,
+            playback_mix_authority: self.playback_mix_authority.clone(),
             runtime_generation,
         })
     }
@@ -3456,6 +3530,43 @@ async fn run_direction_loop(
                             ))?,
                         );
                         direction.playback_reusable = true;
+                        let admission_deadline = watchdog_phase_deadline(&direction.session)
+                            .unwrap_or_else(|| Instant::now() + HOT_IO_LIVENESS_TIMEOUT)
+                            .min(Instant::now() + HOT_IO_LIVENESS_TIMEOUT);
+                        let admitted = await_hot_io(
+                            HotIoKind::PlaybackWrite,
+                            stop,
+                            Some(admission_deadline),
+                            async {
+                                let registration = direction.playback.as_mut()
+                                    .expect("new playback is owned")
+                                    .wait_registered_muted(admission_deadline.into_std())
+                                    .await
+                                    .map_err(|_| DuplexRuntimeError::StartFailed)?;
+                                direction.playback_mix_authority.as_ref()
+                                    .ok_or(DuplexRuntimeError::StartFailed)?
+                                    .admit_registered(
+                                        &registration,
+                                        PlaybackRegistrationPhase::Running,
+                                        admission_deadline.into_std(),
+                                    )
+                            },
+                        ).await;
+                        match admitted {
+                            HotIoResult::Completed(Ok(())) => {}
+                            HotIoResult::Stopped { stop, .. } => {
+                                return Ok(DirectionOutcome::Stopped(stop));
+                            }
+                            HotIoResult::Completed(Err(_))
+                            | HotIoResult::TimedOut { .. }
+                            | HotIoResult::NotReusable { .. } => {
+                                return Err(direction_runtime_error(
+                                    direction.launch.runtime.direction,
+                                    "playback_respawn_admission",
+                                    DirectionFailureOrigin::PcmPlayback,
+                                ));
+                            }
+                        }
                     }
                     let observed_monotonic_ns = match write_playback_frame(
                         direction,
@@ -5033,10 +5144,12 @@ pub(crate) mod tests {
             token: "ab".repeat(32),
         };
         effects
-            .prepare(
+            .prepare_with_pcm_spawners(
                 &mut owner,
                 &generation,
                 Instant::now() + Duration::from_secs(3),
+                PulsePcmCapture::spawn,
+                PulsePcmPlayback::spawn,
             )
             .await
             .unwrap();

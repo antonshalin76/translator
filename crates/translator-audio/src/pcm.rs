@@ -1,5 +1,10 @@
-use std::{collections::VecDeque, process::Stdio, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -537,6 +542,41 @@ pub struct PulsePcmCommand {
     operation: PulsePcmOperation,
     program: &'static str,
     arguments: Vec<String>,
+    playback_identity: Option<PlaybackIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlaybackIdentity {
+    session_id: Uuid,
+    device: String,
+    stream_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulsePlaybackRegistration {
+    index: u32,
+    session_id: Uuid,
+    stream_name: String,
+    device: String,
+    process_id: u32,
+}
+
+impl PulsePlaybackRegistration {
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+    pub const fn session_id(&self) -> Uuid {
+        self.session_id
+    }
+    pub fn stream_name(&self) -> &str {
+        &self.stream_name
+    }
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub const fn process_id(&self) -> u32 {
+        self.process_id
+    }
 }
 
 impl PulsePcmCommand {
@@ -545,6 +585,21 @@ impl PulsePcmCommand {
     }
 
     pub fn playback(device: &str, stream_name: &str) -> Self {
+        let mut command = Self::new(PulsePcmOperation::Playback, "pacat", device, stream_name);
+        command.arguments.push("--volume=0".to_owned());
+        let session_id = Uuid::new_v4();
+        command.arguments.push(format!(
+            "--property=translator.playback_session={session_id}"
+        ));
+        command.playback_identity = Some(PlaybackIdentity {
+            session_id,
+            device: device.to_owned(),
+            stream_name: stream_name.to_owned(),
+        });
+        command
+    }
+
+    pub fn round_trip_monitor_playback(device: &str, stream_name: &str) -> Self {
         Self::new(PulsePcmOperation::Playback, "pacat", device, stream_name)
     }
 
@@ -598,6 +653,7 @@ impl PulsePcmCommand {
                 "--property=translator.owner=true".to_owned(),
                 "--property=media.role=communication".to_owned(),
             ],
+            playback_identity: None,
         }
     }
 
@@ -607,6 +663,12 @@ impl PulsePcmCommand {
 
     pub fn arguments(&self) -> &[String] {
         &self.arguments
+    }
+
+    pub fn playback_session(&self) -> Option<Uuid> {
+        self.playback_identity
+            .as_ref()
+            .map(|identity| identity.session_id)
     }
 }
 
@@ -620,6 +682,8 @@ pub enum PulsePcmError {
     Capture,
     #[error("PCM playback failed")]
     Playback,
+    #[error("PCM playback stream registration could not be confirmed")]
+    Registration,
     #[error("PCM worker could not be stopped")]
     Stop,
 }
@@ -697,6 +761,7 @@ impl PulsePcmCapture {
 pub struct PulsePcmPlayback {
     child: Child,
     input: Option<ChildStdin>,
+    playback_identity: Option<PlaybackIdentity>,
 }
 
 impl PulsePcmPlayback {
@@ -716,7 +781,54 @@ impl PulsePcmPlayback {
         Ok(Self {
             child,
             input: Some(input),
+            playback_identity: command.playback_identity.clone(),
         })
+    }
+
+    pub async fn wait_registered_muted(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<PulsePlaybackRegistration, PulsePcmError> {
+        let identity = self
+            .playback_identity
+            .as_ref()
+            .ok_or(PulsePcmError::Registration)?;
+        let pid = self.child.id().ok_or(PulsePcmError::Registration)?;
+        loop {
+            if Instant::now() >= deadline
+                || self
+                    .child
+                    .try_wait()
+                    .map_err(|_| PulsePcmError::Registration)?
+                    .is_some()
+            {
+                return Err(PulsePcmError::Registration);
+            }
+            let inputs: Vec<RawPlaybackInput> =
+                pactl_json(&["--format=json", "list", "sink-inputs"], deadline).await?;
+            if inputs.iter().any(|input| {
+                input
+                    .properties
+                    .get("translator.playback_session")
+                    .is_some_and(|value| value == &identity.session_id.to_string())
+            }) {
+                let sinks: Vec<RawPlaybackSink> =
+                    pactl_json(&["--format=json", "list", "sinks"], deadline).await?;
+                let registration = find_playback_registration(identity, pid, &inputs, &sinks)?
+                    .ok_or(PulsePcmError::Registration)?;
+                if self
+                    .child
+                    .try_wait()
+                    .map_err(|_| PulsePcmError::Registration)?
+                    .is_some()
+                {
+                    return Err(PulsePcmError::Registration);
+                }
+                return Ok(registration);
+            }
+            let next_probe = (Instant::now() + Duration::from_millis(20)).min(deadline);
+            tokio::time::sleep_until(next_probe.into()).await;
+        }
     }
 
     pub async fn write_frame(&mut self, frame: &PcmFrame) -> Result<(), PulsePcmError> {
@@ -758,6 +870,105 @@ impl PulsePcmPlayback {
     pub async fn stop(&mut self) -> Result<(), PulsePcmError> {
         stop_child(&mut self.child).await
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlaybackInput {
+    index: u32,
+    sink: Option<u32>,
+    #[serde(default)]
+    channel_map: String,
+    #[serde(default)]
+    volume: HashMap<String, RawPlaybackVolume>,
+    #[serde(default)]
+    properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlaybackVolume {
+    value: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlaybackSink {
+    index: u32,
+    name: String,
+}
+
+fn find_playback_registration(
+    identity: &PlaybackIdentity,
+    process_id: u32,
+    inputs: &[RawPlaybackInput],
+    sinks: &[RawPlaybackSink],
+) -> Result<Option<PulsePlaybackRegistration>, PulsePcmError> {
+    let mut matched = inputs.iter().filter(|input| {
+        input.properties.get("translator.playback_session")
+            == Some(&identity.session_id.to_string())
+    });
+    let Some(input) = matched.next() else {
+        return Ok(None);
+    };
+    if matched.next().is_some()
+        || input.properties.get("translator.owner").map(String::as_str) != Some("true")
+        || input.properties.get("application.name").map(String::as_str) != Some("translator-daemon")
+        || input.properties.get("application.process.id") != Some(&process_id.to_string())
+        || input.properties.get("media.name") != Some(&identity.stream_name)
+    {
+        return Err(PulsePcmError::Registration);
+    }
+    let sink = input.sink.ok_or(PulsePcmError::Registration)?;
+    if sinks
+        .iter()
+        .filter(|candidate| candidate.index == sink)
+        .map(|candidate| candidate.name.as_str())
+        .collect::<Vec<_>>()
+        != [identity.device.as_str()]
+    {
+        return Err(PulsePcmError::Registration);
+    }
+    let channels: Vec<_> = input.channel_map.split(',').collect();
+    let unique: HashSet<_> = channels.iter().copied().collect();
+    if channels.is_empty()
+        || channels.iter().any(|channel| channel.is_empty())
+        || channels.len() != unique.len()
+        || channels.len() != input.volume.len()
+        || channels.iter().any(|channel| {
+            input
+                .volume
+                .get(*channel)
+                .is_none_or(|volume| volume.value != 0)
+        })
+    {
+        return Err(PulsePcmError::Registration);
+    }
+    Ok(Some(PulsePlaybackRegistration {
+        index: input.index,
+        session_id: identity.session_id,
+        stream_name: identity.stream_name.clone(),
+        device: identity.device.clone(),
+        process_id,
+    }))
+}
+
+async fn pactl_json<T: for<'de> Deserialize<'de>>(
+    args: &[&str],
+    deadline: Instant,
+) -> Result<T, PulsePcmError> {
+    let output = tokio::time::timeout_at(
+        deadline.into(),
+        Command::new("pactl")
+            .args(args)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| PulsePcmError::Registration)?
+    .map_err(|_| PulsePcmError::Registration)?;
+    if !output.status.success() {
+        return Err(PulsePcmError::Registration);
+    }
+    serde_json::from_slice(&output.stdout).map_err(|_| PulsePcmError::Registration)
 }
 
 async fn stop_child(child: &mut Child) -> Result<(), PulsePcmError> {
@@ -925,7 +1136,97 @@ mod tests {
         PulsePcmPlayback {
             child,
             input: Some(input),
+            playback_identity: None,
         }
+    }
+
+    #[test]
+    fn production_playback_spawns_have_distinct_registration_ids() {
+        let first = PulsePcmCommand::playback("translator_mic_out", "translator-outgoing-playback");
+        let second =
+            PulsePcmCommand::playback("translator_mic_out", "translator-outgoing-playback");
+        assert_ne!(first.playback_session(), second.playback_session());
+        for command in [&first, &second] {
+            let session = command.playback_session().unwrap();
+            assert!(
+                command
+                    .arguments()
+                    .contains(&format!("--property=translator.playback_session={session}"))
+            );
+            assert!(command.arguments().contains(&"--volume=0".to_owned()));
+        }
+    }
+
+    #[test]
+    fn round_trip_monitor_is_not_a_muted_production_translation_stream() {
+        let monitor = PulsePcmCommand::round_trip_monitor_playback(
+            "alsa_output.private_monitor",
+            "translator-round-trip-english-monitor",
+        );
+        assert_eq!(monitor.playback_session(), None);
+        assert!(!monitor.arguments().contains(&"--volume=0".to_owned()));
+        assert!(
+            monitor
+                .arguments()
+                .contains(&"--device=alsa_output.private_monitor".to_owned())
+        );
+    }
+
+    #[test]
+    fn registration_requires_exact_session_process_sink_and_zero_volume() {
+        let command =
+            PulsePcmCommand::playback("translator_mic_out", "translator-outgoing-playback");
+        let identity = command.playback_identity.as_ref().unwrap();
+        let pid = 421u32;
+        let input = |session: Uuid, volume: u32| {
+            serde_json::json!({
+                "index": 9,
+                "sink": 7,
+                "channel_map": "mono",
+                "volume": {"mono": {"value": volume}},
+                "properties": {
+                    "translator.playback_session": session.to_string(),
+                    "translator.owner": "true",
+                    "application.name": "translator-daemon",
+                    "application.process.id": pid.to_string(),
+                    "media.name": "translator-outgoing-playback"
+                }
+            })
+        };
+        let sinks: Vec<RawPlaybackSink> = serde_json::from_value(serde_json::json!([
+            {"index": 7, "name": "translator_mic_out"}
+        ]))
+        .unwrap();
+        let valid: Vec<RawPlaybackInput> =
+            serde_json::from_value(serde_json::json!([input(identity.session_id, 0)])).unwrap();
+        assert_eq!(
+            find_playback_registration(identity, pid, &valid, &sinks)
+                .unwrap()
+                .unwrap()
+                .index(),
+            9
+        );
+        let other: Vec<RawPlaybackInput> =
+            serde_json::from_value(serde_json::json!([input(Uuid::new_v4(), 0)])).unwrap();
+        assert!(
+            find_playback_registration(identity, pid, &other, &sinks)
+                .unwrap()
+                .is_none()
+        );
+        let audible: Vec<RawPlaybackInput> =
+            serde_json::from_value(serde_json::json!([input(identity.session_id, 65536)])).unwrap();
+        assert!(find_playback_registration(identity, pid, &audible, &sinks).is_err());
+        let duplicate: Vec<RawPlaybackInput> = serde_json::from_value(serde_json::json!([
+            input(identity.session_id, 0),
+            input(identity.session_id, 0)
+        ]))
+        .unwrap();
+        assert!(find_playback_registration(identity, pid, &duplicate, &sinks).is_err());
+        let wrong_sink: Vec<RawPlaybackSink> = serde_json::from_value(serde_json::json!([
+            {"index": 7, "name": "not_translator_mic_out"}
+        ]))
+        .unwrap();
+        assert!(find_playback_registration(identity, pid, &valid, &wrong_sink).is_err());
     }
 
     #[test]

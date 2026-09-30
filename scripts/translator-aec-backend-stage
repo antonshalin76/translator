@@ -1,0 +1,694 @@
+#!/usr/bin/python3
+"""One frozen, sequential, device-free acceptance matrix for the native AEC stage."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import pwd
+import re
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNNER = ROOT / "scripts/translator-aec-backend-check"
+BACKEND = ROOT / "target/debug/translator-aec-backend"
+FIXTURE = ROOT / "target/debug/translator-aec-fixture"
+WITNESS = ROOT / "target/debug/translator-aec-witness"
+PLUGIN = Path("/usr/lib/x86_64-linux-gnu/spa-0.2/aec/libspa-aec-webrtc.so")
+LIBRARIES = (Path("/usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0"),)
+GI_MODULE = Path("/usr/lib/python3/dist-packages/gi")
+GI_FILES = tuple(sorted(path for path in GI_MODULE.rglob("*") if path.suffix in (".py", ".so")))
+GI_TYPELIBS = tuple(
+    Path("/usr/lib/x86_64-linux-gnu/girepository-1.0") / f"{name}-2.0.typelib"
+    for name in ("GLib", "GObject", "Gio")
+)
+GI_LIBRARIES = tuple(
+    Path("/usr/lib/x86_64-linux-gnu") / f"lib{name}-2.0.so.0"
+    for name in ("glib", "gobject", "gio")
+)
+DYNAMIC_MODULES = (
+    *(
+        Path("/usr/lib/x86_64-linux-gnu/pipewire-0.3") / f"libpipewire-module-{name}.so"
+        for name in (
+            "protocol-native",
+            "profiler",
+            "metadata",
+            "spa-node-factory",
+            "client-node",
+            "access",
+            "adapter",
+            "link-factory",
+        )
+    ),
+    Path("/usr/lib/x86_64-linux-gnu/spa-0.2/audioconvert/libspa-audioconvert.so"),
+    Path("/usr/lib/x86_64-linux-gnu/spa-0.2/support/libspa-support.so"),
+)
+EXECUTABLES = (
+    Path("/usr/bin/pipewire"),
+    Path("/usr/bin/pw-link"),
+    Path("/usr/bin/bwrap"),
+    Path("/usr/bin/systemd-run"),
+    Path("/usr/bin/python3"),
+    Path("/usr/bin/ffmpeg"),
+)
+SOURCES = (
+    RUNNER,
+    Path(__file__),
+    ROOT / "crates/translator-aec-backend/build.rs",
+    ROOT / "crates/translator-aec-backend/src/native.c",
+    ROOT / "crates/translator-aec-backend/src/fixture.c",
+    ROOT / "crates/translator-aec-backend/src/witness.c",
+    ROOT / "crates/translator-audio/src/aec_backend.rs",
+    ROOT / "crates/translator-audio/tests/aec_backend_wire.rs",
+    ROOT / "crates/translator-daemon/src/aec_backend_session.rs",
+    ROOT / "crates/translator-daemon/tests/aec_backend_session.rs",
+    ROOT / "Cargo.lock",
+)
+
+
+def sha256_file(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def frozen_inputs() -> dict[str, str]:
+    runner = runpy.run_path(str(RUNNER), run_name="aec_stage_freeze")
+    paths = {
+        **{f"binary:{p.name}": p for p in (BACKEND, FIXTURE, WITNESS)},
+        "plugin": PLUGIN,
+        **{f"dlopen:{p.name}": p for p in DYNAMIC_MODULES},
+        **{f"runtime:{p.name}": p for p in (*LIBRARIES, *EXECUTABLES)},
+        **{f"gi:{p.relative_to(GI_MODULE)}": p for p in GI_FILES},
+        **{f"typelib:{p.name}": p for p in GI_TYPELIBS},
+        **{f"gio-lib:{p.name}": p for p in GI_LIBRARIES},
+        **{f"source:{p.relative_to(ROOT)}": p for p in SOURCES},
+    }
+    tests = [
+        path
+        for path in (ROOT / "target/debug/deps").glob("aec_backend_session-*")
+        if path.is_file() and os.access(path, os.X_OK)
+    ]
+    if not tests:
+        raise RuntimeError("prebuilt native owner test executable missing")
+    paths.update({f"owner-test:{path.name}": path for path in tests})
+    speech_dir = (
+        Path(pwd.getpwuid(os.getuid()).pw_dir)
+        / ".local/state/translator-product-evidence-20260923"
+        / "fleurs-validation-asr-20260923"
+    )
+    speech_sources = runner["SPEECH_SOURCES"]
+    for role, (name, expected) in speech_sources.items():
+        source = speech_dir / name
+        if sha256_file(source) != expected:
+            raise RuntimeError("pinned speech source hash mismatch: " + role)
+        paths[f"speech:{role}"] = source
+    if len(paths) != len(
+        (
+            BACKEND,
+            FIXTURE,
+            WITNESS,
+            PLUGIN,
+            *LIBRARIES,
+            *DYNAMIC_MODULES,
+            *EXECUTABLES,
+            *GI_FILES,
+            *GI_TYPELIBS,
+            *GI_LIBRARIES,
+            *SOURCES,
+            *tests,
+            *speech_sources,
+        )
+    ):
+        raise RuntimeError("frozen AEC input names collide")
+    for artifact in (
+        BACKEND,
+        FIXTURE,
+        WITNESS,
+        PLUGIN,
+        *LIBRARIES,
+        *DYNAMIC_MODULES,
+        *EXECUTABLES,
+        *GI_LIBRARIES,
+        *(path for path in GI_FILES if path.suffix == ".so"),
+    ):
+        inspected = subprocess.run(
+            ["/usr/bin/ldd", str(artifact)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if inspected.returncode:
+            raise RuntimeError("runtime dependency inspection failed: " + artifact.name)
+        for token in re.findall(r"(?<!\S)/[^\s()]+", inspected.stdout):
+            dependency = Path(token)
+            if dependency.is_file():
+                label = f"linked:{dependency.resolve(strict=True).name}"
+                if label in paths and paths[label].resolve(
+                    strict=True
+                ) != dependency.resolve(strict=True):
+                    raise RuntimeError("linked runtime dependency names collide")
+                paths[label] = dependency
+    hashes = {
+        label: sha256_file(path.resolve(strict=True)) for label, path in paths.items()
+    }
+    for name in (
+        "PRIVATE_CONFIG",
+        "CLIENT_CONFIG",
+        "SESSION",
+        "PREFLIGHT",
+        "SCOPE_BOOTSTRAP",
+    ):
+        hashes[f"config:{name}"] = hashlib.sha256(
+            runner[name].encode("utf-8")
+        ).hexdigest()
+    return hashes
+
+
+def marker(stderr: str, prefix: str) -> dict[str, object] | None:
+    lines = [
+        line[len(prefix) :] for line in stderr.splitlines() if line.startswith(prefix)
+    ]
+    if len(lines) != 1:
+        return None
+    try:
+        result = json.loads(lines[0])
+    except ValueError:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def trial_receipt(
+    case: str, payload: dict[str, object], frozen: dict[str, str]
+) -> bool:
+    startup = case in ("startup-delay-250", "startup-delay-750")
+    fixture_mode = "prevalid-once" if startup else case
+    frames = 100 if startup else 4500
+    identity = payload.get("identity")
+    expected_identity = {
+        "backend": frozen["binary:translator-aec-backend"],
+        "fixture": frozen["binary:translator-aec-fixture"],
+        "witness": frozen["binary:translator-aec-witness"],
+        "aec_plugin": frozen["plugin"],
+    }
+    if not (
+        payload.get("status") == "NONPHYSICAL_TRIAL_PASS"
+        and payload.get("aec_proof") is False
+        and payload.get("cleanup_reaped") is True
+        and payload.get("fixture_mode") == fixture_mode
+        and type(payload.get("frames")) is int
+        and payload["frames"] == frames
+        and identity == expected_identity
+        and payload.get("plugin_mapped") is True
+        and finite_number(payload.get("raw_peak"))
+        and payload["raw_peak"] > 0
+        and finite_number(payload.get("clean_peak"))
+        and payload["clean_peak"] > 0
+        and type(payload.get("changed_samples")) is int
+        and payload["changed_samples"] > 0
+        and finite_number(payload.get("cleanup_ms"))
+        and payload["cleanup_ms"] >= 0
+    ):
+        return False
+    if startup:
+        counters = payload.get("prevalid")
+        return (
+            payload.get("fixture_delay_ms") == int(case.rsplit("-", 1)[1])
+            and payload.get("metric") is None
+            and payload.get("speech") is None
+            and isinstance(counters, dict)
+            and all(
+                type(counters.get(key)) is int and counters[key] >= 0
+                for key in ("quarantined", "empty", "sentinel")
+            )
+            and counters["quarantined"] == counters["empty"] + counters["sentinel"]
+            and counters["empty"] > 0
+            and counters["sentinel"] > 0
+        )
+    if payload.get("fixture_delay_ms") != 0:
+        return False
+    metric = payload.get("metric")
+    if not isinstance(metric, dict):
+        return False
+    if case in ("far-only", "speech-far", "wrong-reference", "speech-wrong-reference"):
+        erle = metric.get("median_erle_db")
+        if not finite_number(erle):
+            return False
+        if case in ("far-only", "speech-far") and erle < 15:
+            return False
+        if case in ("wrong-reference", "speech-wrong-reference") and erle >= 15:
+            return False
+    elif case in ("near-only", "speech-near"):
+        active = metric.get("active_seconds")
+        corr = metric.get("minimum_waveform_correlation")
+        level = metric.get("median_level_change_db")
+        minimum_level = metric.get("minimum_level_change_db_diagnostic")
+        maximum_level = metric.get("maximum_level_change_db_diagnostic")
+        if not (
+            type(active) is int
+            and 20 <= active <= 30
+            and finite_number(corr)
+            and corr >= 0.90
+            and all(
+                finite_number(value) and abs(value) <= 3
+                for value in (level, minimum_level, maximum_level)
+            )
+            and minimum_level <= level <= maximum_level
+        ):
+            return False
+    else:
+        return False
+    if case.startswith("speech-"):
+        speech = payload.get("speech")
+        sources = speech.get("sources") if isinstance(speech, dict) else None
+        runner = runpy.run_path(str(RUNNER), run_name="aec_stage_speech_identity")
+        expected = runner["SPEECH_SOURCES"]
+        return (
+            isinstance(speech, dict)
+            and speech.get("dataset") == "Google FLEURS"
+            and speech.get("license") == "CC-BY-4.0"
+            and isinstance(sources, dict)
+            and all(
+                isinstance(sources.get(role), dict)
+                and sources[role].get("id") == name
+                and sources[role].get("source_sha256") == digest
+                and sources[role].get("prepared_samples") == 60 * 48000
+                and re.fullmatch(
+                    r"[0-9a-f]{64}", str(sources[role].get("prepared_sha256"))
+                )
+                is not None
+                for role, (name, digest) in expected.items()
+            )
+        )
+    return payload.get("speech") is None
+
+
+def owner_receipt(case: str, returncode: int, stdout: str) -> bool:
+    expected_names = {
+        "owner-contract": {
+            "cancel_is_shared_and_reaps_owned_process_group",
+            "concurrent_cancel_calls_join_one_cleanup",
+            "dropped_caller_still_drives_cleanup",
+            "no_progress_is_bounded_and_cannot_become_success",
+            "exited_leader_does_not_release_descendant_group",
+            "isolated_runner_rejects_stream_with_foreign_session",
+            "exact_stream_requires_clean_eof_exit_and_cleanup_before_result",
+            "late_fatal_extra_frame_partial_eof_and_nonzero_exit_never_return_result",
+            "owner_shutdown_joins_the_same_cleanup_task",
+            "failed_first_cleanup_keeps_live_descendant_owned_until_retry",
+            "session::scope_tests::replaced_scope_cannot_receive_kill",
+            "session::scope_tests::unavailable_kill_control_retains_cleanup_obligation",
+            "session::scope_tests::failed_cgroup_write_keeps_owner_pending_until_scope_is_gone",
+            "session::scope_tests::panicked_cleanup_task_never_reports_idle",
+            "owned_group_is_a_private_session",
+            "same_session_member_in_other_group_prevents_early_reap",
+            "session::scope_tests::late_scope_is_bound_before_retry_kill",
+            "session::scope_tests::absent_scope_does_not_clear_late_creation_obligation",
+            "session::scope_tests::collector_panic_keeps_process_custody",
+            "session::scope_tests::caller_runtime_drop_does_not_drop_process_custody",
+            "session::scope_tests::concurrent_shutdown_calls_share_entry_deadline",
+            "session::scope_tests::shutdown_during_held_startup_still_cancels_within_entry_budget",
+            "session::scope_tests::trusted_runner_command_has_no_caller_control",
+            "session::scope_tests::explicit_manager_rejection_releases_absent_scope_custody",
+            "session::scope_tests::admitted_then_vanished_scope_releases_custody",
+            "session::scope_tests::invalid_or_conflicting_manager_marker_cannot_settle_creation",
+            "session::scope_tests::pre_request_exit_without_marker_releases_owner_after_reap",
+            "session::scope_tests::sent_request_then_eof_without_terminal_remains_unknown",
+            "session::scope_tests::observed_scope_is_killed_while_manager_outcome_is_unknown",
+        },
+        "owner-native": {
+            "isolated_native_stream_is_owned_and_cancelled",
+            "killed_runner_cannot_leave_scope_or_early_idle",
+            "isolated_native_exact_stream_yields_nonadmissible_result_after_cleanup",
+            "session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal",
+            "session::scope_tests::no_frame_runner_reaps_detached_scope_member",
+        },
+    }[case]
+    expected = len(expected_names)
+    names = re.findall(r"^test ([^\s]+) \.\.\. ok$", stdout, re.MULTILINE)
+    summary = re.findall(
+        r"^test result: ok\. (\d+) passed; 0 failed; "
+        r"(\d+) ignored; 0 measured; (\d+) filtered out",
+        stdout,
+        re.MULTILINE,
+    )
+    return (
+        returncode == 0
+        and len(names) == expected
+        and set(names) == expected_names
+        and len(summary) == 1
+        and summary[0]
+        == (
+            str(expected),
+            "5" if case == "owner-contract" else "0",
+            "0" if case == "owner-contract" else "29",
+        )
+    )
+
+
+def classify(
+    case: str, returncode: int, stdout: str, stderr: str, frozen: dict[str, str]
+) -> tuple[bool, dict[str, object]]:
+    if case.startswith("fault:"):
+        fault = marker(stderr, "AEC_FAULT_RECEIPT=")
+        diagnostic = marker(stderr, "AEC_NATIVE_DIAGNOSTICS=")
+        failure_lines = [
+            line
+            for line in stderr.splitlines()
+            if line.startswith("AEC isolated session NOT_DONE:")
+        ]
+        expected = {
+            "raw-unlink": (10, "AEC helper FATAL reason=10"),
+            "reference-unlink": (10, "AEC helper FATAL reason=10"),
+            "output-unlink": (10, "AEC helper FATAL reason=10"),
+            "helper-crash": (None, "AEC helper disconnected"),
+            "server-stop": (1, "AEC helper FATAL reason=1"),
+            "corrupt-ipc": (None, "AEC IPC session mismatch"),
+            "queue-overflow": (None, "AEC session stopped or timed out"),
+            "clock-reset": (None, "AEC FRAME gap or graph change"),
+            "generation-replacement": (None, "AEC FRAME provenance invalid"),
+            "aec-error": (6, "AEC helper FATAL reason=6"),
+        }
+        expected_reason, expected_text = expected[case.split(":", 1)[1]]
+        valid = (
+            returncode == 2
+            and fault is not None
+            and fault.get("fault") == case.split(":", 1)[1]
+            and fault.get("injection_at_frame") == 10
+            and fault.get("injection_confirmed") is True
+            and fault.get("post_injection_failure") is True
+            and fault.get("cleanup_reaped") is True
+            and re.fullmatch(r"[0-9a-f]{16}", str(fault.get("session"))) is not None
+            and diagnostic is not None
+            and diagnostic.get("session") == fault.get("session")
+            and diagnostic.get("fatal_reason") == expected_reason
+            and (expected_reason is None or diagnostic.get("fatal_processed", 0) >= 10)
+            and len(failure_lines) == 1
+            and expected_text in failure_lines[0]
+        )
+        return bool(valid), {"fault": fault, "diagnostic": diagnostic}
+    if case.startswith("mutant:"):
+        mutant = marker(stderr, "AEC_MUTANT_RECEIPT=")
+        valid = (
+            returncode == 2
+            and mutant is not None
+            and mutant.get("mutant") == case.split(":", 1)[1]
+            and mutant.get("applied_frames") == 4500
+            and mutant.get("scorer_rejected") is True
+            and mutant.get("cleanup_reaped") is True
+            and re.fullmatch(r"[0-9a-f]{16}", str(mutant.get("session"))) is not None
+        )
+        return bool(valid), {"mutant": mutant}
+    if case == "meta-gap":
+        diagnostic = marker(stderr, "AEC_NATIVE_DIAGNOSTICS=")
+        valid = (
+            returncode == 2
+            and diagnostic is not None
+            and diagnostic.get("fatal_reason") == 4
+            and diagnostic.get("fatal_processed") == 0
+            and diagnostic.get("status") == "OBSERVED"
+            and diagnostic.get("source") == "backend"
+            and diagnostic.get("buffer_reason") == [7, 7, 0]
+            and diagnostic.get("raw_chunk") == [1920, 4, 0]
+            and diagnostic.get("reference_chunk") == [1920, 4, 0]
+            and isinstance(diagnostic.get("raw_header"), list)
+            and isinstance(diagnostic.get("reference_header"), list)
+            and len(diagnostic["raw_header"]) == 3
+            and len(diagnostic["reference_header"]) == 3
+            and diagnostic["raw_header"][0] == 1
+            and diagnostic["reference_header"][0] == 1
+            and type(diagnostic["raw_header"][1]) is int
+            and type(diagnostic["reference_header"][1]) is int
+            and diagnostic["raw_header"][1] & 18 == 18
+            and diagnostic["reference_header"][1] & 18 == 18
+            and diagnostic.get("started") == 1
+            and type(diagnostic.get("callback")) is int
+            and diagnostic["callback"] >= 1
+            and "cleanup_reaped=True" in stderr
+        )
+        return bool(valid), {"diagnostic": diagnostic}
+    if returncode != 0:
+        return False, {"reason": "nonzero exit"}
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return False, {"reason": "missing JSON receipt"}
+    if not isinstance(payload, dict):
+        return False, {"reason": "invalid JSON receipt"}
+    if case == "lifecycle":
+        events = payload.get("events")
+        valid = (
+            payload.get("status") == "NONPHYSICAL_LIFECYCLE_PASS"
+            and payload.get("completed_cycles") == 100
+            and payload.get("aec_proof") is False
+            and isinstance(events, list)
+            and len(events) == 100
+            and all(
+                isinstance(event, dict)
+                and event.get("cycle") == index
+                and event.get("case")
+                == (
+                    "cancel"
+                    if index % 5 == 0
+                    else "seq-skew"
+                    if index % 5 == 1
+                    else "normal"
+                )
+                and event.get("exit") == (0 if index % 5 >= 2 else 2)
+                and event.get("failure") is None
+                and event.get("scope_absent") is True
+                and event.get("owned_process_count") == 0
+                and event.get("owned_graph_count") == 0
+                and event.get("fd_delta") == 0
+                and event.get("thread_delta") == 0
+                for index, event in enumerate(events)
+            )
+        )
+        return bool(valid), {"cycles": payload.get("completed_cycles")}
+    valid = trial_receipt(case, payload, frozen)
+    return bool(valid), {
+        "frames": payload.get("frames"),
+        "metric": payload.get("metric"),
+        "cleanup_ms": payload.get("cleanup_ms"),
+    }
+
+
+def main() -> int:
+    if sys.argv[1:] != ["--isolated"]:
+        print("AEC stage requires exactly --isolated", file=sys.stderr)
+        return 2
+    clean_env = {"PATH": "/usr/bin:/bin", "CARGO_BUILD_JOBS": "1"}
+    rows: list[dict[str, object]] = []
+    try:
+        preparation = (
+            ["cargo", "build", "-p", "translator-aec-backend", "--bins"],
+            [
+                "cargo",
+                "test",
+                "-p",
+                "translator-daemon",
+                "--test",
+                "aec_backend_session",
+                "--no-run",
+            ],
+        )
+        for command in preparation:
+            done = subprocess.run(
+                command,
+                cwd=ROOT,
+                env={**os.environ, "CARGO_BUILD_JOBS": "1"},
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            if done.returncode:
+                raise RuntimeError("prebuild failed: " + " ".join(command))
+        frozen = frozen_inputs()
+        identity = hashlib.sha256(
+            json.dumps(frozen, sort_keys=True).encode("ascii")
+        ).hexdigest()
+        cases = [
+            ("preflight", ["--preflight-only"]),
+            ("owner-contract", None),
+            ("owner-native", None),
+            ("lifecycle", ["--lifecycle-only"]),
+            (
+                "startup-delay-250",
+                [
+                    "--trial-mode",
+                    "prevalid-once",
+                    "--trial-frames",
+                    "100",
+                    "--fixture-delay-ms",
+                    "250",
+                ],
+            ),
+            (
+                "startup-delay-750",
+                [
+                    "--trial-mode",
+                    "prevalid-once",
+                    "--trial-frames",
+                    "100",
+                    "--fixture-delay-ms",
+                    "750",
+                ],
+            ),
+            ("meta-gap", ["--trial-mode", "meta-gap", "--trial-frames", "100"]),
+            ("far-only", ["--trial-mode", "far-only", "--trial-frames", "4500"]),
+            ("near-only", ["--trial-mode", "near-only", "--trial-frames", "4500"]),
+            (
+                "wrong-reference",
+                ["--trial-mode", "wrong-reference", "--trial-frames", "4500"],
+            ),
+            ("speech-far", ["--trial-mode", "speech-far", "--trial-frames", "4500"]),
+            ("speech-near", ["--trial-mode", "speech-near", "--trial-frames", "4500"]),
+            (
+                "speech-wrong-reference",
+                ["--trial-mode", "speech-wrong-reference", "--trial-frames", "4500"],
+            ),
+            (
+                "mutant:passthrough",
+                [
+                    "--trial-mode",
+                    "far-only",
+                    "--trial-frames",
+                    "4500",
+                    "--scorer-mutant",
+                    "passthrough",
+                ],
+            ),
+            (
+                "mutant:zero-clean",
+                [
+                    "--trial-mode",
+                    "near-only",
+                    "--trial-frames",
+                    "4500",
+                    "--scorer-mutant",
+                    "zero-clean",
+                ],
+            ),
+            *[
+                (f"fault:{name}", ["--fault-mode", name, "--trial-frames", "100"])
+                for name in (
+                    "raw-unlink",
+                    "reference-unlink",
+                    "output-unlink",
+                    "helper-crash",
+                    "server-stop",
+                    "corrupt-ipc",
+                    "queue-overflow",
+                    "clock-reset",
+                    "generation-replacement",
+                    "aec-error",
+                )
+            ],
+        ]
+        for case, arguments in cases:
+            if frozen_inputs() != frozen:
+                raise RuntimeError("frozen artifacts changed before " + case)
+            if arguments is None:
+                command = [
+                    "cargo",
+                    "test",
+                    "-p",
+                    "translator-daemon",
+                    "--test",
+                    "aec_backend_session",
+                ]
+                if case == "owner-native":
+                    command += ["--", "--ignored"]
+                timeout = 220
+                env = {**os.environ, "CARGO_BUILD_JOBS": "1"}
+            else:
+                command = [str(RUNNER), "--isolated", *arguments]
+                timeout = 190 if case != "lifecycle" else 1500
+                env = clean_env
+            done = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            unchanged = frozen_inputs() == frozen
+            if case == "preflight":
+                try:
+                    facts = json.loads(done.stdout)
+                    passed = (
+                        done.returncode == 0
+                        and facts["isolated"] is True
+                        and facts["host_audio_access"] is False
+                        and facts["host_runtime_access"] is False
+                        and facts["network_access"] is False
+                    )
+                    detail = {"isolation": facts}
+                except (ValueError, KeyError, TypeError):
+                    passed, detail = False, {"reason": "invalid preflight"}
+            elif case in ("owner-contract", "owner-native"):
+                passed = owner_receipt(case, done.returncode, done.stdout)
+                detail = {
+                    "owner_tests": "exact names and count" if passed else "not passed"
+                }
+            else:
+                passed, detail = classify(
+                    case, done.returncode, done.stdout, done.stderr, frozen
+                )
+            row = {
+                "case": case,
+                "pass": passed and unchanged,
+                "exit": done.returncode,
+                "artifact_set": identity,
+                "frozen_unchanged": unchanged,
+                **detail,
+            }
+            rows.append(row)
+            print("AEC_STAGE_CASE=" + json.dumps(row, sort_keys=True), flush=True)
+            if not passed or not unchanged:
+                break
+        completed = len(rows) == len(cases) and all(row["pass"] for row in rows)
+        print(
+            "AEC_STAGE_RESULT="
+            + json.dumps(
+                {
+                    "status": "NONPHYSICAL_STAGE_PASS" if completed else "NOT_DONE",
+                    "aec_proof": False,
+                    "artifact_set": identity,
+                    "artifact_hashes": frozen,
+                    "cases": rows,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if completed else 2
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(
+            "AEC_STAGE_RESULT="
+            + json.dumps(
+                {
+                    "status": "NOT_DONE",
+                    "aec_proof": False,
+                    "cases": rows,
+                    "error": type(error).__name__ + ": " + str(error),
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

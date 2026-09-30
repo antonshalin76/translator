@@ -250,16 +250,20 @@ def open_request() -> OpenProviderSession:
 
 
 @pytest.mark.parametrize(
-    ("cuda_available", "device", "compute_device", "selected_asr_id", "selected_key"),
+    (
+        "cuda_available",
+        "device",
+        "compute_device",
+        "requested_asr_id",
+        "selected_asr_id",
+        "selected_key",
+    ),
     [
-        (True, "cuda", ComputeDevice.CUDA, "faster-whisper-small", "small"),
-        (False, "cpu", ComputeDevice.CPU, "faster-whisper-small", "small"),
-        (True, "cuda", ComputeDevice.CUDA, "faster-whisper-large-v3", "large-v3"),
-        (False, "cpu", ComputeDevice.CPU, "faster-whisper-large-v3", "small"),
         (
             True,
             "cuda",
             ComputeDevice.CUDA,
+            None,
             "faster-whisper-large-v3-turbo",
             "large-v3-turbo",
         ),
@@ -267,6 +271,55 @@ def open_request() -> OpenProviderSession:
             False,
             "cpu",
             ComputeDevice.CPU,
+            None,
+            "faster-whisper-large-v3-turbo",
+            "small",
+        ),
+        (
+            True,
+            "cuda",
+            ComputeDevice.CUDA,
+            "faster-whisper-small",
+            "faster-whisper-small",
+            "small",
+        ),
+        (
+            False,
+            "cpu",
+            ComputeDevice.CPU,
+            "faster-whisper-small",
+            "faster-whisper-small",
+            "small",
+        ),
+        (
+            True,
+            "cuda",
+            ComputeDevice.CUDA,
+            "faster-whisper-large-v3",
+            "faster-whisper-large-v3",
+            "large-v3",
+        ),
+        (
+            False,
+            "cpu",
+            ComputeDevice.CPU,
+            "faster-whisper-large-v3",
+            "faster-whisper-large-v3",
+            "small",
+        ),
+        (
+            True,
+            "cuda",
+            ComputeDevice.CUDA,
+            "faster-whisper-large-v3-turbo",
+            "faster-whisper-large-v3-turbo",
+            "large-v3-turbo",
+        ),
+        (
+            False,
+            "cpu",
+            ComputeDevice.CPU,
+            "faster-whisper-large-v3-turbo",
             "faster-whisper-large-v3-turbo",
             "small",
         ),
@@ -278,10 +331,14 @@ def test_build_local_provider_uses_verified_manifest_runtime(
     cuda_available: bool,
     device: str,
     compute_device: ComputeDevice,
+    requested_asr_id: str | None,
     selected_asr_id: str,
     selected_key: str,
 ) -> None:
-    monkeypatch.setenv("TRANSLATOR_ASR_MODEL_ID", selected_asr_id)
+    if requested_asr_id is None:
+        monkeypatch.delenv("TRANSLATOR_ASR_MODEL_ID", raising=False)
+    else:
+        monkeypatch.setenv("TRANSLATOR_ASR_MODEL_ID", requested_asr_id)
     manifest = FakeManifest(tmp_path)
     captured = {}
 
@@ -404,6 +461,7 @@ def test_build_local_provider_uses_repository_manifest_by_default(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.delenv("TRANSLATOR_ASR_MODEL_ID", raising=False)
     observed = []
     captured = {}
 
@@ -426,6 +484,7 @@ def test_build_local_provider_uses_repository_manifest_by_default(
 
     assert isinstance(provider, FakeProvider)
     assert captured["asr"].unavailable is True
+    assert captured["asr_model_id"] == "faster-whisper-large-v3-turbo"
     assert captured["translator"].unavailable is True
     assert captured["tts"].unavailable is True
     assert "stop-after-default-path" not in caplog.text
@@ -439,6 +498,8 @@ def test_missing_runtime_starts_reachable_unavailable_provider(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.delenv("TRANSLATOR_ASR_MODEL_ID", raising=False)
+
     def missing_manifest(path: Path):
         raise RuntimeError("private-missing-model-marker")
 
@@ -456,6 +517,8 @@ def test_missing_runtime_starts_reachable_unavailable_provider(
         opened, health = await provider.reserve_session(request, publish).open()
         assert opened.session_id == request.session_id
         assert health.state is ProviderState.UNAVAILABLE
+        assert health.models[0].id == "faster-whisper-large-v3-turbo"
+        assert health.models[0].state is ModelState.FAILED
         assert {model.state for model in health.models} == {ModelState.FAILED}
         await provider.shutdown()
 
@@ -557,6 +620,7 @@ def test_build_local_provider_requires_all_selected_manifest_entries_before_adap
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.delenv("TRANSLATOR_ASR_MODEL_ID", raising=False)
     constructed = []
     captured_providers = []
 
@@ -583,6 +647,7 @@ def test_build_local_provider_requires_all_selected_manifest_entries_before_adap
     monkeypatch.setattr(runtime_module, "InferenceScheduler", FakeScheduler)
     selected_models = (
         "faster-whisper-small",
+        "faster-whisper-large-v3-turbo",
         "nllb-200-distilled-600m-ct2-int8",
         "piper-ru-dmitri-medium",
         "piper-en-ryan-medium",

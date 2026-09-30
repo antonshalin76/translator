@@ -7,7 +7,11 @@ pub(crate) struct PactlModule {
 }
 
 #[derive(Debug)]
-pub(crate) struct ModuleListError;
+pub struct ModuleListError;
+
+pub fn module_id_present(bytes: &[u8], id: u32) -> Result<bool, ModuleListError> {
+    Ok(parse_module_list(bytes)?.contains_key(&id))
+}
 
 pub(crate) fn parse_module_list(
     bytes: &[u8],

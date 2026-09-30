@@ -2,6 +2,9 @@
 
 mod acoustic_admission;
 mod aec_admission;
+// Exercised by isolated backend tests; production composition remains unavailable.
+#[allow(dead_code)]
+mod aec_backend_session;
 mod aec_runtime_observer;
 mod aec_validation;
 mod aec_validation_control;
@@ -41,7 +44,8 @@ pub use aec_runtime_observer::{
 };
 pub use aec_validation::{
     AEC_PROOF_LIFETIME_NS, AecAdmissionGuard, AecAdmissionReservation, AecCalibrationChallenge,
-    AecCalibrationCoordinator, AecCoordinatorError, AecProofBinding, AecProofStatus,
+    AecCalibrationCoordinator, AecCoordinatorError, AecProofBinding, AecProofReadyInput,
+    AecProofStatus,
 };
 pub use aec_validation_control::{
     AEC_CALIBRATION_BUDGET, AecCalibrationCancellation, AecCalibrationControlError,
@@ -112,7 +116,7 @@ pub use sidecar_supervisor::{
 pub use translation_runtime::{
     ActiveDuplexRuntime, CompletedCaptureFrame, DIRECTION_CLEANUP_BUDGET, DuplexCompletionObserver,
     DuplexRunner, DuplexRuntimeError, DuplexRuntimeEvent, DuplexRuntimeObserver,
-    DuplexStartFailure, DuplexStartResult, ProcessDuplexConfig, ProcessDuplexRunner,
-    ProviderEffectOrigin, RUNTIME_CLEANUP_BUDGET, RuntimeLatencyObserver,
-    TASK7_BRIDGE_SCHEMA_VERSION, Task7BridgeEvent, Task7BridgeFailureStage,
+    DuplexStartFailure, DuplexStartResult, PlaybackMixAuthority, PlaybackRegistrationPhase,
+    ProcessDuplexConfig, ProcessDuplexRunner, ProviderEffectOrigin, RUNTIME_CLEANUP_BUDGET,
+    RuntimeLatencyObserver, TASK7_BRIDGE_SCHEMA_VERSION, Task7BridgeEvent, Task7BridgeFailureStage,
 };

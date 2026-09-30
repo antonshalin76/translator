@@ -155,6 +155,62 @@ export interface RoundTripSelfTestState {
   status: RoundTripStatus;
 }
 
+export type AecProofStatus =
+  | { state: "unavailable" | "measuring" | "validation_failed" | "cleanup_uncertain" }
+  | { state: "validated"; source_name: string; sink_name: string; expires_monotonic_ns: number };
+
+export type AecCalibrationStatus =
+  | { state: "unavailable" | "shutting_down" }
+  | { state: "running" | "cancelled" | "timed_out" | "cleanup_uncertain"; attempt_id: string }
+  | { state: "failed"; attempt_id: string; code: string }
+  | { state: "succeeded"; attempt_id: string; proof: AecProofStatus };
+
+export function aecCalibrationControlState(
+  status: AecCalibrationStatus | null,
+  error: string | null,
+  cancelRequestedAttemptId: string | null = null,
+): { label: string; canStart: boolean; cancelAttemptId: string | null } {
+  if (error) {
+    return {
+      label: status?.state === "cleanup_uncertain"
+        ? "Очистка не подтверждена; текущий статус недоступен"
+        : error === "aec_calibration_controller_unavailable"
+        ? "Контроллер недоступен"
+        : `Статус неизвестен: ${error}`,
+      canStart: false,
+      cancelAttemptId: null,
+    };
+  }
+  switch (status?.state) {
+    case "unavailable":
+      return { label: "Калибровка не запускалась", canStart: true, cancelAttemptId: null };
+    case "running":
+      return cancelRequestedAttemptId === status.attempt_id
+        ? { label: "Отмена запрошена, ожидаем завершения", canStart: false, cancelAttemptId: null }
+        : { label: "Калибровка выполняется", canStart: false, cancelAttemptId: status.attempt_id };
+    case "succeeded":
+      return {
+        label: status.proof.state === "validated"
+          ? "Калибровка завершилась; актуальность AEC проверяет daemon при запуске"
+          : "Завершена без действующего подтверждения",
+        canStart: status.proof.state === "validated",
+        cancelAttemptId: null,
+      };
+    case "failed":
+      return { label: `Ошибка: ${status.code}`, canStart: true, cancelAttemptId: null };
+    case "cancelled":
+      return { label: "Отменена", canStart: true, cancelAttemptId: null };
+    case "timed_out":
+      return { label: "Превышено время", canStart: true, cancelAttemptId: null };
+    case "cleanup_uncertain":
+      return { label: "Очистка не подтверждена", canStart: false, cancelAttemptId: null };
+    case "shutting_down":
+      return { label: "Сервис останавливается", canStart: false, cancelAttemptId: null };
+    default:
+      return { label: "Статус неизвестен", canStart: false, cancelAttemptId: null };
+  }
+}
+
 export interface RuntimeSnapshot {
   translation_running: boolean;
   debug_text_enabled: boolean;

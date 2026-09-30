@@ -178,6 +178,14 @@ impl RuntimeMaintenance for RefreshingManualRoutes {
         self.refresh_audio_state(store);
         Ok(())
     }
+
+    fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        self.refresh(store)
+    }
+
+    fn prepare_start(&self, _: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+        Ok(())
+    }
 }
 
 struct NoopFacts;
@@ -319,6 +327,72 @@ impl RuntimeMaintenance for NoopFacts {
     fn refresh(&self, _store: &RuntimeStore) -> Result<(), ControlFailure> {
         Ok(())
     }
+
+    fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        refresh_inert_bypass_facts(store)
+    }
+
+    fn verify_bypass_custody(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit_mic_original: bool,
+    ) -> Result<(), ControlFailure> {
+        verify_inert_bypass_custody(snapshot, permit_mic_original)
+    }
+
+    fn prepare_start(&self, _: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+        Ok(())
+    }
+}
+
+fn refresh_inert_bypass_facts(store: &RuntimeStore) -> Result<(), ControlFailure> {
+    let facts = translator_daemon::RuntimeFactsSource::inspect(
+        &NoopFacts,
+        std::time::Instant::now() + Duration::from_secs(1),
+    )
+    .map_err(|_| ControlFailure {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "audio_facts_unavailable",
+    })?;
+    store.set_devices(facts.devices.into());
+    store.set_audio_graph(facts.audio_graph);
+    store.set_routes(facts.routes);
+    Ok(())
+}
+
+fn verify_inert_bypass_custody(
+    snapshot: &RuntimeSnapshot,
+    permit_mic_original: bool,
+) -> Result<(), ControlFailure> {
+    let empty_graph = snapshot.audio_graph.as_ref().is_some_and(|graph| {
+        graph.health == GraphHealth::Ready
+            && graph.owned_module_ids.is_empty()
+            && graph.endpoints.is_empty()
+    });
+    if !permit_mic_original && empty_graph {
+        Ok(())
+    } else {
+        Err(ControlFailure {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "original_loopback_custody_unknown",
+        })
+    }
+}
+
+#[test]
+fn inert_bypass_fixture_never_claims_raw_microphone_custody() {
+    let store = RuntimeStore::default();
+    refresh_inert_bypass_facts(&store).unwrap();
+    let mut snapshot = store.snapshot();
+    assert!(verify_inert_bypass_custody(&snapshot, false).is_ok());
+    assert!(verify_inert_bypass_custody(&snapshot, true).is_err());
+    snapshot
+        .audio_graph
+        .as_mut()
+        .unwrap()
+        .owned_module_ids
+        .push(42);
+    assert!(verify_inert_bypass_custody(&snapshot, false).is_err());
 }
 
 struct NoopAudioMix;
@@ -439,6 +513,22 @@ impl translator_daemon::RuntimeFactsSource for VoiceAdmissionProbe {
 impl RuntimeMaintenance for VoiceAdmissionProbe {
     fn refresh(&self, _store: &RuntimeStore) -> Result<(), ControlFailure> {
         self.maintenance.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        refresh_inert_bypass_facts(store)
+    }
+
+    fn verify_bypass_custody(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit_mic_original: bool,
+    ) -> Result<(), ControlFailure> {
+        verify_inert_bypass_custody(snapshot, permit_mic_original)
+    }
+
+    fn prepare_start(&self, _: &RuntimeSnapshot) -> Result<(), ControlFailure> {
         Ok(())
     }
 }
@@ -667,6 +757,7 @@ async fn voice_override_http_validation_precedes_facts_and_preserves_language_js
         let body = json_body(response).await;
         let after = serde_json::to_value(store.snapshot()).unwrap();
         let effects_after = probe.effects();
+        probe.reject_facts.store(false, Ordering::SeqCst);
         controller.shutdown().await.unwrap();
         assert_eq!(status, StatusCode::BAD_REQUEST, "{expected}");
         assert_eq!(body["code"], expected);

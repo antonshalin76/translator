@@ -110,6 +110,11 @@ class AsrModelManager:
         return self._resident_model_id
 
     @property
+    def resident_manifest_model_id(self) -> str | None:
+        resident = self._resident_model_id
+        return self._model_paths[resident].model_id if resident is not None else None
+
+    @property
     def residency_generation(self) -> int:
         return self._residency_generation
 

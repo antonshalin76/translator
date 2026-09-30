@@ -9,12 +9,14 @@ use serde::Serialize;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
+#[cfg(test)]
 use translator_audio::AecValidationInput;
 use uuid::Uuid;
 
 use crate::{
     AecCalibrationChallenge, AecCalibrationCoordinator, AecCoordinatorError, AecProofBinding,
-    AecProofStatus, AudioOperationAdmissionError, AudioOperationGate, AudioOperationLease,
+    AecProofReadyInput, AecProofStatus, AudioOperationAdmissionError, AudioOperationGate,
+    AudioOperationLease,
 };
 
 pub const AEC_CALIBRATION_BUDGET: Duration = Duration::from_secs(180);
@@ -78,7 +80,7 @@ pub struct AecCalibrationRequest {
 }
 
 pub struct AecCalibrationPublication {
-    pub input: AecValidationInput,
+    pub input: AecProofReadyInput,
     pub probe_teardown_confirmed: bool,
     pub graph_retained: bool,
 }
@@ -947,10 +949,11 @@ mod tests {
             let cancellation = request.cancellation.clone();
             let mut publication = successful_publication();
             if matches!(outcome, C9Outcome::RejectedPublication) {
-                publication.input.windows.clear();
+                publication.input.test_input_mut().windows.clear();
             }
             if matches!(outcome, C9Outcome::RejectedBinding) {
-                publication.input.binding.source_port = "different-physical-port".into();
+                publication.input.test_input_mut().binding.source_port =
+                    "different-physical-port".into();
             }
             let publication = SuccessfulEngine(Mutex::new(Some(publication))).calibrate(request);
             Box::pin(async move {
@@ -1965,7 +1968,7 @@ mod tests {
 
         fn calibrate(&self, request: AecCalibrationRequest) -> AecCalibrationFuture {
             let mut publication = lock_recovering(&self.0).take().unwrap();
-            let observation = &mut publication.input.observation;
+            let observation = &mut publication.input.test_input_mut().observation;
             observation.calibration_attempt_id = request.challenge.attempt_id().to_string();
             observation.challenge_id = request.challenge.challenge_id().to_string();
             observation.interval_id = request.challenge.interval_id().to_string();
@@ -2112,7 +2115,8 @@ mod tests {
                     })
                     .collect(),
                 observation,
-            },
+            }
+            .into(),
             probe_teardown_confirmed: true,
             graph_retained: true,
         }

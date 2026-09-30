@@ -5,10 +5,39 @@ use std::{
 
 use serde::Serialize;
 use tokio::sync::watch;
-use translator_audio::{AecCapability, AecMeasurementBinding, AecValidationInput, evaluate_aec};
+use translator_audio::{
+    AecCapability, AecMeasurementBinding, AecProofReadyMeasurement, AecValidationInput,
+    evaluate_aec,
+};
 use uuid::Uuid;
 
 pub const AEC_PROOF_LIFETIME_NS: u64 = 300_000_000_000;
+
+pub struct AecProofReadyInput {
+    input: AecValidationInput,
+}
+
+impl From<AecProofReadyMeasurement> for AecProofReadyInput {
+    fn from(measurement: AecProofReadyMeasurement) -> Self {
+        Self {
+            input: measurement.into_validation_input(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<AecValidationInput> for AecProofReadyInput {
+    fn from(input: AecValidationInput) -> Self {
+        Self { input }
+    }
+}
+
+#[cfg(test)]
+impl AecProofReadyInput {
+    pub(crate) fn test_input_mut(&mut self) -> &mut AecValidationInput {
+        &mut self.input
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AecProofBinding {
@@ -269,10 +298,11 @@ impl AecCalibrationCoordinator {
     pub fn publish(
         &self,
         challenge: &AecCalibrationChallenge,
-        input: AecValidationInput,
+        measurement: AecProofReadyInput,
         probe_teardown_confirmed: bool,
         graph_retained: bool,
     ) -> Result<(), AecCoordinatorError> {
+        let input = measurement.input;
         let mut state = self.lock();
         if challenge.process_nonce == self.process_nonce
             && state.retired_challenges.contains(&challenge.challenge_id)
@@ -751,7 +781,7 @@ mod tests {
             .begin_attempt(Uuid::new_v4(), Uuid::new_v4(), binding.clone())
             .unwrap();
         coordinator
-            .publish(&challenge, input(&challenge, 16.0), true, true)
+            .publish(&challenge, input(&challenge, 16.0).into(), true, true)
             .unwrap();
         (coordinator, binding, clock)
     }
@@ -796,7 +826,7 @@ mod tests {
             .begin_attempt(Uuid::new_v4(), Uuid::new_v4(), expected_binding)
             .unwrap();
         assert_eq!(
-            coordinator.publish(&challenge, input(&challenge, 16.0), true, true),
+            coordinator.publish(&challenge, input(&challenge, 16.0).into(), true, true),
             Err(AecCoordinatorError::InvalidMeasurement)
         );
     }
@@ -812,7 +842,7 @@ mod tests {
         measurement.metadata.source_name = "different-physical-source".into();
 
         assert_eq!(
-            coordinator.publish(&challenge, measurement, true, true),
+            coordinator.publish(&challenge, measurement.into(), true, true),
             Err(AecCoordinatorError::InvalidBinding)
         );
         assert_eq!(coordinator.status(), AecProofStatus::ValidationFailed);
@@ -851,7 +881,7 @@ mod tests {
             let mut measurement = input(&challenge, 16.0);
             mutate(&mut measurement.binding);
             assert_eq!(
-                coordinator.publish(&challenge, measurement, true, true),
+                coordinator.publish(&challenge, measurement.into(), true, true),
                 Err(AecCoordinatorError::InvalidBinding)
             );
         }
@@ -930,11 +960,16 @@ mod tests {
                 .begin_attempt(Uuid::new_v4(), Uuid::new_v4(), expected_binding)
                 .unwrap();
             assert_eq!(
-                coordinator.publish(&challenge, input(&challenge, attenuation), teardown, graph,),
+                coordinator.publish(
+                    &challenge,
+                    input(&challenge, attenuation).into(),
+                    teardown,
+                    graph,
+                ),
                 Err(expected)
             );
             assert_eq!(
-                coordinator.publish(&challenge, input(&challenge, 16.0), true, true,),
+                coordinator.publish(&challenge, input(&challenge, 16.0).into(), true, true,),
                 Err(AecCoordinatorError::ChallengeConsumed)
             );
             assert!(matches!(
@@ -958,7 +993,7 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(
-            coordinator.publish(&next, input(&next, 16.0), true, true),
+            coordinator.publish(&next, input(&next, 16.0).into(), true, true),
             Err(AecCoordinatorError::ChallengeConsumed)
         );
     }
@@ -1001,12 +1036,12 @@ mod tests {
             challenge_id: challenge.challenge_id,
         };
         assert_eq!(
-            coordinator.publish(&challenge, input(&other, 16.0), true, true),
+            coordinator.publish(&challenge, input(&other, 16.0).into(), true, true),
             Err(AecCoordinatorError::InvalidMeasurement)
         );
         assert_eq!(coordinator.status(), AecProofStatus::ValidationFailed);
         assert_eq!(
-            coordinator.publish(&challenge, input(&challenge, 16.0), true, true,),
+            coordinator.publish(&challenge, input(&challenge, 16.0).into(), true, true,),
             Err(AecCoordinatorError::ChallengeConsumed)
         );
     }

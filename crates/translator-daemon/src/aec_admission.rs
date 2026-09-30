@@ -331,7 +331,7 @@ mod tests {
             .begin_attempt(Uuid::new_v4(), Uuid::new_v4(), expected_binding)
             .unwrap();
         coordinator
-            .publish(&challenge, input(&challenge), true, true)
+            .publish(&challenge, input(&challenge).into(), true, true)
             .unwrap();
         let inspector = Arc::new(Inspector {
             binding: Mutex::new(binding()),

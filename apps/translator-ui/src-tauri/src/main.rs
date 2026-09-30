@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -41,6 +41,50 @@ enum DaemonCommand {
     RoundTripStatus,
     StartRoundTrip,
     StopRoundTrip,
+    AecCalibrationStatus,
+    StartAecCalibration,
+    CancelAecCalibration,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+enum AecProofStatus {
+    Unavailable,
+    Measuring,
+    ValidationFailed,
+    Validated {
+        source_name: String,
+        sink_name: String,
+        expires_monotonic_ns: u64,
+    },
+    CleanupUncertain,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+enum AecCalibrationStatus {
+    Unavailable,
+    Running {
+        attempt_id: String,
+    },
+    Succeeded {
+        attempt_id: String,
+        proof: AecProofStatus,
+    },
+    Failed {
+        attempt_id: String,
+        code: String,
+    },
+    Cancelled {
+        attempt_id: String,
+    },
+    TimedOut {
+        attempt_id: String,
+    },
+    CleanupUncertain {
+        attempt_id: String,
+    },
+    ShuttingDown,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -95,6 +139,9 @@ fn main() {
             translator_round_trip_status,
             translator_start_round_trip,
             translator_stop_round_trip,
+            translator_aec_calibration_status,
+            translator_start_aec_calibration,
+            translator_cancel_aec_calibration,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run translator UI");
@@ -276,6 +323,33 @@ fn translator_start_round_trip(app: AppHandle) -> Result<Value, UiError> {
 fn translator_stop_round_trip(app: AppHandle) -> Result<Value, UiError> {
     daemon_request(DaemonCommand::StopRoundTrip, None)?;
     refresh_status_from_webview(&app, DaemonCommand::StopRoundTrip)
+}
+
+#[tauri::command]
+fn translator_aec_calibration_status() -> Result<AecCalibrationStatus, UiError> {
+    parse_aec_status(daemon_request(DaemonCommand::AecCalibrationStatus, None)?)
+}
+
+#[tauri::command]
+fn translator_start_aec_calibration() -> Result<AecCalibrationStatus, UiError> {
+    parse_aec_status(daemon_request(DaemonCommand::StartAecCalibration, None)?)
+}
+
+#[tauri::command]
+fn translator_cancel_aec_calibration(attempt_id: String) -> Result<AecCalibrationStatus, UiError> {
+    parse_aec_status(daemon_request(
+        DaemonCommand::CancelAecCalibration,
+        Some(json!({ "attempt_id": attempt_id })),
+    )?)
+}
+
+fn parse_aec_status(value: Value) -> Result<AecCalibrationStatus, UiError> {
+    serde_json::from_value(value).map_err(|_| {
+        UiError::new(
+            "aec_calibration_response_invalid",
+            "calibration response is invalid",
+        )
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -904,6 +978,9 @@ fn daemon_endpoint(command: DaemonCommand) -> (HttpMethod, &'static str) {
         DaemonCommand::RoundTripStatus => (HttpMethod::Get, "/v1/self-test/round-trip"),
         DaemonCommand::StartRoundTrip => (HttpMethod::Post, "/v1/self-test/round-trip/start"),
         DaemonCommand::StopRoundTrip => (HttpMethod::Post, "/v1/self-test/round-trip/stop"),
+        DaemonCommand::AecCalibrationStatus => (HttpMethod::Get, "/v1/aec-calibration"),
+        DaemonCommand::StartAecCalibration => (HttpMethod::Post, "/v1/aec-calibration/start"),
+        DaemonCommand::CancelAecCalibration => (HttpMethod::Post, "/v1/aec-calibration/cancel"),
     }
 }
 
@@ -1016,6 +1093,42 @@ fn problem_code(body: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_endpoint_maps_aec_calibration_controls() {
+        assert_eq!(
+            daemon_endpoint(DaemonCommand::AecCalibrationStatus),
+            (HttpMethod::Get, "/v1/aec-calibration")
+        );
+        assert_eq!(
+            daemon_endpoint(DaemonCommand::StartAecCalibration),
+            (HttpMethod::Post, "/v1/aec-calibration/start")
+        );
+        assert_eq!(
+            daemon_endpoint(DaemonCommand::CancelAecCalibration),
+            (HttpMethod::Post, "/v1/aec-calibration/cancel")
+        );
+        assert!(!webview_command_refreshes_tray(
+            DaemonCommand::StartAecCalibration
+        ));
+    }
+
+    #[test]
+    fn aec_status_parser_rejects_missing_attempt_and_proof_fields() {
+        assert!(parse_aec_status(json!({"state": "running"})).is_err());
+        assert!(
+            parse_aec_status(
+                json!({"state": "succeeded", "attempt_id": "a", "proof": {"state": "validated"}})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_aec_status(json!({"state": "cleanup_uncertain", "attempt_id": "a"})).unwrap(),
+            AecCalibrationStatus::CleanupUncertain {
+                attempt_id: "a".into()
+            }
+        );
+    }
 
     #[test]
     fn daemon_endpoint_maps_debug_text_and_capture_to_separate_patches() {

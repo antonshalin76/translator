@@ -1777,6 +1777,35 @@ def test_health_has_separate_models_and_runtime_state(
     run(scenario())
 
 
+def test_health_uses_pinned_resident_asr_identity_after_fallback() -> None:
+    async def scenario() -> None:
+        asr = FakeAsr()
+        asr.resident_model_id = "large-v3-turbo"
+        asr.resident_manifest_model_id = "faster-whisper-large-v3-turbo"
+        provider, _, _, _ = build_provider(
+            asr=asr,
+            asr_model_id="faster-whisper-large-v3-turbo",
+        )
+        session = request(AudioDirection.SPEAKER)
+        try:
+            collector = Collector()
+            _, ready = await provider.reserve_session(session, collector.publish).open()
+            assert ready.state is ProviderState.READY
+            assert ready.models[0].id == "faster-whisper-large-v3-turbo"
+
+            asr.resident_model_id = "small"
+            asr.resident_manifest_model_id = "faster-whisper-small"
+            asr.degraded = True
+            fallback = await provider.health(session.session_id)
+            assert fallback.state is ProviderState.DEGRADED
+            assert fallback.models[0].id == "faster-whisper-small"
+            assert fallback.models[0].device is ComputeDevice.CUDA
+        finally:
+            await provider.shutdown()
+
+    run(scenario())
+
+
 def test_health_reflects_translator_process_death_after_open() -> None:
     async def scenario() -> None:
         translator = FakeTranslator()

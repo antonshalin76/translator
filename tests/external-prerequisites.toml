@@ -6,6 +6,61 @@ id = "translator-audio::test::aec_graph::workstation_aec_graph_is_owned_and_tear
 code = "missing_external_prerequisite:physical_audio_graph"
 
 [[skip]]
+framework = "rust"
+id = "translator-audio::test::audio_mix::private_pulse_original_volume_set_readback_and_restore"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-audio::test::pcm_stream::private_pulse_production_playback_is_muted_from_first_frame"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::bin::translator-daemon::tests::private_pulse_original_loopback_load_discover_and_cleanup"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::test::audio_mix_application::private_pulse_respawn_admits_exact_committed_volume_before_first_frame"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal"
+code = "missing_external_prerequisite:isolated_user_scope"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::no_frame_runner_reaps_detached_scope_member"
+code = "missing_external_prerequisite:isolated_user_scope"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::test::aec_backend_session::session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal"
+code = "missing_external_prerequisite:isolated_user_scope"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::test::aec_backend_session::session::scope_tests::no_frame_runner_reaps_detached_scope_member"
+code = "missing_external_prerequisite:isolated_user_scope"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::test::aec_backend_session::isolated_native_stream_is_owned_and_cancelled"
+code = "missing_external_prerequisite:isolated_native_pipewire"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::test::aec_backend_session::killed_runner_cannot_leave_scope_or_early_idle"
+code = "missing_external_prerequisite:isolated_native_pipewire"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::test::aec_backend_session::isolated_native_exact_stream_yields_nonadmissible_result_after_cleanup"
+code = "missing_external_prerequisite:isolated_native_pipewire"
+
+[[skip]]
 framework = "pytest"
 id = "sidecar/tests/test_model_manifest.py::test_repository_reused_assets_resolve_through_pinned_integrity_policy"
 code = "missing_external_prerequisite:gpu_model_cache"

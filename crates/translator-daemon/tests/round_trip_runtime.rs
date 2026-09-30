@@ -424,9 +424,11 @@ fn completion_panic_keeps_same_owner_retryable_and_start_disabled() {
         .unwrap()
         .completed(session_id);
     let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while !store.snapshot().self_test.status.cleanup_pending
-        && std::time::Instant::now() < wait_deadline
-    {
+    while std::time::Instant::now() < wait_deadline {
+        let status = store.snapshot().self_test.status;
+        if status.cleanup_pending && status.checkpoint == Some(RoundTripCheckpoint::Failed) {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let status_after_panic = store.snapshot().self_test.status;

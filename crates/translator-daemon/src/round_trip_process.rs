@@ -1437,7 +1437,7 @@ impl RoundTripAudioWorker for PulseRoundTripAudioWorker {
         Box::pin(async move {
             let mut drain = PlaybackDrainBudget::default();
             self.monitor = Some(
-                PulsePcmPlayback::spawn(&PulsePcmCommand::playback(
+                PulsePcmPlayback::spawn(&PulsePcmCommand::round_trip_monitor_playback(
                     &self.physical_sink,
                     "translator-round-trip-english-monitor",
                 ))

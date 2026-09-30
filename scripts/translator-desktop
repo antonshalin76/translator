@@ -245,9 +245,12 @@ if mode == "prepare":
     os.close(root_fd)
     raise SystemExit(0)
 
-if len(sys.argv) != 4:
+if len(sys.argv) != 5:
     refuse("invalid daemon wrapper arguments")
 daemon_path = sys.argv[3]
+bundle_root = sys.argv[4]
+if not os.path.isabs(bundle_root):
+    refuse("refusing non-absolute translator bundle root")
 expected_daemon_path = os.path.join(
     os.environ.get("HOME", ""), ".local", "bin", "translator-daemon"
 )
@@ -281,6 +284,13 @@ for inherited_key in tuple(daemon_environment):
         or inherited_key in {"BASH_ENV", "ENV", "SHELLOPTS"}
     ):
         daemon_environment.pop(inherited_key, None)
+daemon_environment.setdefault("TRANSLATOR_SIDECAR_ROOT", os.path.join(bundle_root, "sidecar"))
+sidecar_root = service_environment.get(
+    "TRANSLATOR_SIDECAR_ROOT", daemon_environment["TRANSLATOR_SIDECAR_ROOT"]
+)
+daemon_environment.setdefault(
+    "TRANSLATOR_PYTHON", os.path.join(sidecar_root, ".venv", "bin", "python")
+)
 daemon_environment.update(service_environment)
 os.execve(daemon_fd, [daemon_path], daemon_environment)
 '
@@ -290,7 +300,7 @@ prepare_service_environment() {
 }
 
 run_daemon_with_service_environment() {
-  exec /usr/bin/python3 -I -c "${service_environment_runtime_code}" exec "${1}" "${2}"
+  exec /usr/bin/python3 -I -c "${service_environment_runtime_code}" exec "${1}" "${2}" "${project_root}"
 }
 
 write_autostart() {

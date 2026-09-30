@@ -9,6 +9,12 @@ current implementation branch.
 
 ## Current product checkpoint (2026-09-27)
 
+The [one-pass product closure packet](product-closure-one-pass-20260927.md)
+groups the remaining work into one integrated no-headphones candidate and one
+final evidence review. It is a proposal, not release approval. In particular,
+the saved-audio runs force Turbo while the local runtime still defaults to
+`faster-whisper-small`; the effective installed model choice needs verification.
+
 The [paired saved-audio product diagnostic](product-audio-paired-20260927.md)
 ran Turbo→NLLB/Piper and Turbo→Hy/Piper on the same 24 frozen RU/EN recordings.
 Three full runs completed; one reverse-order run retained a Hy-side failure.

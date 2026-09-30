@@ -45,7 +45,8 @@ _ASR_MODELS = {
     "faster-whisper-large-v3": "large-v3",
     "faster-whisper-large-v3-turbo": "large-v3-turbo",
 }
-_DEFAULT_ASR_MODEL_ID = "faster-whisper-small"
+_DEFAULT_ASR_MODEL_ID = "faster-whisper-large-v3-turbo"
+_FALLBACK_ASR_MODEL_ID = "faster-whisper-small"
 _MT_MODEL_ID = "nllb-200-distilled-600m-ct2-int8"
 _HY_MT_MODEL_ID = "hy-mt2-1.8b-gguf-q4-k-m"
 _TTS_MODEL_ID = "piper-medium"
@@ -250,8 +251,8 @@ def build_local_provider(
         required_model_ids = (
             selected_asr_id,
             *(
-                (_DEFAULT_ASR_MODEL_ID,)
-                if selected_asr_id != _DEFAULT_ASR_MODEL_ID
+                (_FALLBACK_ASR_MODEL_ID,)
+                if selected_asr_id != _FALLBACK_ASR_MODEL_ID
                 else ()
             ),
             selected_mt_id,
@@ -350,13 +351,13 @@ def build_local_provider(
         requested_key = _ASR_MODELS[selected_asr_id]
         selected_key = requested_key if asr_device == "cuda" else "small"
         source_id = (
-            selected_asr_id if selected_key != "small" else _DEFAULT_ASR_MODEL_ID
+            selected_asr_id if selected_key != "small" else _FALLBACK_ASR_MODEL_ID
         )
         asr_paths = {
             selected_key: model_sources[source_id],
         }
         if selected_key != "small":
-            asr_paths["small"] = model_sources[_DEFAULT_ASR_MODEL_ID]
+            asr_paths["small"] = model_sources[_FALLBACK_ASR_MODEL_ID]
         asr = AsrModelManager(
             selected_id=selected_key,
             model_paths=asr_paths,

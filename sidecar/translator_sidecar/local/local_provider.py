@@ -1450,7 +1450,9 @@ class LocalProvider:
     ) -> ProviderHealth:
         asr_device = ComputeDevice(getattr(self._asr, "actual_device", "cpu"))
         effective_asr_id = (
-            getattr(self._asr, "resident_model_id", None) or self._asr_model_id
+            getattr(self._asr, "resident_manifest_model_id", None)
+            or getattr(self._asr, "resident_model_id", None)
+            or self._asr_model_id
         )
         models = (
             self._model_health(

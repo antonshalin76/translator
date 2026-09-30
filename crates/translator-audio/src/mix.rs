@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::time::Instant;
 
 use serde::Deserialize;
 
-use crate::{CommandRunError, CommandRunner, MIC_OUT_SINK, REMOTE_IN_SINK, SystemCommandRunner};
+use crate::{
+    CommandRunError, CommandRunner, MIC_OUT_SINK, PulsePlaybackRegistration, REMOTE_IN_SINK,
+    SystemCommandRunner,
+};
 
 pub const OUTGOING_TRANSLATION_STREAM: &str = "translator-outgoing-playback";
 pub const INCOMING_TRANSLATION_STREAM: &str = "translator-incoming-playback";
@@ -182,6 +186,139 @@ where
         percent: MixPercent,
     ) -> Result<(), AudioMixError> {
         self.set_volume(entry.index, [format!("{}%", percent.0)])
+    }
+
+    pub fn verify_registered_zero(
+        &self,
+        registration: &PulsePlaybackRegistration,
+        deadline: Instant,
+    ) -> Result<(), AudioMixError> {
+        let input = self.registered_input(registration, deadline)?;
+        if input.volume.values().any(|channel| channel.value != 0) {
+            return Err(discovery_failed());
+        }
+        Ok(())
+    }
+
+    pub fn admit_registered_percent(
+        &self,
+        registration: &PulsePlaybackRegistration,
+        percent: MixPercent,
+        deadline: Instant,
+    ) -> Result<(), AudioMixError> {
+        self.verify_registered_zero(registration, deadline)?;
+        let args = vec![
+            "set-sink-input-volume".to_owned(),
+            registration.index().to_string(),
+            format!("{}%", percent.0),
+        ];
+        let result = self
+            .runner
+            .run_until("pactl", &args, deadline)
+            .map_err(map_apply_error)?;
+        if !result.is_success() {
+            return Err(AudioMixError::new(AudioMixErrorCode::VolumeApplyFailed));
+        }
+        let observed = self.registered_input(registration, deadline)?;
+        let expected = (u32::from(percent.0) * 65_536 + 50) / 100;
+        if observed
+            .volume
+            .values()
+            .any(|channel| channel.value.abs_diff(expected) > 1)
+        {
+            return Err(discovery_failed());
+        }
+        Ok(())
+    }
+
+    fn registered_input(
+        &self,
+        registration: &PulsePlaybackRegistration,
+        deadline: Instant,
+    ) -> Result<RawSinkInput, AudioMixError> {
+        let inputs: Vec<RawSinkInput> =
+            self.run_json_until(&["--format=json", "list", "sink-inputs"], deadline)?;
+        let sinks: Vec<RawEndpoint> =
+            self.run_json_until(&["--format=json", "list", "sinks"], deadline)?;
+        let mut matches = inputs
+            .into_iter()
+            .filter(|input| input.index == registration.index());
+        let input = matches.next().ok_or_else(discovery_failed)?;
+        if matches.next().is_some()
+            || input.sink.is_none_or(|index| {
+                endpoint_name(&sinks, index).ok() != Some(registration.device())
+            })
+            || property(&input.properties, "application.name") != Some("translator-daemon")
+            || property(&input.properties, "application.process.id")
+                != Some(registration.process_id().to_string().as_str())
+            || property(&input.properties, "media.name") != Some(registration.stream_name())
+            || property(&input.properties, "translator.playback_session")
+                != Some(registration.session_id().to_string().as_str())
+        {
+            return Err(discovery_failed());
+        }
+        let channels: Vec<_> = input.channel_map.split(',').collect();
+        if channels.is_empty()
+            || channels.iter().any(|channel| channel.is_empty())
+            || channels.iter().collect::<HashSet<_>>().len() != channels.len()
+            || channels.len() != input.volume.len()
+            || channels
+                .iter()
+                .any(|channel| !input.volume.contains_key(*channel))
+        {
+            return Err(discovery_failed());
+        }
+        Ok(input)
+    }
+
+    fn run_json_until<T>(&self, args: &[&str], deadline: Instant) -> Result<T, AudioMixError>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let arguments: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
+        let result = self
+            .runner
+            .run_until("pactl", &arguments, deadline)
+            .map_err(|_| discovery_failed())?;
+        if !result.is_success() {
+            return Err(discovery_failed());
+        }
+        serde_json::from_slice(result.stdout()).map_err(|_| discovery_failed())
+    }
+
+    pub fn verify_zero_targets(
+        &self,
+        prior: &PulseMixPlan,
+        targets: &[AudioMixTarget],
+    ) -> Result<(), AudioMixError> {
+        let observed = self.discover()?;
+        for target in targets {
+            let expected: Vec<_> = prior
+                .entries()
+                .iter()
+                .filter(|entry| entry.target == *target)
+                .collect();
+            let actual: Vec<_> = observed
+                .entries()
+                .iter()
+                .filter(|entry| entry.target == *target)
+                .collect();
+            if expected.len() != actual.len() || expected.is_empty() {
+                return Err(discovery_failed());
+            }
+            for entry in expected {
+                let match_entry = actual
+                    .iter()
+                    .find(|observed| observed.index == entry.index)
+                    .ok_or_else(discovery_failed)?;
+                if match_entry.prior.len() != entry.prior.len()
+                    || match_entry.prior.iter().any(|volume| *volume != 0)
+                {
+                    return Err(discovery_failed());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn restore_raw(&self, entry: &PulseMixEntry) -> Result<(), AudioMixError> {

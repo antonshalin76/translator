@@ -143,6 +143,9 @@ ALLOWED_FRAMEWORKS = frozenset({"rust", "pytest", "unittest", "bun"})
 ALLOWED_PREREQUISITES = frozenset(
     {
         "physical_audio_graph",
+        "private_pulse_fixture",
+        "isolated_native_pipewire",
+        "isolated_user_scope",
         "real_call_endpoint",
         "openai_credentials",
         "gpu_model_cache",

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  aecCalibrationControlState,
   audioMixPatchIntent,
   buildUiModel,
   classifyTask7LatencyDebt,
@@ -105,6 +106,48 @@ describe("UI privacy contracts", () => {
 });
 
 describe("UI safety gates", () => {
+  test("AEC calibration stays unavailable on controller error and cleanup uncertainty", () => {
+    expect(aecCalibrationControlState(null, "aec_calibration_controller_unavailable")).toMatchObject({
+      canStart: false,
+      cancelAttemptId: null,
+      label: "Контроллер недоступен",
+    });
+    expect(aecCalibrationControlState({ state: "cleanup_uncertain", attempt_id: "attempt-1" }, null)).toMatchObject({
+      canStart: false,
+      cancelAttemptId: null,
+      label: "Очистка не подтверждена",
+    });
+    expect(aecCalibrationControlState({ state: "cleanup_uncertain", attempt_id: "attempt-1" }, "daemon_unavailable")).toMatchObject({
+      canStart: false,
+      label: "Очистка не подтверждена; текущий статус недоступен",
+    });
+  });
+
+  test("AEC calibration cancellation remains pending until daemon reports terminal state", () => {
+    const running = { state: "running", attempt_id: "attempt-2" } as const;
+    expect(aecCalibrationControlState(running, null, "attempt-2")).toMatchObject({
+      canStart: false,
+      cancelAttemptId: null,
+      label: "Отмена запрошена, ожидаем завершения",
+    });
+    expect(aecCalibrationControlState(running, null)).toMatchObject({
+      canStart: false,
+      cancelAttemptId: "attempt-2",
+    });
+    expect(aecCalibrationControlState({ state: "cancelled", attempt_id: "attempt-2" }, null)).toMatchObject({
+      canStart: true,
+      cancelAttemptId: null,
+      label: "Отменена",
+    });
+  });
+
+  test("AEC calibration never borrows proof from a translation snapshot", () => {
+    expect(aecCalibrationControlState(null, null)).toMatchObject({ canStart: false });
+    expect(aecCalibrationControlState({ state: "unavailable" }, null)).toMatchObject({ canStart: true });
+    expect(aecCalibrationControlState({ state: "shutting_down" }, null)).toMatchObject({ canStart: false });
+    expect(aecCalibrationControlState({ state: "succeeded", attempt_id: "a", proof: { state: "cleanup_uncertain" } }, null)).toMatchObject({ canStart: false });
+  });
+
   test("cloud provider selection requires explicit opt-in", () => {
     expect(providerPatchIntent("openai", false)).toMatchObject({
       blocked: true,

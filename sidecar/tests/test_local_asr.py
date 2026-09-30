@@ -279,6 +279,7 @@ def test_asr_loads_absolute_local_path_without_download(
         model_factory=factory,
         cuda_available=lambda: True,
     )
+    assert manager.resident_manifest_model_id is None
     manager.transcribe(pcm(), language=Language.EN, mode=TranslationMode.BALANCED)
 
     assert calls == [
@@ -295,6 +296,7 @@ def test_asr_loads_absolute_local_path_without_download(
     assert sealed_model_id(calls[0][0]) == "small"
     assert not (Path(calls[0][0]) / "preprocessor_config.json").exists()
     assert manager.resident_model_id == "small"
+    assert manager.resident_manifest_model_id == "fixture-model"
     assert manager.residency_generation == 1
     if device == "cpu":
         assert manager.degraded
@@ -548,6 +550,7 @@ def test_cuda_oom_on_large_unloads_then_retries_small_once(
     ]
     assert loads == {candidate_id: 1, "small": 1}
     assert manager.resident_model_id == "small"
+    assert manager.resident_manifest_model_id == "fixture-model"
     assert manager.residency_generation == 2
     assert manager.degraded
     assert model_refs[0]() is None
