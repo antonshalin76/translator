@@ -414,3 +414,22 @@ does not prove zero exposure at the physical switch instant. Physical AEC,
 original-main baseline, independent RU/EN holdout, voice adjudication,
 all-mode/native-app matrix, 30-minute soak, merge and release remain
 **NOT_DONE**.
+
+The immediately following full `streaming_first` female-voice run on source
+`44a2f01` exercised the continuation branch with a real Small-arm terminal
+`queue_overflow`/`dropped` on `en-78643`. It retained **71 completed / 1
+failed** attempts across all 72 cases, zero `NOT_RUN`, **23 complete / 1
+incomplete** three-arm pairs, and terminal **failed**. The private `0600`
+receipt `three-arm-full-sf-20261001-tbeHA1/full.jsonl` has SHA-256
+`0a890b7a424420affa001cbc8cb7f60f626dc2832401860ca6569ce0d9a9b55a`.
+All three arms shut down without a live Hy child. This verifies that one
+safe drop no longer censors the rest of the diagnostic; it does **not** pass
+the streaming-first product cell or explain the provider-side drop.
+
+The same bounded development set in `balanced` on source `44a2f01`
+completed **72/72 attempts and 24/24 pairs**. Private `0600` receipt
+`three-arm-full-bal-20261001-WjLR8t/full.jsonl` has SHA-256
+`ca84bd97c332f09c2d5065122daa27d8c69c19983ea31945b6c07493a6b56ba5`.
+Together with the quality-first run, this covers three female-voice
+saved-audio mode diagnostics, not the independent release holdout, male
+full matrix, original-main baseline or physical first-audible gate.

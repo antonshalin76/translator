@@ -71,14 +71,18 @@ physical microphone, speaker, or headphone was used.
 | `three-arm-smoke-20261001-nCmtKs/ru-71601.jsonl` | `36812c7a4483a0fb72b15c9aea684e45ed2fee0d701e9f1bb56df279d4efbd4b` | v2, fork SHA `13557cbf6875`: 3/3 complete, one RU comparison; no original-`main` or quality verdict |
 | `three-arm-full-qf-20261001-iR9ZD7/full.jsonl` | `4213ccf8b559adffe528fd7eb56d48f41b13c4dfe065fdac93de72b1956cc52e` | fork SHA `467c6ea`: Small arm failed on its third case, `ru-71573`, with `queue_overflow`/`dropped`; 3 attempts, 69 `NOT_RUN`, no full comparison |
 | `three-arm-full-qf-20261001-BpeA2P/full.jsonl` | `fab049e7952d84b6bbcf7265e0cde1e41bf8cc692e3193fe9c32ae60ec5ede8e` | fork SHA `7460f8a`: 72/72 complete, 24/24 three-arm pairs, female voices, `quality_first`; development-only |
+| `three-arm-full-sf-20261001-tbeHA1/full.jsonl` | `0a890b7a424420affa001cbc8cb7f60f626dc2832401860ca6569ce0d9a9b55a` | fork SHA `44a2f01` (same runner): `streaming_first`, 71/72 complete, Small `queue_overflow`/`dropped` on `en-78643`; 23/24 pairs complete, zero `NOT_RUN`, terminal `failed` |
+| `three-arm-full-bal-20261001-WjLR8t/full.jsonl` | `ca84bd97c332f09c2d5065122daa27d8c69c19983ea31945b6c07493a6b56ba5` | fork SHA `44a2f01` (same runner): `balanced`, 72/72 complete, 24/24 pairs, female voices; development-only |
 
 The latter source change makes the diagnostic continue only after an exactly
 bound, terminal `queue_overflow`/`dropped` event, unchanged READY model health
 and a matching clean session drain. Other errors still abort, and any such
 drop keeps the final run status failed. Focused runner, local-provider and
-provider-contract tests passed together; the real full run did not itself
-exercise this continuation branch because no drop recurred. It cannot turn
-the earlier failure into a reliability pass.
+provider-contract tests passed together. The quality-first run did not
+exercise continuation because no drop recurred; the subsequent
+streaming-first run did, retained its failed case, completed the other 71
+attempts and ended failed. This proves the diagnostic's continuation and
+honest terminal accounting on one real drop, not product reliability.
 
 On the successful run, median/p90 time from accelerated WAV submission to
 first provider PCM was 447/1171 ms for same-code Small → NLLB, 511/691 ms
