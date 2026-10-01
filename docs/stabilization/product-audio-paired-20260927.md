@@ -4,9 +4,10 @@ The historical v1 fork-only diagnostic fed the same 24 frozen MDC test WAVs
 (12 Russian, 12 English) into the real `LocalProvider` twice: Turbo → NLLB →
 Piper and Turbo → Hy-MT2 → Piper. The current v2 runner also names a Small →
 NLLB → Piper arm, executed on candidate code as a same-code ablation; it is
-not an untouched `main` baseline receipt, and no v2 model run is accepted yet.
-The original paired runs selected the two verified
-female Piper voices and `QUALITY_FIRST`; the runner now explicitly selects
+not an untouched `main` baseline receipt. One guarded v2 RU saved-audio smoke
+completed all three arms on fork SHA `13557cbf6875`; this verifies execution
+and cleanup, not comparative quality or reliability. The original paired runs
+selected the two verified female Piper voices and `QUALITY_FIRST`; the runner now explicitly selects
 male or female voices and any of the three modes. Input is 16-kHz mono and
 output is 24-kHz mono. The
 [runner](../../scripts/translator_product_audio_pair.py) checks the corpus,
@@ -67,6 +68,7 @@ physical microphone, speaker, or headphone was used.
 | `full-balanced.jsonl` | `e573c01f18d6e9e9ca393a7d789e1b696c81dd2cbcb280ba2bd72dff260ed5f6` | 48/48 completed, 24/24 pairs |
 | `full-streaming-first.jsonl` | `e62a2354db27005ad857fe1e4b32673572c2e000f4929863831347a0b51d7ff8` | 13/48 attempted; 12 completed, first EN case `en-78643` failed, 35 `NOT_RUN` |
 | `replay-streaming-first-en-78643.jsonl` | `77efb12cbc8314624ef2e8ad43bca6d15e3d4753feef2c23a48d564d24c46792` | One frozen-case replay: Hy and NLLB completed; original failure remains unresolved |
+| `three-arm-smoke-20261001-nCmtKs/ru-71601.jsonl` | `36812c7a4483a0fb72b15c9aea684e45ed2fee0d701e9f1bb56df279d4efbd4b` | v2, fork SHA `13557cbf6875`: 3/3 complete, one RU comparison; no original-`main` or quality verdict |
 
 A single bounded Hy-only replay then used the exact original sequence of 12
 Russian WAVs followed by `en-78643`, one provider and no retry. All 13 attempts

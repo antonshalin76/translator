@@ -49,9 +49,11 @@ live runtime or model-file identity; freeze those separately for the eval.
 The fork's `translator_product_audio_pair.py` v2 runner now has a separate
 Small → NLLB → Piper arm alongside Turbo → NLLB and Turbo → Hy. Its 70 focused
 contract tests pass on 2026-10-01, including effective-model fallback,
-event identity/order, and terminal failure recording. No three-arm model run
-has been accepted yet. The Small arm uses the candidate code and is explicitly
-labelled a same-code ablation; it is **not** a receipt from the untouched
+event identity/order, and terminal failure recording. A single guarded RU
+saved-audio smoke completed all three arms on exact fork SHA `13557cbf6875`;
+it is not a comparative quality result or the full 24-case run. The Small arm
+uses the candidate code and is explicitly labelled a same-code ablation; it
+is **not** a receipt from the untouched
 original `main` baseline.
 
 The existing 24-WAV Turbo/NLLB-versus-Hy screen is development evidence. Use
@@ -223,6 +225,19 @@ verified speaker. Therefore Tatoeba is **not admitted** as the standalone
 EVAL-0 holdout; this screen does not prove it impossible either. Stop the
 150-MB translation-links fetch for now and seek a source with independently
 identified RU/EN speakers, permitted reuse and bilingual reference review.
+
+Two routes remain for EVAL-0. Official [Common Voice Scripted Speech 27.0
+RU](https://mozilladatacollective.com/datasets/cmu5x45pn00dao107j4o9w2yv)
+and [EN](https://mozilladatacollective.com/datasets/cmu5jplf300nwmh07iqvk9leo)
+offer CC0-labelled source audio with pseudonymous contributor IDs. The
+complete archives are 6.61 and 88.43 GB; dataset-specific access terms,
+overlap exclusion, speaker-disjointness, accent/bucket coverage and
+independently reviewed bilingual references are still unresolved.
+Alternatively, commission a rights-cleared 120-pair-per-
+direction corpus with four real speakers per language, both voice genders,
+an accented speaker, and the six required buckets. Independent bilingual
+translation and separate audio/reference review require external people;
+unreviewed model translations cannot be gold. Neither route is admitted yet.
 
 ## Proposed single development pass
 

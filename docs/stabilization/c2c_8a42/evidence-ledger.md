@@ -360,3 +360,19 @@ links. Authors are not verified speakers; no audio, translations, input-byte
 hashes, gender, accent or critical-case labels were established. This is a
 feasibility signal, **not** a frozen EVAL-0 corpus or a mathematical proof of
 ineligibility. Tatoeba remains unadmitted as a standalone release holdout.
+
+A one-case guarded v2 runtime smoke on exact fork SHA `13557cbf6875868d`
+then completed three of three `QUALITY_FIRST` female-voice attempts on one
+previously exposed RU WAV and one of one three-arm comparisons. The private
+`three-arm-smoke-20261001-nCmtKs/ru-71601.jsonl` receipt is SHA-256
+`36812c7a4483a0fb72b15c9aea684e45ed2fee0d701e9f1bb56df279d4efbd4b`
+and mode `0600`. Public health observed Small/NLLB, Turbo/NLLB and Turbo/Hy
+respectively, with ASR and MT on CUDA and a generic Piper TTS identity. The
+user scope requested limits of 9 GB memory, 1 GB swap, 200% CPU and 420
+seconds; the manager accepted the scope, but post-exit properties
+could not be independently re-read. The Hy child exited, the scope became
+inactive, and sampled GPU memory returned to its pre-run level. No audio
+capture or playback occurred. This smoke validates execution and cleanup
+only; its accelerated saved-audio PCM timing is not first-audible latency,
+and it cannot establish RU/EN accuracy, reliability or an original-`main`
+baseline gain. No broad run was attempted with existing swap use.
