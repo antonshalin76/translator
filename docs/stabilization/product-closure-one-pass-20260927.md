@@ -30,14 +30,17 @@ No playback, capture, module load or route mutation was performed. The
 physical harness must recheck those facts immediately before arming and abort
 on contention; the only current candidate for hardware isolation is the
 separate USB card, not the production analog pair.
+The later read-only 2026-10-01 inventory found that USB card selected as the
+system default with an active source output. Its earlier free state is not a
+current isolation authorization.
 
 | Boundary | Current evidence | Missing for product completion |
 | --- | --- | --- |
-| No-headphones audio | Acoustic admission rejects open-speaker mic without a proof for the exact physical pair. AEC coordinator/controller and Pulse graph components exist. | `main.rs` still constructs the watcher with unavailable AEC and passes no calibration controller to the API. `round_trip_preconditions` also hardcodes headphones, so even a validated AEC pair cannot run that test path. There is no live calibration engine, runtime proof attachment, revocation, or physical AEC result. |
+| No-headphones audio | Acoustic admission rejects open-speaker mic without a proof for the exact physical pair. AEC coordinator/controller, measurement contract, revocation components and Pulse graph components exist. | `main.rs` still constructs the watcher with unavailable AEC and passes no calibration controller to the API. The round-trip self-test remains headphones-only. There is no production synchronized physical acquisition source, live calibration engine, attached proof or physical AEC result. |
 | Audio lifecycle | Owned original-loopback creation and volume control passed deterministic and private virtual-Pulse checks. `ReconcileAudio` now stops a running microphone when refreshed facts show an unsafe or changed acoustic path. | The one-second watcher cannot prove zero exposure at the instant of an external port change. Physical fail-closed behavior and cleanup on the actual device pair remain untested. |
-| Effective model chain | The original `main` chain is Small → NLLB → Piper. Turbo is the input development leader; NLLB remains the default MT, and Hy is a quality challenger with unresolved failures. | The original chain has not been measured against both Turbo chains on an independent full-chain holdout. Freeze the effective binaries, configuration and model hashes for each arm before comparative claims. |
+| Effective model chain | The original `main` chain is Small → NLLB → Piper. A separate guarded original-main provider run and all three fork arms completed the same 24 saved WAVs in `quality_first`; Turbo is the input development leader, NLLB the default MT, and Hy an opt-in challenger with unresolved failures. | This is a Turbo-screened development set, not an independent full-chain holdout. Exact physical/runtime and MT/TTS quality comparison remain unproved. |
 | Output voice | Piper is the configured product voice, not a demonstrated winner. A direct eight-cell CPU pilot compared it with Supertonic 3; the tested Supertonic path was slower to first PCM and its ASR proxy changed four numeric values. | No blind, loudness-controlled RU/EN audible decision, complete voice/gender matrix, or paired first-audible product result. Qwen3-TTS is an untested bilingual matrix candidate; Kokoro is English-only in this project's matrix. Research-only or license-blocked models are not release arms. |
-| Quality and speed | Frozen 24-WAV accelerated saved-audio diagnostics include complete quality-first and balanced runs; one full streaming-first run failed. A three-arm quality-first development run on fork SHA `7460f8a` completed 72/72 attempts, but an earlier exact-input run stopped on a Small-arm `queue_overflow`. Historical physical Task 7 first-audible is 5968 ms. | No independent speaker-disjoint RU/EN holdout, full mode/voice matrix, independently transcribed audible TTS, physical first-audible comparison, or quantified reliability gain. A successful later run does not erase retained failures. |
+| Quality and speed | Frozen 24-WAV accelerated saved-audio diagnostics include complete quality-first and balanced runs; one full streaming-first run failed. Original-main Small and fork Turbo→NLLB both completed all 24 matching quality-first cases; observed RU/EN ASR WER was 0.2145/0.1074 vs 0.1280/0.1074 and first-provider-PCM median 6943 vs 497 ms. Historical physical Task 7 first-audible is 5968 ms. | No independent speaker-disjoint RU/EN holdout, full mode/voice matrix, independently transcribed audible TTS, physical first-audible comparison, or quantified reliability gain. A successful later run does not erase retained failures. |
 | User and release path | Daemon/API/UI, native calibration controls and status projection, installer and release contracts exist. | Calibration remains unavailable in the production composition root. No complete physical Meet/Telegram/Zoom matrix, 30-minute soak, install/rollback proof, or exact-SHA release evidence. |
 
 Baseline configuration check on 2026-10-01: the unchanged `main` revision
@@ -54,10 +57,20 @@ The earlier identical-input run on SHA `467c6ea` failed in the Small arm;
 its receipt remains a reliability finding. The Small arm uses candidate code
 and is explicitly labelled a same-code ablation, **not** a receipt from the
 untouched original `main` baseline. Neither run is release-holdout evidence.
+The separate guarded original-main provider driver subsequently completed
+the same 24 frozen quality-first female-voice cases on untouched `main` HEAD
+`9291e8b`; exact input identity and effective CUDA/CUDA/CPU device parity
+were checked against all fork arms. Its private receipt and layer-specific
+development metrics are in [`product-audio-paired-20260927.md`](product-audio-paired-20260927.md).
+Fork Small's first-PCM median was 446 ms, so the large provider timing
+difference cannot be attributed to Turbo ASR alone.
+This closes the missing **development provider baseline**, not the independent
+holdout, MT/TTS audible quality decision, physical latency or release gate.
 
-The existing 24-WAV Turbo/NLLB-versus-Hy screen is development evidence. Use
-it to debug the three-chain runner, not to claim improvement over the original
-Small baseline or to select a release model. Freeze a separate development set
+The existing 24-WAV Turbo/NLLB-versus-Hy screen is development evidence. It
+now supports a bounded original-Small-versus-Turbo provider comparison, but
+not a release-model decision or population-level improvement claim. Freeze a
+separate development set
 and untouched release holdout before further model tuning. For each direction,
 the holdout must meet EVAL-0's 120 unique source/reference pairs, speaker and
 critical-case coverage, and verified audio/reference alignment.

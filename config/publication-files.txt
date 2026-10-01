@@ -173,6 +173,7 @@ scripts/test_translator_mdc_evidence.py
 scripts/test_translator_mt_mdc_pair.py
 scripts/test_translator_mt_piper_probe.py
 scripts/test_translator_product_audio_pair.py
+scripts/test_translator_product_original_baseline.py
 scripts/translator-aec-backend-check
 scripts/translator-aec-backend-stage
 scripts/translator-asr-quality-debug
@@ -204,6 +205,7 @@ scripts/translator_mt_natural_pilot.py
 scripts/translator_mt_piper_probe.py
 scripts/translator_product_audio_pair.py
 scripts/translator_product_freeze.py
+scripts/translator_product_original_baseline.py
 scripts/translator_tts_asr_proxy.py
 scripts/translator_tts_voice_pilot.py
 sidecar/.python-version

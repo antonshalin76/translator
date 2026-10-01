@@ -433,3 +433,55 @@ completed **72/72 attempts and 24/24 pairs**. Private `0600` receipt
 Together with the quality-first run, this covers three female-voice
 saved-audio mode diagnostics, not the independent release holdout, male
 full matrix, original-main baseline or physical first-audible gate.
+
+## 2026-10-01 untouched-main provider baseline — development comparison only
+
+An isolated driver now imports the original `main` sidecar at exact HEAD
+`9291e8beafee3e02aaa179178ce460ac9e6c6de2` with Python bytecode disabled.
+It checks the clean original checkout, source module paths and pinned original
+manifest, projects only cache/staging paths into a private manifest, and
+copies the verified Small, NLLB and four Piper profiles into a private cache.
+The saved-audio runner and tests are separate new files in the fork; the
+production checkout was not edited. Independent code/SRP review passed after
+fixing a hash/parse two-read race and adding frozen-input parity and negative
+tests; **15/15** focused tests and Ruff passed. A two-case smoke completed
+2/2; private `0600` receipt
+`original-main-smoke-20261001-K8vvFe/smoke.jsonl` has SHA-256
+`d1fdcb1c62d0bf24fcfd0abe6f326fe9450a37f11fbf3944354234bd30451886`.
+
+The serial offline full original-main Small → NLLB → Piper run then completed
+**24/24** `quality_first` female-voice attempts, zero `NOT_RUN`, with private
+`0600` receipt `original-main-full-20261001-SHhB9o/full.jsonl` SHA-256
+`6d161fee9a1adc96776d5ed0afb3430e53d1d2af97f6c14fcbbaad05bf2c5f36`.
+The user scope requested 9 GB RAM, 1 GB swap, 200% CPU and 1800 seconds;
+child cache paths were private and offline. All 24 cases matched each fork
+quality-first arm by origin, condition, WAV hash, speaker, language, reference,
+mode, requested gender, frozen Turbo text and critical labels. Effective
+ASR/MT/TTS were READY on CUDA/CUDA/CPU in every attempt; the original health
+alias `small` maps to the same pinned Small model file as the fork's
+`faster-whisper-small`. Original git status stayed clean, model manifest hash
+stayed `b15d24e98e5116a45b0ee745cb1114deedbaaa3861cee0ed964d52efab2f4069`,
+and the diagnostic process exited.
+
+Against the written references with the existing punctuation/case/`ё`
+normalization, original Small had RU/EN WER **0.2145/0.1074** versus fork
+Turbo→NLLB **0.1280/0.1074** on 12 cases per language. Original first
+provider PCM median/p90 over all 24 was **6943/8750 ms**, versus fork
+Turbo→NLLB **497/685 ms**. The candidate same-code Small arm was
+**0.2215/0.1544** WER and **446/1161 ms** median/p90; it differed from the
+original Small ASR on two cases, including a fork-Small 10-billion to
+10-million error that Turbo did not make. RU ASR WER favors Turbo; accelerated
+first-provider-PCM timing favors the fork runtime, including its Small arm
+which was faster than fork Turbo in this run. Separate run conditions limit
+causal attribution. This is not an EN WER gain, an independent corpus result,
+first audible latency, or a proved MT/TTS quality gain. Critical-fact, voice, all-mode,
+physical AEC/native-app, soak and release gates remain open.
+
+A read-only, written-text review of the 12 unique critical-labelled cases
+(two names, three numbers, eight negations, with overlap) found one clear
+original-main name distortion, one clear critical-number loss and four clear
+negation omissions. This is targeted error identification, not a blinded
+error-rate estimate. Turbo→NLLB still has meaning errors in `ru-81073` and
+`en-80121`; Hy's corresponding predicate fidelity is uncertain in the former.
+The output translation chain therefore has no critical-fact PASS from this
+comparison. No English listening result was invented.

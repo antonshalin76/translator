@@ -73,6 +73,56 @@ physical microphone, speaker, or headphone was used.
 | `three-arm-full-qf-20261001-BpeA2P/full.jsonl` | `fab049e7952d84b6bbcf7265e0cde1e41bf8cc692e3193fe9c32ae60ec5ede8e` | fork SHA `7460f8a`: 72/72 complete, 24/24 three-arm pairs, female voices, `quality_first`; development-only |
 | `three-arm-full-sf-20261001-tbeHA1/full.jsonl` | `0a890b7a424420affa001cbc8cb7f60f626dc2832401860ca6569ce0d9a9b55a` | fork SHA `44a2f01` (same runner): `streaming_first`, 71/72 complete, Small `queue_overflow`/`dropped` on `en-78643`; 23/24 pairs complete, zero `NOT_RUN`, terminal `failed` |
 | `three-arm-full-bal-20261001-WjLR8t/full.jsonl` | `ca84bd97c332f09c2d5065122daa27d8c69c19983ea31945b6c07493a6b56ba5` | fork SHA `44a2f01` (same runner): `balanced`, 72/72 complete, 24/24 pairs, female voices; development-only |
+| `original-main-smoke-20261001-K8vvFe/smoke.jsonl` | `d1fdcb1c62d0bf24fcfd0abe6f326fe9450a37f11fbf3944354234bd30451886` | untouched `main` HEAD `9291e8b`, Small → NLLB → Piper, two-case `quality_first` smoke, 2/2 complete |
+| `original-main-full-20261001-SHhB9o/full.jsonl` | `6d161fee9a1adc96776d5ed0afb3430e53d1d2af97f6c14fcbbaad05bf2c5f36` | untouched `main` HEAD `9291e8b`, Small → NLLB → Piper, 24/24 complete, female voices, `quality_first`; development-only |
+
+The separate [original-main driver](../../scripts/translator_product_original_baseline.py)
+imports the unchanged `main` sidecar from an isolated process, checks its HEAD,
+clean checkout, runtime module paths and pinned manifest, then copies the
+verified model files into a private cache before constructing its provider.
+The full run used the same frozen manifest/screen/Turbo report SHA-256 values
+above, offline execution, a private `0600` journal, disabled Python bytecode,
+private XDG/HF/TMP/CUDA cache paths, and a user scope requesting 9 GB RAM,
+1 GB swap, 200% CPU and 1800 seconds. Its 24 completed attempts match each
+candidate arm exactly by origin, condition, WAV hash, language, speaker,
+reference, mode, requested gender, frozen Turbo text and critical labels;
+each effective model was READY on the same CUDA/CUDA/CPU device pattern.
+Original ASR health names `small`, the candidate names the same pinned model
+`faster-whisper-small`. Original source status remained clean, its manifest
+hash unchanged, and no baseline/Hy child remained after the run. This is a
+provider-level saved-audio baseline, not the original native application or
+physical audio path.
+The full receipt binds runner SHA-256
+`5b7efc8dfd1dbfaacdf73ac7ef86f0f3225b80bbb5836324d02eea4638c7b923`.
+Before publication, the script's two machine-specific absolute path constants
+were replaced with equivalent sibling-path derivation in this workspace;
+the published source SHA-256 is
+`bbba96830ef164d2315a1a87cf18507a0f5320ccff9db458bfd9ff7d1cd7fa39`.
+Focused tests passed after that source-only change. No model inference was
+rerun, so the receipt is evidence for its bound earlier runner, not a fresh
+exact-source result for the published script.
+
+| `quality_first` female chain | ASR WER RU (12) | ASR WER EN (12) | first provider PCM median / p90, all 24 |
+| --- | ---: | ---: | ---: |
+| Untouched `main`: Small → NLLB → Piper | 0.2145 | 0.1074 | 6943 / 8750 ms |
+| Fork same-code Small → NLLB → Piper | 0.2215 | 0.1544 | 446 / 1161 ms |
+| Fork Turbo → NLLB → Piper | 0.1280 | 0.1074 | 497 / 685 ms |
+| Fork Turbo → Hy → Piper | 0.1280 | 0.1007 | 608 / 908 ms |
+
+The WER computation uses the same written references and existing
+punctuation/case/`ё` normalization, with 289 RU and 149 EN reference words.
+Turbo → NLLB has 53/438 word errors versus original Small's 78/438; the
+observed gain is RU-led, not an EN WER gain. Original and fork Small differ on
+two cases: the fork Small invents an entity in `ru-71573` and turns the final
+10 billion into 10 million in `en-78643`. Both Turbo arms retain the latter
+quantity and negation in their saved texts. This does not establish audio
+truth or an error rate on independent data. The PCM boundary is monotonic
+accelerated-WAV submission to first provider-published frame, not first
+audible playback; separate runs, load and warm-up limit speed attribution.
+The fork Small arm was faster than fork Turbo here, so the large timing
+difference cannot be credited to replacing Small with Turbo ASR.
+The provider health reports generic Piper identity rather than proving the
+exact voice used, and generated PCM is not a pronunciation-quality verdict.
 
 The latter source change makes the diagnostic continue only after an exactly
 bound, terminal `queue_overflow`/`dropped` event, unchanged READY model health
@@ -93,7 +143,9 @@ Small 0.2215/0.1544, Turbo → NLLB 0.1280/0.1074, and Turbo → Hy
 0.1280/0.1007. The two Turbo arms nominally use the same ASR, yet their EN
 transcripts differed on this run; the tiny 12-case difference must not be
 attributed to MT. This Turbo-screened development set is unsuitable for
-selecting a release model or proving the original `main` baseline gain.
+selecting a release model. The fork-only run did not itself measure the
+original `main`; the separate original-main receipt above supplies that
+development comparison, not release validation.
 
 A single bounded Hy-only replay then used the exact original sequence of 12
 Russian WAVs followed by `en-78643`, one provider and no retry. All 13 attempts
