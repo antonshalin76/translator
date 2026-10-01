@@ -33,12 +33,15 @@ from translator_sidecar.provider_contract import (
     ProviderAudioDelta,
     ProviderId,
     ProviderLatency,
+    ProviderSessionClosed,
+    ProviderSessionOpened,
     ProviderState,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
     ProviderUtteranceFinal,
     SafeErrorCode,
     SampleFormat,
+    SessionCloseReason,
     TranslationMode,
     UtteranceOutcome,
     VoiceGender,
@@ -439,6 +442,169 @@ def test_event_result_requires_complete_text_audio_and_final() -> None:
                 )
             ]
         )
+
+
+@pytest.mark.parametrize("fault", ["unknown", "time_regression"])
+def test_capture_event_gate_rejects_unknown_or_regressing_events(fault):
+    events = _events()
+    if fault == "unknown":
+        events.insert(2, (object(), events[1][1]))
+    else:
+        events[2] = (events[2][0], events[0][1] - 1)
+    with pytest.raises(ValueError):
+        _evaluate(events)
+
+
+def test_event_gate_accepts_bound_session_open_prefix():
+    opening = ProviderSessionOpened.model_construct(
+        session_id=SESSION_ID,
+        direction_id=AudioDirection.MICROPHONE,
+        event_sequence=0,
+    )
+    assert _evaluate([(opening, 900_000_000), *_events()])["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    ("fault", "enabled"),
+    [
+        (None, False),
+        (None, True),
+        *[
+            (fault, True)
+            for fault in (
+                "cancelled",
+                "task_cancelled",
+                "health",
+                "drain",
+                "unknown",
+                "late_event",
+            )
+        ],
+    ],
+)
+def test_run_case_captures_pcm_only_after_attested_terminal_and_drain(
+    tmp_path, monkeypatch, fault, enabled
+):
+    observed, captures = [], []
+    context = {}
+    private = tmp_path / "pcm"
+    private.mkdir(mode=0o700)
+
+    class Reservation:
+        async def open(self):
+            observed.append("open")
+            return None, _health(context["request"])
+
+        def drain(self, reason):
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            context.update(request=request, publish=publish)
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            context["frame"] = frame
+
+        async def wait_idle(self):
+            identity = {
+                "session_id": context["request"].session_id,
+                "direction_id": context["request"].direction_id,
+                "stream_id": context["frame"].stream_id,
+                "utterance_id": context["frame"].utterance_id,
+            }
+            batch = [event.model_copy(update=identity) for event, _ in _events()]
+            if fault == "cancelled":
+                batch[-1] = batch[-1].model_copy(
+                    update={"outcome": UtteranceOutcome.CANCELLED}
+                )
+            if fault == "unknown":
+                batch.insert(2, object())
+            await context["publish"](tuple(batch), lambda: None)
+            if fault == "task_cancelled":
+                raise asyncio.CancelledError()
+
+        async def health(self, session_id):
+            observed.append("health")
+            return _health(
+                context["request"],
+                asr_id="wrong" if fault == "health" else product_audio_pair.ASR_ID,
+            )
+
+    async def drain(_pending):
+        observed.append("drain")
+        if fault == "drain":
+            raise RuntimeError("synthetic drain failure")
+        await context["publish"](
+            (
+                ProviderSessionClosed(
+                    session_id=context["request"].session_id,
+                    direction_id=context["request"].direction_id,
+                    event_sequence=6,
+                    reason=SessionCloseReason.USER_STOP,
+                ),
+                *((object(),) if fault == "late_event" else ()),
+            ),
+            lambda: None,
+        )
+        return SimpleNamespace(
+            session_id=context["request"].session_id, delivery_error=None
+        )
+
+    class Capture:
+        def write_pcm(self, pcm, expected_hash, filename):
+            assert observed == ["open", "health", "drain"]
+            assert pcm == b"\x01" * 960
+            assert expected_hash == _sha(pcm)
+            captures.append(filename)
+            with product_audio_pair.PcmArtifactStore(private) as store:
+                return store.write_pcm(pcm, expected_hash, filename)
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", drain)
+    case = {
+        "language": "ru_ru",
+        "pcm": b"\x01\x02" * 1600,
+        "wav_sha256": "a" * 64,
+    }
+    coroutine = product_audio_pair._run_case(
+        Provider(),
+        case,
+        TranslationMode.QUALITY_FIRST,
+        VoiceGender.FEMALE,
+        expected_asr_id=product_audio_pair.ASR_ID,
+        expected_mt_id=product_audio_pair.BACKENDS["nllb"],
+        **({"capture_audio": Capture()} if enabled else {}),
+    )
+    if fault is not None:
+        with pytest.raises((ValueError, RuntimeError, asyncio.CancelledError)):
+            asyncio.run(coroutine)
+        assert captures == []
+        assert list(private.iterdir()) == []
+    else:
+        result = asyncio.run(coroutine)
+        if not enabled:
+            assert captures == []
+            assert "pcm_artifact" not in result
+            assert list(private.iterdir()) == []
+            return
+        assert len(captures) == 1
+        artifact = result["pcm_artifact"]
+        assert artifact["filename"] == captures[0]
+        assert artifact["input_wav_sha256"] == case["wav_sha256"]
+        assert artifact["session_id"] == str(context["request"].session_id)
+        assert artifact["direction_id"] == context["request"].direction_id.value
+        assert artifact["stream_id"] == str(context["frame"].stream_id)
+        assert artifact["utterance_id"] == str(context["frame"].utterance_id)
+        assert artifact["target_language"] == "en"
+        assert artifact["requested_voice"] == {
+            "language": "en",
+            "gender": "female",
+            "engine": "piper",
+        }
+        assert artifact["effective_models_open"] == result["effective_models_open"]
+        assert artifact["effective_models_after"] == result["effective_models_after"]
+        with product_audio_pair.PcmArtifactStore(private) as store:
+            assert _sha(store.read_verified(artifact)) == artifact["wav_sha256"]
 
 
 @pytest.mark.parametrize(
@@ -972,6 +1138,35 @@ def test_cli_selects_voice_gender(monkeypatch, capsys, option, expected) -> None
     assert product_audio_pair.main() == 0
     assert observed == [expected]
     assert '"status": "complete"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cli_capture_is_explicit_and_disabled_by_default(monkeypatch, enabled):
+    seen = []
+
+    async def fake_run(args):
+        seen.append(args.capture_audio)
+        return {"status": "complete"}
+
+    monkeypatch.setattr(product_audio_pair, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "runner",
+            "--manifest",
+            "/tmp/manifest",
+            "--screen",
+            "/tmp/screen",
+            "--turbo",
+            "/tmp/turbo",
+            "--output",
+            "/tmp/output",
+            *(["--capture-audio", "/tmp/private-pcm"] if enabled else []),
+        ],
+    )
+    assert product_audio_pair.main() == 0
+    assert seen == ([Path("/tmp/private-pcm")] if enabled else [None])
 
 
 @pytest.mark.parametrize(

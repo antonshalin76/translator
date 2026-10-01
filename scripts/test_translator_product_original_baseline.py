@@ -24,6 +24,7 @@ from translator_sidecar.provider_contract import (
     ProviderAudioDelta,
     ProviderId,
     ProviderLatency,
+    ProviderSessionOpened,
     ProviderState,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
@@ -448,6 +449,158 @@ def test_real_original_api_waits_for_close_publications_and_health():
     assert result["asr_text"] == "source"
     assert result["mt_text"] == "translation"
     assert observed[-3:] == ["close", "commit_close", "publications"]
+    assert "pcm_artifact" not in result
+
+
+@pytest.mark.parametrize(
+    ("fault", "enabled"),
+    [
+        (None, False),
+        (None, True),
+        *[
+            (fault, True)
+            for fault in (
+                "cancelled",
+                "task_cancelled",
+                "health",
+                "close",
+                "publications",
+                "late_event",
+            )
+        ],
+    ],
+)
+def test_original_capture_waits_for_health_close_and_publication_drain(
+    tmp_path, fault, enabled
+):
+    observed, captures = [], []
+    private = tmp_path / "pcm"
+    private.mkdir(mode=0o700)
+
+    class Provider:
+        async def open_session(self, request, publish):
+            self.request, self.publish = request, publish
+            observed.append("open")
+            return SimpleNamespace(session_id=request.session_id), _health(request)
+
+        async def submit_frame(self, frame):
+            self.frame = frame
+            if frame.end_of_utterance:
+                events = list(_events(self.request, frame))
+                if fault == "cancelled":
+                    events[-1] = events[-1].model_copy(
+                        update={"outcome": UtteranceOutcome.CANCELLED}
+                    )
+                await self.publish(tuple(events), lambda: None)
+
+        async def wait_idle(self):
+            if fault == "task_cancelled":
+                raise asyncio.CancelledError()
+
+        async def health(self, session_id):
+            observed.append("health")
+            return _health(self.request, asr="wrong" if fault == "health" else "small")
+
+        async def close_session(self, request):
+            observed.append("close")
+            if fault == "close":
+                raise RuntimeError("synthetic close failure")
+            await self.publish(
+                (
+                    baseline.ProviderSessionClosed(
+                        session_id=request.session_id,
+                        direction_id=self.request.direction_id,
+                        event_sequence=7,
+                        reason=baseline.SessionCloseReason.USER_STOP,
+                    ),
+                    *((object(),) if fault == "late_event" else ()),
+                ),
+                lambda: None,
+            )
+
+        async def wait_publications(self, session_id):
+            observed.append("publications")
+            if fault == "publications":
+                raise RuntimeError("synthetic publications failure")
+
+    class Capture:
+        def write_pcm(self, pcm, expected_hash, filename):
+            assert observed == ["open", "health", "close", "publications"]
+            assert pcm == b"\x01\x00" * 480
+            assert expected_hash == _sha(pcm)
+            captures.append(filename)
+            with baseline.PcmArtifactStore(private) as store:
+                return store.write_pcm(pcm, expected_hash, filename)
+
+    provider = Provider()
+    case = {
+        "language": "ru_ru",
+        "pcm": b"\x01\x00" * 1600,
+        "wav_sha256": "b" * 64,
+    }
+    coroutine = baseline.run_case(
+        provider,
+        case,
+        TranslationMode.QUALITY_FIRST,
+        VoiceGender.FEMALE,
+        **({"capture_audio": Capture()} if enabled else {}),
+    )
+    if fault is not None:
+        with pytest.raises((ValueError, RuntimeError, asyncio.CancelledError)):
+            asyncio.run(coroutine)
+        assert captures == []
+        assert list(private.iterdir()) == []
+    else:
+        result = asyncio.run(coroutine)
+        if not enabled:
+            assert captures == []
+            assert "pcm_artifact" not in result
+            assert list(private.iterdir()) == []
+            return
+        assert len(captures) == 1
+        artifact = result["pcm_artifact"]
+        assert artifact["filename"] == captures[0]
+        assert artifact["input_wav_sha256"] == case["wav_sha256"]
+        assert artifact["session_id"] == str(provider.request.session_id)
+        assert artifact["stream_id"] == str(provider.frame.stream_id)
+        assert artifact["utterance_id"] == str(provider.frame.utterance_id)
+        assert artifact["target_language"] == "en"
+        assert artifact["requested_voice"] == {
+            "language": "en",
+            "gender": "female",
+            "engine": "piper",
+        }
+        assert artifact["effective_models_open"] == result["effective_models_open"]
+        assert artifact["effective_models_after"] == result["effective_models_after"]
+        with baseline.PcmArtifactStore(private) as store:
+            assert _sha(store.read_verified(artifact)) == artifact["wav_sha256"]
+
+
+def test_original_event_gate_accepts_bound_session_open_prefix():
+    request = baseline._request(
+        "ru_ru", TranslationMode.QUALITY_FIRST, VoiceGender.FEMALE
+    )
+    frame = SimpleNamespace(stream_id=uuid4(), utterance_id=uuid4())
+    opening = ProviderSessionOpened.model_construct(
+        session_id=request.session_id,
+        direction_id=request.direction_id,
+        event_sequence=1,
+    )
+    result = baseline.evaluate_events(
+        [
+            (opening, 80),
+            *[
+                (event, 100 + index)
+                for index, event in enumerate(_events(request, frame))
+            ],
+        ],
+        started_ns=90,
+        session_id=request.session_id,
+        direction_id=request.direction_id,
+        stream_id=frame.stream_id,
+        utterance_id=frame.utterance_id,
+    )
+    assert result["status"] == "completed"
 
 
 def test_event_time_regression_fails_closed():
@@ -552,3 +705,34 @@ def test_journal_is_exclusive_private_and_fsynced(tmp_path: Path, monkeypatch):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     with pytest.raises(FileExistsError):
         baseline.open_journal(path)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_original_cli_capture_is_explicit_and_disabled_by_default(monkeypatch, enabled):
+    seen = []
+
+    async def fake_run(args):
+        seen.append(args.capture_audio)
+        return {"status": "complete"}
+
+    monkeypatch.setattr(baseline, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "runner",
+            "--manifest",
+            "/tmp/manifest",
+            "--screen",
+            "/tmp/screen",
+            "--turbo",
+            "/tmp/turbo",
+            "--cache",
+            "/tmp/cache",
+            "--output",
+            "/tmp/output",
+            *(["--capture-audio", "/tmp/private-pcm"] if enabled else []),
+        ],
+    )
+    assert baseline.main() == 0
+    assert seen == ([Path("/tmp/private-pcm")] if enabled else [None])

@@ -7,7 +7,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Barrier, Event, Lock, Thread, current_thread
 from types import SimpleNamespace
@@ -946,6 +946,173 @@ def test_critical_oracle_accepts_format_and_cross_script_equivalents() -> None:
     assert not report.en_to_ru.critical_violations
 
 
+@pytest.mark.parametrize(
+    ("case_id", "corruption", "kind"),
+    [
+        ("do-not-mute:09:10", "Mute the microphone until 09:10.", "negation"),
+        ("order-number:104", "I confirm order number 999.", "number"),
+        ("send-file:Alex", "Send the file to Boris.", "name"),
+    ],
+)
+@pytest.mark.parametrize("layers", [("mt",), ("audible",), ("mt", "audible")])
+def test_critical_oracle_attributes_each_mt_and_audible_layer(
+    case_id: str, corruption: str, kind: str, layers: tuple[str, ...]
+) -> None:
+    corpus = load_quality_corpus(CORPUS_PATH)
+    outputs = {
+        Language.RU: [case.ru for case in corpus.cases],
+        Language.EN: [case.en for case in corpus.cases],
+    }
+    transcripts = {language: list(values) for language, values in outputs.items()}
+    index = next(
+        index for index, case in enumerate(corpus.cases) if case.case_id == case_id
+    )
+    for layer in layers:
+        (outputs if layer == "mt" else transcripts)[Language.EN][index] = corruption
+
+    report = evaluate_quality(
+        corpus, outputs=outputs, synthesized_transcripts=transcripts
+    )
+
+    assert report.ru_to_en.chrf2 >= 45
+    assert report.ru_to_en.synthesized_wer < 0.15
+    assert not report.passes_thresholds
+    assert {
+        (violation.case_id, violation.kind, violation.layer)
+        for violation in report.ru_to_en.critical_violations
+    } == {(case_id, kind, layer) for layer in layers}
+    assert not report.en_to_ru.critical_violations
+
+
+@pytest.mark.parametrize("layer", ["mt", "audible"])
+def test_critical_identifier_multiplicity_fails_in_each_layer(layer: str) -> None:
+    corpus = load_quality_corpus(CORPUS_PATH)
+    outputs = {
+        Language.RU: [case.ru for case in corpus.cases],
+        Language.EN: [case.en for case in corpus.cases],
+    }
+    transcripts = {language: list(values) for language, values in outputs.items()}
+    index = next(
+        index
+        for index, case in enumerate(corpus.cases)
+        if case.case_id == "order-number:104"
+    )
+    (outputs if layer == "mt" else transcripts)[Language.EN][index] = (
+        "I confirm order number 104, order number 104."
+    )
+
+    report = evaluate_quality(
+        corpus, outputs=outputs, synthesized_transcripts=transcripts
+    )
+
+    assert report.ru_to_en.chrf2 >= 45
+    assert report.ru_to_en.synthesized_wer < 0.15
+    assert not report.passes_thresholds
+    assert any(
+        (violation.case_id, violation.kind, violation.layer)
+        == ("order-number:104", "number", layer)
+        for violation in report.ru_to_en.critical_violations
+    )
+
+
+@pytest.mark.parametrize("layer", ["mt", "audible"])
+@pytest.mark.parametrize(
+    ("text", "passes"),
+    [
+        ("Нет, отключайте микрофон до 09:10.", False),
+        ("Микрофон не нужно отключать до 09:10.", True),
+    ],
+)
+def test_russian_command_negation_has_action_scope(
+    layer: str, text: str, passes: bool
+) -> None:
+    corpus = load_quality_corpus(CORPUS_PATH)
+    outputs = {
+        Language.RU: [case.ru for case in corpus.cases],
+        Language.EN: [case.en for case in corpus.cases],
+    }
+    transcripts = {language: list(values) for language, values in outputs.items()}
+    index = next(
+        index
+        for index, case in enumerate(corpus.cases)
+        if case.case_id == "do-not-mute:09:10"
+    )
+    (outputs if layer == "mt" else transcripts)[Language.RU][index] = text
+
+    report = evaluate_quality(
+        corpus, outputs=outputs, synthesized_transcripts=transcripts
+    )
+
+    assert report.en_to_ru.synthesized_wer < 0.15
+    assert report.passes_thresholds is passes
+    assert [
+        (violation.kind, violation.layer)
+        for violation in report.en_to_ru.critical_violations
+    ] == ([] if passes else [("negation", layer)])
+
+
+def test_quality_runner_review_hash_binds_audible_text_and_layer_verdicts() -> None:
+    corpus = load_quality_corpus(CORPUS_PATH)
+    translations = (
+        {(case.ru, Language.EN): case.en for case in corpus.cases}
+        | {(case.en, Language.RU): case.ru for case in corpus.cases}
+        | {(warmup.ru, Language.EN): warmup.en for warmup in corpus.warmups}
+        | {(warmup.en, Language.RU): warmup.ru for warmup in corpus.warmups}
+    )
+    selected = next(
+        case for case in corpus.cases if case.case_id == "do-not-mute:09:10"
+    )
+
+    class Translator:
+        def translate(self, text, *, source_language, target_language, mode):
+            return translations[(text, target_language)]
+
+    def run(audible_text: str, measured_corpus=corpus):
+        ticks = iter(range(0, 10_000_000_000, 1_000_000))
+        return run_quality_benchmark(
+            measured_corpus,
+            translator=Translator(),
+            synthesize_and_transcribe=lambda text, language: (
+                audible_text
+                if language is Language.EN and text == selected.en
+                else text
+            ),
+            now_ns=lambda: next(ticks),
+        )
+
+    exact = run(selected.en)
+    equivalent = run("Don't mute the microphone until 09 : 10.")
+    corrupt = run("Mute the microphone until 09:10.")
+    changed_oracle = run(
+        selected.en,
+        replace(
+            corpus,
+            cases=tuple(
+                replace(case, negation_en_anchors=("wait",))
+                if case.case_id == selected.case_id
+                else case
+                for case in corpus.cases
+            ),
+        ),
+    )
+    assert exact.passes_thresholds
+    assert equivalent.passes_thresholds
+    assert not changed_oracle.passes_thresholds
+    assert exact.critical_review_content_sha256 != (
+        changed_oracle.critical_review_content_sha256
+    )
+    assert (
+        len(
+            {
+                result.critical_review_content_sha256
+                for result in (exact, equivalent, corrupt)
+            }
+        )
+        == 3
+    )
+    assert not corrupt.passes_thresholds
+
+
 def test_corpus_and_metric_cardinality_fail_closed(tmp_path: Path) -> None:
     payload = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
     for mutation in ("nine_warmups", "ninety_nine_cases"):
@@ -1197,6 +1364,46 @@ def test_quality_runner_counts_drops_per_direction_with_fixed_denominator() -> N
     assert run.en_to_ru.passes_drop_threshold
     assert len(synthesized) == 199
     assert (corpus.cases[50].en, Language.EN) not in synthesized
+    assert not run.passes_thresholds
+
+
+@pytest.mark.parametrize("missing_transcript", ["", " \t\n", None, 123])
+def test_quality_runner_counts_missing_audible_transcript_as_drop(
+    missing_transcript,
+) -> None:
+    corpus = load_quality_corpus(CORPUS_PATH)
+    translations = (
+        {(case.ru, Language.EN): case.en for case in corpus.cases}
+        | {(case.en, Language.RU): case.ru for case in corpus.cases}
+        | {(warmup.ru, Language.EN): warmup.en for warmup in corpus.warmups}
+        | {(warmup.en, Language.RU): warmup.ru for warmup in corpus.warmups}
+    )
+    selected = corpus.cases[0]
+
+    class Translator:
+        def translate(self, text, *, source_language, target_language, mode):
+            return translations[(text, target_language)]
+
+    ticks = iter(range(0, 10_000_000_000, 1_000_000))
+    run = run_quality_benchmark(
+        corpus,
+        translator=Translator(),
+        synthesize_and_transcribe=lambda text, language: (
+            missing_transcript
+            if language is Language.EN and text == selected.en
+            else text
+        ),
+        now_ns=lambda: next(ticks),
+    )
+
+    assert run.measured_per_direction == 100
+    assert run.ru_to_en.success_count == 99
+    assert run.ru_to_en.drop_count == 1
+    assert run.ru_to_en.drop_rate == pytest.approx(0.01)
+    assert len(run.ru_to_en.success_latency_ms) == 99
+    assert run.en_to_ru.success_count == 100
+    assert run.en_to_ru.drop_count == 0
+    assert len(run.en_to_ru.success_latency_ms) == 100
     assert not run.passes_thresholds
 
 

@@ -17,6 +17,7 @@ import subprocess
 import time
 import wave
 from collections.abc import Iterable
+from contextlib import nullcontext
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, TextIO
@@ -24,6 +25,7 @@ from uuid import UUID, uuid4
 
 import psutil
 from translator_mdc_asr_run import validate_manifest
+from translator_product_pcm import PcmArtifactStore
 from translator_sidecar.cleanup import finish_cleanup
 from translator_sidecar.local.runtime import build_local_provider
 from translator_sidecar.provider_contract import (
@@ -36,15 +38,19 @@ from translator_sidecar.provider_contract import (
     PcmFormat,
     PrivacySafeProviderError,
     ProviderAudioDelta,
+    ProviderHealth,
     ProviderId,
     ProviderInputFrame,
     ProviderLatency,
+    ProviderSessionClosed,
+    ProviderSessionOpened,
     ProviderState,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
     ProviderUtteranceFinal,
     SafeErrorCode,
     SampleFormat,
+    SessionCloseReason,
     TranslationMode,
     UtteranceOutcome,
     VoiceEngine,
@@ -312,11 +318,70 @@ def evaluate_events(
     stream_id: UUID,
     utterance_id: UUID,
 ) -> dict[str, Any]:
-    if any(at < started_ns for _, at in event_times):
+    utterance_types = (
+        ProviderTranscriptDelta,
+        ProviderTranslationDelta,
+        ProviderAudioDelta,
+        ProviderLatency,
+        ProviderUtteranceFinal,
+        PrivacySafeProviderError,
+    )
+    session_types = (ProviderSessionOpened, ProviderHealth)
+    has_provider_error = any(
+        isinstance(event, PrivacySafeProviderError) for event, _ in event_times
+    )
+    order_failure = (
+        "provider returned a safe error"
+        if has_provider_error
+        else "provider event sequence or terminal order differs"
+    )
+    if any(
+        not isinstance(event, (*utterance_types, *session_types))
+        for event, _ in event_times
+    ):
+        raise ValueError(order_failure)
+    if any(
+        type(at) is not int
+        or at < 0
+        or type(getattr(event, "event_sequence", None)) is not int
+        or event.event_sequence < 0
+        for event, at in event_times
+    ) or any(
+        current_at < previous_at
+        for (_, previous_at), (_, current_at) in pairwise(event_times)
+    ):
+        raise ValueError(order_failure)
+    first_utterance = next(
+        (
+            index
+            for index, (event, _) in enumerate(event_times)
+            if isinstance(event, utterance_types)
+        ),
+        len(event_times),
+    )
+    if any(
+        isinstance(event, session_types) for event, _ in event_times[first_utterance:]
+    ) or any(
+        current.event_sequence <= previous.event_sequence
+        for (previous, _), (current, _) in pairwise(event_times)
+    ):
+        raise ValueError(order_failure)
+    if any(
+        getattr(event, "session_id", None) != session_id
+        or getattr(event, "direction_id", None) != direction_id
+        for event, _ in event_times
+    ):
+        raise ValueError(
+            "provider returned a safe error"
+            if has_provider_error
+            else "provider event identity differs from submitted utterance"
+        )
+    utterance_times = event_times[first_utterance:]
+    if any(at < started_ns for _, at in utterance_times):
         raise ValueError("provider event precedes saved-audio submission")
-    if any(isinstance(event, PrivacySafeProviderError) for event, _ in event_times):
+    if any(isinstance(event, PrivacySafeProviderError) for event, _ in utterance_times):
         latency = _verified_terminal_drop(
-            event_times,
+            utterance_times,
             session_id=session_id,
             direction_id=direction_id,
             stream_id=stream_id,
@@ -575,6 +640,7 @@ async def _run_case(
     *,
     expected_asr_id: str,
     expected_mt_id: str,
+    capture_audio: PcmArtifactStore | None = None,
 ) -> dict[str, Any]:
     request = _request(case["language"], mode, voice_gender)
     event_times: list[tuple[Any, int]] = []
@@ -590,6 +656,8 @@ async def _run_case(
     post_health_attempted = False
     open_models: dict[str, dict[str, str]] | None = None
     after_models: dict[str, dict[str, str]] | None = None
+    result: dict[str, Any] | None = None
+    count_before_close = 0
     try:
         _, health = await reservation.open()
         opened = True
@@ -644,7 +712,6 @@ async def _run_case(
             )
             result["effective_models_open"] = open_models
             result["effective_models_after"] = after_models
-            return result
         except ValueError as observation_error:
             if not isinstance(observation_error, VerifiedProviderDrop):
                 observation_error.safe_provider_codes = [
@@ -714,6 +781,7 @@ async def _run_case(
         raise
     finally:
         try:
+            count_before_close = len(event_times)
             receipt = await finish_cleanup(
                 reservation.drain(CloseRequestReason.USER_STOP)
             )
@@ -728,6 +796,46 @@ async def _run_case(
                 error.cleanup_error_type = type(cleanup_error).__name__
                 raise error from cleanup_error
             raise
+    assert result is not None
+    if capture_audio is not None:
+        if (
+            len(event_times) != count_before_close + 1
+            or not isinstance(event_times[-1][0], ProviderSessionClosed)
+            or event_times[-1][0].session_id != request.session_id
+            or event_times[-1][0].direction_id != request.direction_id
+            or event_times[-1][0].reason is not SessionCloseReason.USER_STOP
+            or event_times[-1][0].event_sequence <= event_times[-2][0].event_sequence
+            or any(
+                current_at < previous_at
+                for (_, previous_at), (_, current_at) in pairwise(event_times)
+            )
+        ):
+            raise RuntimeError("product session close publication differs")
+        bindings = {
+            "session_id": str(request.session_id),
+            "direction_id": request.direction_id.value,
+            "stream_id": str(stream_id),
+            "utterance_id": str(utterance_id),
+            "input_wav_sha256": case["wav_sha256"],
+            "target_language": request.target_language.value,
+            "requested_voice": request.voice_profile.model_dump(
+                mode="json", exclude_none=True
+            ),
+            "effective_models_open": open_models,
+            "effective_models_after": after_models,
+        }
+        output_pcm = b"".join(
+            event.pcm
+            for event, _ in event_times
+            if isinstance(event, ProviderAudioDelta)
+        )
+        result["pcm_artifact"] = {
+            **capture_audio.write_pcm(
+                output_pcm, result["pcm_sha256"], f"{utterance_id.hex}.wav"
+            ),
+            **bindings,
+        }
+    return result
 
 
 def _gpu_process_mib(pid: int | None) -> int | None:
@@ -775,6 +883,7 @@ async def _run_arm(
     rows: list[dict[str, Any]],
     mode: TranslationMode,
     voice_gender: VoiceGender,
+    capture_audio: PcmArtifactStore | None = None,
 ) -> tuple[bool, bool]:
     previous_asr = os.environ.get("TRANSLATOR_ASR_MODEL_ID")
     previous_mt = os.environ.get("TRANSLATOR_MT_MODEL_ID")
@@ -828,6 +937,11 @@ async def _run_arm(
                         voice_gender,
                         expected_asr_id=expected_asr_id,
                         expected_mt_id=expected_mt_id,
+                        **(
+                            {"capture_audio": capture_audio}
+                            if capture_audio is not None
+                            else {}
+                        ),
                     )
                 )
             except Exception as error:  # noqa: BLE001 - retain the failed attempt
@@ -966,7 +1080,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         else ("hy", "nllb", "small_nllb_same_code")
     )
     rows: list[dict[str, Any]] = []
-    with open_journal(args.output) as journal:
+    capture_directory = getattr(args, "capture_audio", None)
+    with (
+        open_journal(args.output) as journal,
+        (
+            PcmArtifactStore(capture_directory, forbidden_roots=(ROOT,))
+            if capture_directory is not None
+            else nullcontext()
+        ) as capture_audio,
+    ):
         write_record(
             journal,
             {
@@ -1010,13 +1132,33 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 "voice_gender": voice_gender.value,
                 "input": "mono s16le 16000 Hz 100 ms, submitted as fast as possible",
                 "output": "mono s16le 24000 Hz 20 ms",
+                **(
+                    {
+                        "capture_audio_enabled": True,
+                        "pcm_helper_sha256": sha256(
+                            Path(__file__).with_name("translator_product_pcm.py")
+                        ),
+                    }
+                    if capture_audio is not None
+                    else {}
+                ),
                 "cpu_affinity": sorted(os.sched_getaffinity(0)),
             },
         )
         all_complete = True
         for arm_index, backend in enumerate(order):
             can_continue, arm_complete = await _run_arm(
-                backend, cases, journal, rows, mode, voice_gender
+                backend,
+                cases,
+                journal,
+                rows,
+                mode,
+                voice_gender,
+                **(
+                    {"capture_audio": capture_audio}
+                    if capture_audio is not None
+                    else {}
+                ),
             )
             all_complete &= arm_complete
             if not can_continue:
@@ -1075,6 +1217,11 @@ def main() -> int:
     parser.add_argument("--screen", type=Path, required=True)
     parser.add_argument("--turbo", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--capture-audio",
+        type=Path,
+        help="existing private directory for verified output WAVs",
+    )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
         "--voice-gender",

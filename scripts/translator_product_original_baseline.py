@@ -19,12 +19,14 @@ import stat
 import subprocess
 import time
 import wave
+from contextlib import nullcontext
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
 from translator_mdc_asr_run import validate_manifest
+from translator_product_pcm import PcmArtifactStore
 from translator_sidecar.provider_contract import (
     AudioDirection,
     CloseProviderSession,
@@ -36,10 +38,12 @@ from translator_sidecar.provider_contract import (
     PcmFormat,
     PrivacySafeProviderError,
     ProviderAudioDelta,
+    ProviderHealth,
     ProviderId,
     ProviderInputFrame,
     ProviderLatency,
     ProviderSessionClosed,
+    ProviderSessionOpened,
     ProviderState,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
@@ -436,7 +440,6 @@ def evaluate_events(
     stream_id: Any,
     utterance_id: Any,
 ) -> dict[str, Any]:
-    events = [event for event, _ in event_times]
     allowed = (
         ProviderTranscriptDelta,
         ProviderTranslationDelta,
@@ -444,15 +447,41 @@ def evaluate_events(
         ProviderLatency,
         ProviderUtteranceFinal,
     )
+    session_types = (ProviderSessionOpened, ProviderHealth)
+    events = [event for event, _ in event_times]
     if (
         not events
-        or any(at < started_ns for _, at in event_times)
+        or any(type(at) is not int or at < 0 for _, at in event_times)
         or any(
             current_at < previous_at
             for (_, previous_at), (_, current_at) in pairwise(event_times)
         )
         or any(isinstance(event, PrivacySafeProviderError) for event in events)
-        or any(not isinstance(event, allowed) for event in events)
+        or any(not isinstance(event, (*allowed, *session_types)) for event in events)
+        or any(
+            type(getattr(event, "event_sequence", None)) is not int
+            or event.event_sequence < 0
+            for event in events
+        )
+        or any(
+            getattr(event, "session_id", None) != session_id
+            or getattr(event, "direction_id", None) != direction_id
+            for event in events
+        )
+        or any(
+            current.event_sequence <= previous.event_sequence
+            for previous, current in pairwise(events)
+        )
+    ):
+        raise ValueError("original provider event time or order differs")
+    first_utterance = next(
+        (index for index, event in enumerate(events) if isinstance(event, allowed)),
+        len(events),
+    )
+    event_times = event_times[first_utterance:]
+    events = events[first_utterance:]
+    if any(isinstance(event, session_types) for event in events) or any(
+        at < started_ns for _, at in event_times
     ):
         raise ValueError("original provider event time or order differs")
     if any(
@@ -525,7 +554,12 @@ def evaluate_events(
 
 
 async def run_case(
-    provider: Any, case: dict[str, Any], mode: TranslationMode, gender: VoiceGender
+    provider: Any,
+    case: dict[str, Any],
+    mode: TranslationMode,
+    gender: VoiceGender,
+    *,
+    capture_audio: PcmArtifactStore | None = None,
 ) -> dict[str, Any]:
     request = _request(case["language"], mode, gender)
     event_times: list[tuple[Any, int]] = []
@@ -630,9 +664,38 @@ async def run_case(
         or closed[0].reason is not SessionCloseReason.USER_STOP
         or not isinstance(event_times[-1][0], ProviderSessionClosed)
         or closed[0].event_sequence <= event_times[-2][0].event_sequence
+        or any(
+            current_at < previous_at
+            for (_, previous_at), (_, current_at) in pairwise(event_times)
+        )
     ):
         raise RuntimeError("original session close publication differs")
     assert result is not None
+    if capture_audio is not None:
+        bindings = {
+            "session_id": str(request.session_id),
+            "direction_id": request.direction_id.value,
+            "stream_id": str(stream_id),
+            "utterance_id": str(utterance_id),
+            "input_wav_sha256": case["wav_sha256"],
+            "target_language": request.target_language.value,
+            "requested_voice": request.voice_profile.model_dump(
+                mode="json", exclude_none=True
+            ),
+            "effective_models_open": before,
+            "effective_models_after": after,
+        }
+        output_pcm = b"".join(
+            event.pcm
+            for event, _ in event_times
+            if isinstance(event, ProviderAudioDelta)
+        )
+        result["pcm_artifact"] = {
+            **capture_audio.write_pcm(
+                output_pcm, result["pcm_sha256"], f"{utterance_id.hex}.wav"
+            ),
+            **bindings,
+        }
     return result
 
 
@@ -660,7 +723,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     from translator_sidecar.local.runtime import build_local_provider
 
     rows: list[dict[str, Any]] = []
-    with open_journal(args.output) as journal:
+    capture_directory = getattr(args, "capture_audio", None)
+    with (
+        open_journal(args.output) as journal,
+        (
+            PcmArtifactStore(
+                capture_directory, forbidden_roots=(ORIGINAL_ROOT, FORK_ROOT)
+            )
+            if capture_directory is not None
+            else nullcontext()
+        ) as capture_audio,
+    ):
         write_record(
             journal,
             {
@@ -681,6 +754,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 "diagnostic_case_id": args.case_id,
                 "input": "mono s16le 16000 Hz 100 ms, submitted as fast as possible",
                 "output": "mono s16le 24000 Hz 20 ms",
+                **(
+                    {
+                        "capture_audio_enabled": True,
+                        "pcm_helper_sha256": sha256(
+                            Path(__file__).with_name("translator_product_pcm.py")
+                        ),
+                    }
+                    if capture_audio is not None
+                    else {}
+                ),
             },
         )
         provider = None
@@ -734,7 +817,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 }
                 try:
                     row.update(
-                        await run_case(provider, case, args.mode, args.voice_gender)
+                        await run_case(
+                            provider,
+                            case,
+                            args.mode,
+                            args.voice_gender,
+                            **(
+                                {"capture_audio": capture_audio}
+                                if capture_audio is not None
+                                else {}
+                            ),
+                        )
                     )
                 except Exception as error:  # noqa: BLE001 - preserve first failed case
                     row.update(status="failed", error_type=type(error).__name__)
@@ -795,6 +888,11 @@ def main() -> int:
     parser.add_argument("--turbo", required=True, type=Path)
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--capture-audio",
+        type=Path,
+        help="existing private directory for verified output WAVs",
+    )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--case-id")
     parser.add_argument(

@@ -6,6 +6,12 @@ The authoritative candidate gate record is
 about code that was then missing or failing describe that baseline and must not
 be read as new post-change findings.
 
+Current execution follows
+[`automatic-product-acceptance-20261001.md`](automatic-product-acceptance-20261001.md).
+The user has excluded manual checks; independent ASR, semantic controls,
+artifact custody and automated physical/native checks own the remaining gates.
+No manual listening or manual C2C handoff is a prerequisite for continuing.
+
 Status: proposal for one C2C macro-plan and final exact-tree review, not a
 release approval. Source checkpoint: clean `codex/product-clean-20260923` at
 `faa8431eb999195c0a06b96508f5a3a14f2f318d`. Production is out of scope

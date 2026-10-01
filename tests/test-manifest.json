@@ -158,7 +158,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1138,
+      "node_count": 1158,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -5988,7 +5988,73 @@
         },
         {
           "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_identifier_multiplicity_fails_in_each_layer[audible]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_identifier_multiplicity_fails_in_each_layer[mt]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
           "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_accepts_format_and_cross_script_equivalents",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers0-do-not-mute:09:10-Mute the microphone until 09:10.-negation]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers0-order-number:104-I confirm order number 999.-number]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers0-send-file:Alex-Send the file to Boris.-name]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers1-do-not-mute:09:10-Mute the microphone until 09:10.-negation]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers1-order-number:104-I confirm order number 999.-number]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers1-send-file:Alex-Send the file to Boris.-name]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers2-do-not-mute:09:10-Mute the microphone until 09:10.-negation]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers2-order-number:104-I confirm order number 999.-number]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_critical_oracle_attributes_each_mt_and_audible_layer[layers2-send-file:Alex-Send the file to Boris.-name]",
           "reason": "",
           "status": "deterministic"
         },
@@ -6222,7 +6288,37 @@
         },
         {
           "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_quality_runner_counts_missing_audible_transcript_as_drop[ /t/n]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_quality_runner_counts_missing_audible_transcript_as_drop[123]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_quality_runner_counts_missing_audible_transcript_as_drop[None]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_quality_runner_counts_missing_audible_transcript_as_drop[]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
           "id": "sidecar/tests/test_task6_benchmark.py::test_quality_runner_excludes_warmups_and_measures_every_case",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_quality_runner_review_hash_binds_audible_text_and_layer_verdicts",
           "reason": "",
           "status": "deterministic"
         },
@@ -6247,6 +6343,30 @@
         {
           "file": "sidecar/tests/test_task6_benchmark.py",
           "id": "sidecar/tests/test_task6_benchmark.py::test_resource_peaks_uses_available_gpu_utilization_samples",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_russian_command_negation_has_action_scope[/u041c/u0438/u043a/u0440/u043e/u0444/u043e/u043d /u043d/u0435 /u043d/u0443/u0436/u043d/u043e /u043e/u0442/u043a/u043b/u044e/u0447/u0430/u0442/u044c /u0434/u043e 09:10.-True-audible]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_russian_command_negation_has_action_scope[/u041c/u0438/u043a/u0440/u043e/u0444/u043e/u043d /u043d/u0435 /u043d/u0443/u0436/u043d/u043e /u043e/u0442/u043a/u043b/u044e/u0447/u0430/u0442/u044c /u0434/u043e 09:10.-True-mt]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_russian_command_negation_has_action_scope[/u041d/u0435/u0442, /u043e/u0442/u043a/u043b/u044e/u0447/u0430/u0439/u0442/u0435 /u043c/u0438/u043a/u0440/u043e/u0444/u043e/u043d /u0434/u043e 09:10.-False-audible]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_task6_benchmark.py",
+          "id": "sidecar/tests/test_task6_benchmark.py::test_russian_command_negation_has_action_scope[/u041d/u0435/u0442, /u043e/u0442/u043a/u043b/u044e/u0447/u0430/u0439/u0442/u0435 /u043c/u0438/u043a/u0440/u043e/u0444/u043e/u043d /u0434/u043e 09:10.-False-mt]",
           "reason": "",
           "status": "deterministic"
         },

@@ -1,0 +1,6 @@
+# Isolated Python 3.12 evaluator only; not a production sidecar environment.
+httpx==0.28.1
+jiwer==4.0.0
+nemo-text-processing==1.2.0
+pydantic==2.13.4
+pynini==2.1.6.post1

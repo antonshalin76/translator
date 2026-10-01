@@ -485,3 +485,72 @@ error-rate estimate. Turbo→NLLB still has meaning errors in `ru-81073` and
 `en-80121`; Hy's corresponding predicate fidelity is uncertain in the former.
 The output translation chain therefore has no critical-fact PASS from this
 comparison. No English listening result was invented.
+
+## 2026-10-01 automatic actual-output comparison
+
+Manual listening/review handoffs are no longer an execution prerequisite.
+The automatic plan and gate boundaries are in
+[`../automatic-product-acceptance-20261001.md`](../automatic-product-acceptance-20261001.md).
+Production remains clean and unchanged at `9291e8b`; fork HEAD before this
+stage is `9c3c397`. No merge, tag, installation or activation occurred.
+
+Actual generated PCM from all four existing chains is now retained outside
+Git under private artifact identity `automatic-chain-capture-20261001-uYFSDG`:
+
+| Artifact | Completed attempts | SHA-256 |
+| --- | --- | --- |
+| Original main capture | 24/24 | `0872b80b973da472d50d58f06ba763f25bc6a69195dd31a93864c4c217083cd5` |
+| Three fork-arm captures | 72/72 | `027cb8b96b162c12ebf6cafffec20aa4201e9b494b3c35070e4f7d99b163c70d` |
+| Independent output-ASR and semantic diagnostic | 24/24 paired cases | `916ed05d7f2e41305dc040d18da106d7bdf79228164c14ee3377768831bf5345` |
+
+The runners persist WAVs only after verified health, event/terminal ordering
+and session drain. WAV ownership, private directory/file identities, format,
+size, sample counts and hashes are checked again immediately before upload.
+Cleanup/custody uncertainty stops subsequent sends. No audio device or host
+route was used during these accelerated offline captures.
+
+Both output ASR providers and both semantic judges passed calibrated controls.
+All 192 output-ASR and 48 case-judge observations completed. Full-chain
+unanimous acceptance across both judges and both output recognizers was
+5/24 original main, 8/24 fork Small, 8/24 Turbo/NLLB and 8/24 Turbo/Hy.
+Source-reference-to-translation unanimity was respectively 5, 8, 9 and 10
+cases; this includes ASR errors and is not an isolated MT measurement. Output-ASR proxy
+WER ranged from 0.97% to 6.13%, but critical/ambiguous meaning losses remain.
+Successful execution is not product PASS: the receipt says
+`diagnostic_accepted=false`, `release=false`. The development screen is not
+an independent release holdout; generated PCM is not physical first audible.
+
+Focused verification after the final changes: Task6 88 PASS; fork/custody
+151 PASS; isolated original runner 26 PASS; cloud orchestration 16 PASS;
+numeric wrapper six PASS and explicit real NeMo RU/EN grammar one PASS.
+Initial behavioral failures and final independent bounded architecture review
+are recorded in the automatic plan. The staged diagnostic slice reviewed as
+tree `670ef995dc6f564ba08fc099a80db7137d9a8347` comprised 17 files,
+3,026 insertions and 28 deletions; runtime/evaluator code grew by 1,275 lines
+for the new capability, not as a code-reduction refactor.
+
+The first aggregate passed UI/Rust/lint and 1,153 pytest nodes with five
+declared external skips, then failed seven publication tests solely because
+the launch environment omitted pinned Gitleaks. The 59-test publication
+suite reproduced those seven failures and then passed with the existing
+Gitleaks 8.30.0 path. No tests or scanner policy were weakened. A complete
+final aggregate with those tools then passed Rust/UI/Python, shell/systemd,
+SCA and schema, but stopped at publication. Direct diagnosis found an
+executable-policy mismatch for a text requirements file and an incomplete
+tracked-file inventory. The unchanged evaluator requirements moved to
+`tests/requirements-automatic-audio-eval.txt`; the inventory was corrected
+without changing scanner or publication policy. Candidate publication passed
+on tree `f3cc8438f2585d4462d477f00fadb6f15c2a538d`; manifest validation also
+passed. A later full pinned aggregate again passed the test/SCA/schema gates
+but rejected a concurrent parent documentation/index update as a source-freeze
+violation. That execution is retained as failed. All tracked files and the
+index must remain frozen through the next terminal aggregate. Terminal
+evidence belongs outside Git, bound to the exact final candidate, rather than
+being added to this ledger while validation is running.
+
+Current prerequisite checks also retained two separate deficits: accepted RU
+corpus coverage cannot meet EVAL-0, and the native AEC backend still lacks a
+retained physical producer/graph composed into runtime. Neither deficit is
+an HTTP Start timeout measurement. Physical AEC, independent holdout,
+paired physical quality/latency, native/real-app matrix, soak and release are
+NOT_DONE. No manual English listening result is required or claimed.
