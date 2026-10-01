@@ -1,8 +1,11 @@
 # Paired saved-audio product diagnostic — 2026-09-27
 
-This fork-only diagnostic feeds the same 24 frozen MDC test WAVs (12 Russian,
-12 English) into the real `LocalProvider` twice: Turbo → NLLB → Piper and
-Turbo → Hy-MT2 → Piper. The original paired runs selected the two verified
+The historical v1 fork-only diagnostic fed the same 24 frozen MDC test WAVs
+(12 Russian, 12 English) into the real `LocalProvider` twice: Turbo → NLLB →
+Piper and Turbo → Hy-MT2 → Piper. The current v2 runner also names a Small →
+NLLB → Piper arm, executed on candidate code as a same-code ablation; it is
+not an untouched `main` baseline receipt, and no v2 model run is accepted yet.
+The original paired runs selected the two verified
 female Piper voices and `QUALITY_FIRST`; the runner now explicitly selects
 male or female voices and any of the three modes. Input is 16-kHz mono and
 output is 24-kHz mono. The

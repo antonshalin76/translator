@@ -35,9 +35,31 @@ separate USB card, not the production analog pair.
 | --- | --- | --- |
 | No-headphones audio | Acoustic admission rejects open-speaker mic without a proof for the exact physical pair. AEC coordinator/controller and Pulse graph components exist. | `main.rs` still constructs the watcher with unavailable AEC and passes no calibration controller to the API. `round_trip_preconditions` also hardcodes headphones, so even a validated AEC pair cannot run that test path. There is no live calibration engine, runtime proof attachment, revocation, or physical AEC result. |
 | Audio lifecycle | Owned original-loopback creation and volume control passed deterministic and private virtual-Pulse checks. | On an observed unsafe output change, stale raw-mic cleanup can fail silently; one-sided owned streams can be overlooked. Start/reconcile can report success without route-safety proof or stopping a newly unsafe running mic. The one-second watcher cannot prove zero exposure at the instant of an external port change. |
-| Effective model chain | Turbo is the input development leader; NLLB and Piper are the conservative MT/voice baseline. Hy is a quality challenger with unresolved failures. | `local/runtime.py` defaults to `faster-whisper-small`, whereas saved-audio diagnostics force Turbo. The effective installed configuration and exact model hashes must be bound to the candidate before comparative claims. |
+| Effective model chain | The original `main` chain is Small → NLLB → Piper. Turbo is the input development leader; NLLB remains the default MT, and Hy is a quality challenger with unresolved failures. | The original chain has not been measured against both Turbo chains on an independent full-chain holdout. Freeze the effective binaries, configuration and model hashes for each arm before comparative claims. |
+| Output voice | Piper is the configured product voice, not a demonstrated winner. A direct eight-cell CPU pilot compared it with Supertonic 3; the tested Supertonic path was slower to first PCM and its ASR proxy changed four numeric values. | No blind, loudness-controlled RU/EN audible decision, complete voice/gender matrix, or paired first-audible product result. Qwen3-TTS is an untested bilingual matrix candidate; Kokoro is English-only in this project's matrix. Research-only or license-blocked models are not release arms. |
 | Quality and speed | Frozen 24-WAV accelerated saved-audio diagnostics include complete quality-first and balanced runs; one full streaming-first run failed. Historical physical Task 7 first-audible is 5968 ms. | No independent speaker-disjoint RU/EN holdout, full mode/voice matrix, independently transcribed audible TTS, physical first-audible comparison, or quantified reliability gain. Replays do not erase retained failures. |
 | User and release path | Daemon/API/UI, installer and release contracts exist. | No native calibration UX or live status; no complete physical Meet/Telegram/Zoom matrix, 30-minute soak, install/rollback proof, or exact-SHA release evidence. |
+
+Baseline configuration check on 2026-10-01: the unchanged `main` revision
+`9291e8beafee3e02aaa179178ce460ac9e6c6de2` defaults to
+`faster-whisper-small`, NLLB and Piper. Its user service reads `.env`, which
+also selects Small for ASR; no MT-model override was found. The service unit
+was inactive at inspection. This establishes the configured baseline, not a
+live runtime or model-file identity; freeze those separately for the eval.
+The fork's `translator_product_audio_pair.py` v2 runner now has a separate
+Small → NLLB → Piper arm alongside Turbo → NLLB and Turbo → Hy. Its 70 focused
+contract tests pass on 2026-10-01, including effective-model fallback,
+event identity/order, and terminal failure recording. No three-arm model run
+has been accepted yet. The Small arm uses the candidate code and is explicitly
+labelled a same-code ablation; it is **not** a receipt from the untouched
+original `main` baseline.
+
+The existing 24-WAV Turbo/NLLB-versus-Hy screen is development evidence. Use
+it to debug the three-chain runner, not to claim improvement over the original
+Small baseline or to select a release model. Freeze a separate development set
+and untouched release holdout before further model tuning. For each direction,
+the holdout must meet EVAL-0's 120 unique source/reference pairs, speaker and
+critical-case coverage, and verified audio/reference alignment.
 
 These are connected seams of one feature, not an invitation to run separate
 C2C cycles for each row. The source contracts are `master-bdd.md` (especially
@@ -181,13 +203,36 @@ RU. Do not silently replace the intended holdout with that development split
 or use existing credentials to bypass unaccepted dataset terms. No material
 from these sources has been downloaded, frozen or scored here.
 
+An official [Tatoeba export](https://tatoeba.org/en/downloads) provides
+sentence-translation links and per-record audio author/license metadata. It is
+the next metadata-only feasibility check, not an admitted holdout: filter audio
+to explicit reusable licenses, count RU/EN pairs and disjoint speakers, then
+inspect critical/long-turn coverage and audio-reference alignment. Tatoeba
+itself warns that sentence translations may need correction. Do not download
+audio or score models until the metadata, terms and selection are frozen.
+
 ## Proposed single development pass
 
-1. Freeze the effective candidate configuration and a genuinely independent
-   release holdout before tuning. Keep Turbo/NLLB/Piper as the candidate
-   baseline until the effective runtime, manifest and pinned model files agree.
-   Hy remains opt-in until its failures and critical errors are resolved.
-2. Implement the complete open-speaker vertical path together: isolated
+1. Freeze the original Small → NLLB → Piper baseline, both candidate chains
+   (Turbo → NLLB → Piper and Turbo → Hy → Piper), a development set, and a
+   disjoint release holdout before tuning. Bind each arm to its own exact source
+   revision, runtime configuration, binary and model/voice hashes. Extend the
+   saved-audio runner with an explicitly labelled Small arm and negative tests
+   for wrong model, mismatched input, incomplete attempt and baseline/candidate
+   identity confusion. A Small arm executed on candidate code is a same-code
+   ablation, not the untouched original baseline.
+2. Use the development set to compare all three chains with complete failure
+   accounting. Evaluate ASR text, MT meaning and generated PCM separately;
+   compare NLLB and Hy on identical frozen ASR text as an MT-only control.
+   Keep Hy opt-in until critical errors and the unexplained failed attempt are
+   resolved. In parallel, compare Piper with eligible TTS challengers on the
+   same verified target texts in RU/EN male/female cells. Admit a challenger
+   only after source/license, first-PCM, stability, critical-content and
+   independently transcribed audible checks; ASR-proxy agreement alone cannot
+   establish pronunciation. An unavailable English perceptual check is marked
+   `UNAVAILABLE`, not silently counted as a pass. Freeze the chosen complete
+   chain before the release holdout is opened.
+3. Implement the complete open-speaker vertical path together: isolated
    calibration engine, exact-pair AEC proof and runtime revocation, safe
    original-mic transition with verified cleanup/failure projection,
    Start/Stop/restart admission, API status and native UI controls. Test the
@@ -209,20 +254,27 @@ from these sources has been downloaded, frozen or scored here.
    both code and `master-bdd.md`. Enabling it on speakers requires an explicit
    AEC-reserved branch with no-recursion and restoration assertions; simply
    removing that precondition would weaken the product contract.
-3. After the isolated test and rollback are rehearsed, perform one scheduled
+4. After the isolated test and rollback are rehearsed, perform one scheduled
    physical acoustic gate on the user's pair without taking over production
    audio: 30 seconds of -20 dBFS far-end fixture with median ERLE >=15 dB;
    separately 60 seconds far-end-only with zero outgoing VAD/translation;
    then real bidirectional Start/Stop/restart, audible first-frame, route
    restoration and leak checks. Retain every timeout and failed attempt.
-4. On one frozen candidate SHA, run the documented independent RU/EN holdout,
-   all three modes, both language assignments, both required target-voice
-   genders and all advertised fallbacks. Compare untouched baseline and
-   candidate on identical inputs/hardware with counterbalanced paired runs;
-   report per-layer ASR, MT and audible-TTS accuracy, critical errors, drops,
-   graph-boundary first-audible, queues and resources. Then run the required
-   real-app calls, native UI, 30-minute soak, installation and rollback gates.
-5. One terminal architecture/security/C2C review of the exact tree and full
+5. On the frozen baseline and candidate SHAs, run the documented independent
+   RU/EN holdout, all three modes, both language assignments, both required
+   target-voice genders and all advertised fallbacks. Compare the original
+   Small → NLLB → Piper chain with the frozen candidate chain on identical
+   source audio and target references, using counterbalanced arm order and
+   matched voice assignments where possible. Retain separate Piper-versus-TTS
+   challenger results rather than attributing a voice change to ASR or MT.
+   Report ASR, MT and independently transcribed audible-TTS accuracy by layer,
+   along with critical errors, drops, queues and resources. Measure
+   graph-boundary first-audible on a valid physical path where each arm can
+   actually start. Mark an inadmissible baseline path `UNAVAILABLE` rather
+   than imputing latency from
+   saved-WAV timings or historical Task 7. Then run the required real-app
+   calls, native UI, 30-minute soak, installation and rollback gates.
+6. One terminal architecture/security/C2C review of the exact tree and full
    evidence packet decides release readiness. Only a passed candidate is
    merged, packaged, deployed and published with rollback proof. Failed gates
    are fixed at their owning layer and the affected integrated evidence is

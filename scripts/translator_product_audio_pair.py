@@ -17,9 +17,10 @@ import subprocess
 import time
 import wave
 from collections.abc import Iterable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, TextIO
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psutil
 from translator_mdc_asr_run import validate_manifest
@@ -29,6 +30,8 @@ from translator_sidecar.provider_contract import (
     AudioDirection,
     CloseRequestReason,
     Language,
+    ModelKind,
+    ModelState,
     OpenProviderSession,
     PcmFormat,
     PrivacySafeProviderError,
@@ -57,12 +60,19 @@ PRODUCT_MANIFEST_SHA256 = (
     "d8f73beb4e9bc2b403405e4b54b18373386ecf05de420702cb7cc9b391c758dc"
 )
 ASR_ID = "faster-whisper-large-v3-turbo"
+SMALL_ASR_ID = "faster-whisper-small"
 BACKENDS = {
     "nllb": "nllb-200-distilled-600m-ct2-int8",
     "hy": "hy-mt2-1.8b-gguf-q4-k-m",
 }
+ARMS = {
+    "small_nllb_same_code": (SMALL_ASR_ID, BACKENDS["nllb"]),
+    "nllb": (ASR_ID, BACKENDS["nllb"]),
+    "hy": (ASR_ID, BACKENDS["hy"]),
+}
 FRAME_BYTES = 3200  # 100 ms of 16-kHz mono s16le input
 OUTPUT_FRAME_BYTES = 960  # 20 ms of 24-kHz mono s16le output
+HEALTH_TIMEOUT_SECONDS = 2
 SAFE_EVALUATION_REASONS = frozenset(
     {
         "provider event precedes saved-audio submission",
@@ -70,6 +80,9 @@ SAFE_EVALUATION_REASONS = frozenset(
         "provider did not complete a text-and-audio utterance",
         "provider emitted malformed product PCM",
         "provider emitted silent product PCM",
+        "effective model identity differs",
+        "provider event identity differs from submitted utterance",
+        "provider event sequence or terminal order differs",
     }
 )
 
@@ -209,12 +222,45 @@ def write_record(journal: TextIO, record: dict[str, Any]) -> None:
 
 
 def evaluate_events(
-    event_times: list[tuple[Any, int]], *, started_ns: int
+    event_times: list[tuple[Any, int]],
+    *,
+    started_ns: int,
+    session_id: UUID,
+    direction_id: AudioDirection,
+    stream_id: UUID,
+    utterance_id: UUID,
 ) -> dict[str, Any]:
     if any(at < started_ns for _, at in event_times):
         raise ValueError("provider event precedes saved-audio submission")
     if any(isinstance(event, PrivacySafeProviderError) for event, _ in event_times):
         raise ValueError("provider returned a safe error")
+    utterance_events = [
+        event
+        for event, _ in event_times
+        if isinstance(
+            event,
+            (
+                ProviderTranscriptDelta,
+                ProviderTranslationDelta,
+                ProviderAudioDelta,
+                ProviderLatency,
+                ProviderUtteranceFinal,
+            ),
+        )
+    ]
+    if any(
+        event.session_id != session_id
+        or event.direction_id != direction_id
+        or event.stream_id != stream_id
+        or event.utterance_id != utterance_id
+        for event in utterance_events
+    ):
+        raise ValueError("provider event identity differs from submitted utterance")
+    if any(
+        current.event_sequence <= previous.event_sequence
+        for previous, current in pairwise(utterance_events)
+    ):
+        raise ValueError("provider event sequence or terminal order differs")
     final = [
         event for event, _ in event_times if isinstance(event, ProviderUtteranceFinal)
     ]
@@ -262,6 +308,13 @@ def evaluate_events(
     latencies = [
         event for event, _ in event_times if isinstance(event, ProviderLatency)
     ]
+    if (
+        [frame.sequence for frame, _ in audio] != list(range(len(audio)))
+        or len(latencies) != 1
+        or utterance_events[-2:] != [latencies[0], final[0]]
+        or final[0].final_audio_sequence != len(audio) - 1
+    ):
+        raise ValueError("provider event sequence or terminal order differs")
     return {
         "status": "completed",
         "asr_text": asr[0],
@@ -269,9 +322,7 @@ def evaluate_events(
         "first_pcm_ms": round((audio[0][1] - started_ns) / 1_000_000, 2),
         "pcm_duration_ms": len(audio) * 20,
         "pcm_sha256": digest.hexdigest(),
-        "provider_latency": latencies[-1].model_dump(mode="json")
-        if latencies
-        else None,
+        "provider_latency": latencies[0].model_dump(mode="json"),
     }
 
 
@@ -282,22 +333,49 @@ def pair_rows(
     for row in rows:
         if row.get("mode") != requested_mode.value:
             raise ValueError("paired diagnostic mode differs from requested mode")
+        if any(
+            not row.get(field)
+            for field in (
+                "wav_sha256",
+                "language",
+                "speaker_id",
+                "reference",
+                "voice_gender",
+            )
+        ):
+            raise ValueError("paired diagnostic missing input identity")
         key = (row["origin_id"], row["condition"])
         arm = indexed.setdefault(key, {})
+        if row["backend"] not in ARMS:
+            raise ValueError("paired diagnostic contains unknown backend")
         if row["backend"] in arm:
             raise ValueError("paired diagnostic contains duplicate backend")
         arm[row["backend"]] = row
     pairs = []
     for (origin_id, condition), arm in indexed.items():
-        left, right = arm.get("nllb"), arm.get("hy")
+        baseline, left, right = (
+            arm.get("small_nllb_same_code"),
+            arm.get("nllb"),
+            arm.get("hy"),
+        )
         complete = (
-            left is not None
+            baseline is not None
+            and left is not None
             and right is not None
-            and left["status"] == right["status"] == "completed"
+            and baseline["status"] == left["status"] == right["status"] == "completed"
         )
         if complete and (
-            left.get("wav_sha256") != right.get("wav_sha256")
-            or left.get("voice_gender") != right.get("voice_gender")
+            any(
+                baseline.get(field) != candidate.get(field)
+                for candidate in (left, right)
+                for field in (
+                    "wav_sha256",
+                    "language",
+                    "speaker_id",
+                    "reference",
+                    "voice_gender",
+                )
+            )
         ):
             raise ValueError("paired diagnostic input identity differs")
         pairs.append(
@@ -308,6 +386,9 @@ def pair_rows(
                 "status": "complete" if complete else "incomplete",
                 "mt_confounded_by_asr": (
                     left["asr_text"] != right["asr_text"] if complete else None
+                ),
+                "baseline_asr_divergent": (
+                    baseline["asr_text"] != left["asr_text"] if complete else None
                 ),
             }
         )
@@ -350,11 +431,60 @@ def _request(
     )
 
 
+def _checked_health(
+    health: Any,
+    request: OpenProviderSession,
+    expected_asr_id: str,
+    expected_mt_id: str,
+) -> dict[str, dict[str, str]]:
+    models = {model.kind: model for model in health.models}
+    observed = {
+        kind.value: {
+            "id": model.id,
+            "state": model.state.value,
+            "device": model.device.value if model.device is not None else None,
+        }
+        for kind, model in models.items()
+    }
+
+    def reject() -> None:
+        error = RuntimeError("effective model identity differs")
+        error.observed_models = observed
+        raise error
+
+    if (
+        health.session_id != request.session_id
+        or health.direction_id != request.direction_id
+        or health.provider_id is not ProviderId.LOCAL
+        or health.state is not ProviderState.READY
+    ):
+        reject()
+    if (
+        len(models) != len(health.models)
+        or set(models) != {ModelKind.ASR, ModelKind.MT, ModelKind.TTS}
+        or models[ModelKind.ASR].id != expected_asr_id
+        or models[ModelKind.MT].id != expected_mt_id
+        or models[ModelKind.TTS].id != "piper-medium"
+        or any(model.state is not ModelState.READY for model in models.values())
+        or any(
+            model.device is None or model.device.value not in {"cpu", "cuda"}
+            for model in (models[ModelKind.ASR], models[ModelKind.MT])
+        )
+        or models[ModelKind.TTS].device is None
+        or models[ModelKind.TTS].device.value != "cpu"
+    ):
+        reject()
+    return observed
+
+
 async def _run_case(
     provider: Any,
     case: dict[str, Any],
     mode: TranslationMode,
     voice_gender: VoiceGender,
+    *,
+    expected_asr_id: str,
+    expected_mt_id: str,
 ) -> dict[str, Any]:
     request = _request(case["language"], mode, voice_gender)
     event_times: list[tuple[Any, int]] = []
@@ -366,10 +496,13 @@ async def _run_case(
 
     reservation = provider.reserve_session(request, publish)
     error: BaseException | None = None
+    opened = False
+    post_health_attempted = False
+    open_models: dict[str, dict[str, str]] | None = None
     try:
         _, health = await reservation.open()
-        if health.state is ProviderState.UNAVAILABLE:
-            raise RuntimeError("product provider is unavailable")
+        opened = True
+        open_models = _checked_health(health, request, expected_asr_id, expected_mt_id)
         pcm = case["pcm"]
         frames = [
             pcm[offset : offset + FRAME_BYTES].ljust(FRAME_BYTES, b"\0")
@@ -398,8 +531,29 @@ async def _run_case(
                 )
             )
         await asyncio.wait_for(provider.wait_idle(), timeout=90)
+        post_health_attempted = True
+        after_models = _checked_health(
+            await asyncio.wait_for(
+                provider.health(request.session_id), timeout=HEALTH_TIMEOUT_SECONDS
+            ),
+            request,
+            expected_asr_id,
+            expected_mt_id,
+        )
+        if after_models != open_models:
+            raise RuntimeError("effective model identity differs")
         try:
-            return evaluate_events(event_times, started_ns=started_ns)
+            result = evaluate_events(
+                event_times,
+                started_ns=started_ns,
+                session_id=request.session_id,
+                direction_id=request.direction_id,
+                stream_id=stream_id,
+                utterance_id=utterance_id,
+            )
+            result["effective_models_open"] = open_models
+            result["effective_models_after"] = after_models
+            return result
         except ValueError as observation_error:
             observation_error.safe_provider_codes = [
                 event.code.value
@@ -438,6 +592,31 @@ async def _run_case(
             raise
     except BaseException as caught:
         error = caught
+        if open_models is not None:
+            caught.open_effective_models = open_models
+        elif not post_health_attempted and hasattr(caught, "observed_models"):
+            caught.open_effective_models = caught.observed_models
+        if post_health_attempted and hasattr(caught, "observed_models"):
+            caught.post_attempt_effective_models = caught.observed_models
+        if opened and not post_health_attempted:
+            try:
+                caught.post_attempt_effective_models = _checked_health(
+                    await asyncio.wait_for(
+                        provider.health(request.session_id),
+                        timeout=HEALTH_TIMEOUT_SECONDS,
+                    ),
+                    request,
+                    expected_asr_id,
+                    expected_mt_id,
+                )
+            except RuntimeError as health_error:
+                if hasattr(health_error, "observed_models"):
+                    caught.post_attempt_model_error = str(health_error)
+                    caught.post_attempt_effective_models = health_error.observed_models
+                else:
+                    caught.post_attempt_health_error = "RuntimeError"
+            except BaseException as health_error:  # noqa: BLE001 - keep original failure
+                caught.post_attempt_health_error = type(health_error).__name__
         raise
     finally:
         try:
@@ -448,6 +627,7 @@ async def _run_case(
                 raise RuntimeError("product session delivery failed")
         except BaseException as cleanup_error:
             if error is not None:
+                error.cleanup_error_type = type(cleanup_error).__name__
                 raise error from cleanup_error
             raise
 
@@ -500,8 +680,9 @@ async def _run_arm(
 ) -> bool:
     previous_asr = os.environ.get("TRANSLATOR_ASR_MODEL_ID")
     previous_mt = os.environ.get("TRANSLATOR_MT_MODEL_ID")
-    os.environ["TRANSLATOR_ASR_MODEL_ID"] = ASR_ID
-    os.environ["TRANSLATOR_MT_MODEL_ID"] = BACKENDS[backend]
+    expected_asr_id, expected_mt_id = ARMS[backend]
+    os.environ["TRANSLATOR_ASR_MODEL_ID"] = expected_asr_id
+    os.environ["TRANSLATOR_MT_MODEL_ID"] = expected_mt_id
     provider = None
     failed = False
     next_index = 0
@@ -510,16 +691,13 @@ async def _run_arm(
         provider = build_local_provider(
             now_ns=time.monotonic_ns, manifest_path=ROOT / "models/manifest.json"
         )
-        if (
-            provider._asr_model_id != ASR_ID
-            or provider._mt_model_id != BACKENDS[backend]
-        ):
-            raise RuntimeError("product model selection changed")
         write_record(
             journal,
             {
                 "type": "arm_start",
                 "backend": backend,
+                "requested_asr_id": expected_asr_id,
+                "requested_mt_id": expected_mt_id,
                 "mode": mode.value,
                 "build_ms": round((time.monotonic_ns() - built_ns) / 1_000_000, 2),
                 "resources": _resources(provider),
@@ -542,11 +720,29 @@ async def _run_arm(
                 "critical_labels": case["critical_labels"],
             }
             try:
-                row.update(await _run_case(provider, case, mode, voice_gender))
+                row.update(
+                    await _run_case(
+                        provider,
+                        case,
+                        mode,
+                        voice_gender,
+                        expected_asr_id=expected_asr_id,
+                        expected_mt_id=expected_mt_id,
+                    )
+                )
             except Exception as error:  # noqa: BLE001 - retain the failed attempt
                 row.update(status="failed", error_type=type(error).__name__)
                 if str(error) in SAFE_EVALUATION_REASONS:
                     row["safe_failure_reason"] = str(error)
+                for diagnostic in (
+                    "open_effective_models",
+                    "post_attempt_effective_models",
+                    "post_attempt_model_error",
+                    "post_attempt_health_error",
+                    "cleanup_error_type",
+                ):
+                    if hasattr(error, diagnostic):
+                        row[diagnostic] = getattr(error, diagnostic)
                 if isinstance(error, ValueError) and hasattr(
                     error, "safe_provider_codes"
                 ):
@@ -657,15 +853,22 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             next(case for case in cases if case["language"] == language)
             for language in ("ru_ru", "en_us")
         ]
-    order = ("nllb", "hy") if args.order == "nllb-hy" else ("hy", "nllb")
+    order = (
+        ("small_nllb_same_code", "nllb", "hy")
+        if args.order == "small-nllb-hy"
+        else ("hy", "nllb", "small_nllb_same_code")
+    )
     rows: list[dict[str, Any]] = []
     with open_journal(args.output) as journal:
         write_record(
             journal,
             {
                 "type": "header",
-                "schema": "translator.product-audio-pair.v1",
+                "schema": "translator.product-audio-pair.v2",
                 "scope": "accelerated saved audio; no capture, playback, physical first audible, or English listening",
+                "baseline_role": "same_code_ablation_not_original_main",
+                "input_selection": "turbo_screened_development_only",
+                "voice_observation_scope": "requested profile and generic Piper health only; exact voice not independently observed",
                 "screen_sha256": SCREEN_SHA256,
                 "manifest_sha256": MANIFEST_SHA256,
                 "turbo_sha256": TURBO_SHA256,
@@ -720,7 +923,19 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                             },
                         )
                 break
-        pairs = pair_rows(rows, mode)
+        try:
+            pairs = pair_rows(rows, mode)
+        except (KeyError, ValueError, TypeError) as error:
+            all_complete = False
+            pairs = []
+            write_record(
+                journal,
+                {
+                    "type": "pair_error",
+                    "mode": mode.value,
+                    "error_type": type(error).__name__,
+                },
+            )
         complete = (
             all_complete
             and len(pairs) == len(cases)
@@ -758,7 +973,11 @@ def main() -> int:
     parser.add_argument(
         "--case-id", help="one frozen origin for failure diagnosis only"
     )
-    parser.add_argument("--order", choices=("nllb-hy", "hy-nllb"), default="nllb-hy")
+    parser.add_argument(
+        "--order",
+        choices=("small-nllb-hy", "hy-nllb-small"),
+        default="small-nllb-hy",
+    )
     parser.add_argument(
         "--mode",
         choices=tuple(mode.value for mode in TranslationMode),

@@ -333,3 +333,21 @@ physical test path on this snapshot. No playback, capture, route change, or
 production service change occurred. The independent RU/EN 120-pair holdout,
 paired physical first-audible and quality comparison, real-app matrix,
 30-minute soak, install/rollback, merge and release remain **NOT_DONE**.
+
+## 2026-10-01 three-arm diagnostic preparation — no product result
+
+The fork's saved-audio runner v2 now assigns distinct Small/NLLB,
+Turbo/NLLB and Turbo/Hy arms. Small here is a same-code ablation, not the
+untouched original `main` baseline. It checks public effective model health
+at open and after each attempt, binds provider events to the submitted
+utterance, preserves failed attempts and cleanup/health diagnostics, and
+always writes a failed terminal record for ordinary pair-validation errors.
+The header labels the 24-WAV Turbo-screened input as development-only and
+limits voice evidence to a requested Piper profile plus generic model health.
+
+Focused runner tests: **70 passed**. The adjacent provider contract, local
+provider and local runtime tests also passed; Ruff and `git diff --check`
+passed. No new model inference, physical audio, independent holdout score,
+quality/latency comparison, or release was performed on this v2 tree.
+High existing swap use at the resource preflight argues for a separate
+bounded serial model run, not an unbounded benchmark in this checkpoint.

@@ -23,9 +23,15 @@ from translator_product_audio_pair import (
     write_record,
 )
 from translator_sidecar.provider_contract import (
+    AudioDirection,
+    ComputeDevice,
     Language,
+    ModelHealth,
+    ModelKind,
+    ModelState,
     PrivacySafeProviderError,
     ProviderAudioDelta,
+    ProviderId,
     ProviderLatency,
     ProviderState,
     ProviderTranscriptDelta,
@@ -37,6 +43,45 @@ from translator_sidecar.provider_contract import (
     UtteranceOutcome,
     VoiceGender,
 )
+
+SESSION_ID = uuid4()
+STREAM_ID = uuid4()
+UTTERANCE_ID = uuid4()
+EVENT_IDENTITY = {
+    "session_id": SESSION_ID,
+    "direction_id": AudioDirection.MICROPHONE,
+    "stream_id": STREAM_ID,
+    "utterance_id": UTTERANCE_ID,
+}
+
+
+def _health(request, *, asr_id="faster-whisper-large-v3-turbo"):
+    return SimpleNamespace(
+        session_id=request.session_id,
+        direction_id=request.direction_id,
+        provider_id=ProviderId.LOCAL,
+        state=ProviderState.READY,
+        models=(
+            ModelHealth(
+                kind=ModelKind.ASR,
+                id=asr_id,
+                state=ModelState.READY,
+                device=ComputeDevice.CUDA,
+            ),
+            ModelHealth(
+                kind=ModelKind.MT,
+                id="nllb-200-distilled-600m-ct2-int8",
+                state=ModelState.READY,
+                device=ComputeDevice.CUDA,
+            ),
+            ModelHealth(
+                kind=ModelKind.TTS,
+                id="piper-medium",
+                state=ModelState.READY,
+                device=ComputeDevice.CPU,
+            ),
+        ),
+    )
 
 
 def _sha(data: bytes) -> str:
@@ -186,15 +231,27 @@ def _events(
 ):
     events = [
         (
-            ProviderTranscriptDelta.model_construct(text=asr_text, is_final=True),
+            ProviderTranscriptDelta(
+                **EVENT_IDENTITY, event_sequence=1, text=asr_text, is_final=True
+            ),
             1_120_000_000,
         ),
         (
-            ProviderTranslationDelta.model_construct(text=mt_text, is_final=True),
+            ProviderTranslationDelta(
+                **EVENT_IDENTITY,
+                event_sequence=2,
+                text=mt_text,
+                stable_prefix=True,
+                is_final=True,
+            ),
             1_130_000_000,
         ),
         (
-            ProviderAudioDelta.model_construct(
+            ProviderAudioDelta(
+                **EVENT_IDENTITY,
+                sequence=0,
+                event_sequence=3,
+                provider_monotonic_ns=1_150_000_000,
                 pcm=(b"\0" if silent else b"\x01") * 960,
                 frame_duration_ms=20,
                 sample_rate_hz=24_000,
@@ -203,19 +260,46 @@ def _events(
             ),
             1_150_000_000,
         ),
+        (
+            ProviderLatency(
+                **EVENT_IDENTITY,
+                event_sequence=4,
+                asr_final_text_ms=120,
+                mt_first_text_ms=130,
+                tts_first_audio_ms=150,
+                provider_total_ms=160,
+            ),
+            1_155_000_000,
+        ),
     ]
     if final:
         events.append(
             (
-                ProviderUtteranceFinal.model_construct(outcome=outcome),
+                ProviderUtteranceFinal(
+                    **EVENT_IDENTITY,
+                    event_sequence=5,
+                    final_audio_sequence=0,
+                    outcome=outcome,
+                ),
                 1_160_000_000,
             )
         )
     return events
 
 
+def _evaluate(events):
+    return evaluate_events(
+        events,
+        started_ns=1_000_000_000,
+        session_id=SESSION_ID,
+        direction_id=AudioDirection.MICROPHONE,
+        stream_id=STREAM_ID,
+        utterance_id=UTTERANCE_ID,
+    )
+
+
 def test_event_result_requires_complete_text_audio_and_final() -> None:
-    result = evaluate_events(_events(), started_ns=1_000_000_000)
+    result = _evaluate(_events())
     assert result["status"] == "completed"
     assert result["asr_text"] == "source"
     assert result["mt_text"] == "target"
@@ -234,16 +318,232 @@ def test_event_result_requires_complete_text_audio_and_final() -> None:
         ],
     ):
         with pytest.raises(ValueError):
-            evaluate_events(events, started_ns=1_000_000_000)
+            _evaluate(events)
     with pytest.raises(ValueError):
-        evaluate_events(
-            _events() + [(PrivacySafeProviderError.model_construct(), 1_170_000_000)],
-            started_ns=1_000_000_000,
+        _evaluate(
+            _events()
+            + [
+                (
+                    PrivacySafeProviderError.model_construct(**EVENT_IDENTITY),
+                    1_170_000_000,
+                )
+            ]
         )
 
 
-def test_pair_flags_asr_divergence() -> None:
-    rows = [
+@pytest.mark.parametrize(
+    "events",
+    [
+        lambda rows: rows[:3] + rows[4:],
+        lambda rows: rows[:2] + rows[3:],
+        lambda rows: rows[:3] + [rows[3], rows[3]] + rows[4:],
+        lambda rows: rows[:2] + list(reversed(rows[2:4])) + rows[4:],
+        lambda rows: (
+            rows[:2]
+            + [(rows[2][0].model_copy(update={"session_id": uuid4()}), rows[2][1])]
+            + rows[3:]
+        ),
+        lambda rows: (
+            rows[:2]
+            + [(rows[2][0].model_copy(update={"sequence": 1}), rows[2][1])]
+            + rows[3:]
+        ),
+        lambda rows: (
+            rows[:4]
+            + [(rows[4][0].model_copy(update={"final_audio_sequence": 1}), rows[4][1])]
+        ),
+        lambda rows: rows[:3] + [(rows[4][0], rows[4][1]), rows[3]],
+    ],
+)
+def test_event_result_rejects_missing_foreign_or_out_of_order_events(events) -> None:
+    with pytest.raises(ValueError):
+        _evaluate(events(_events()))
+
+
+@pytest.mark.parametrize("matching_identity", [True, False])
+@pytest.mark.parametrize(
+    "asr_id", ["faster-whisper-small", "faster-whisper-large-v3-turbo"]
+)
+def test_run_case_binds_published_events_to_submitted_utterance(
+    monkeypatch, matching_identity, asr_id
+) -> None:
+    published = {}
+    drained = []
+
+    class Reservation:
+        async def open(self):
+            return None, _health(published["request"], asr_id=asr_id)
+
+        def drain(self, reason):
+            drained.append(reason)
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            published["request"] = request
+            published["publish"] = publish
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            published["frame"] = frame
+
+        async def wait_idle(self):
+            request = published["request"]
+            frame = published["frame"]
+            identity = {
+                "session_id": request.session_id,
+                "direction_id": request.direction_id,
+                "stream_id": frame.stream_id,
+                "utterance_id": frame.utterance_id,
+            }
+            await published["publish"](
+                tuple(
+                    event.model_copy(update=identity) if matching_identity else event
+                    for event, _ in _events()
+                ),
+                lambda: None,
+            )
+
+        async def health(self, session_id):
+            assert session_id == published["request"].session_id
+            return _health(published["request"], asr_id=asr_id)
+
+    async def finish_cleanup(_pending):
+        return SimpleNamespace(delivery_error=None)
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    call = product_audio_pair._run_case(
+        Provider(),
+        {"language": "ru_ru", "pcm": b"\x01\x02" * 1600},
+        TranslationMode.QUALITY_FIRST,
+        VoiceGender.FEMALE,
+        expected_asr_id=asr_id,
+        expected_mt_id=product_audio_pair.BACKENDS["nllb"],
+    )
+    if matching_identity:
+        result = asyncio.run(call)
+        assert result["status"] == "completed"
+        assert result["effective_models_open"]["asr"]["id"] == asr_id
+        assert result["effective_models_after"]["asr"]["id"] == asr_id
+    else:
+        with pytest.raises(ValueError, match="identity"):
+            asyncio.run(call)
+    assert len(drained) == 1
+
+
+def test_run_case_rejects_effective_asr_fallback_after_submission(monkeypatch) -> None:
+    published = {}
+    drained = []
+
+    class Reservation:
+        async def open(self):
+            return None, _health(published["request"])
+
+        def drain(self, reason):
+            drained.append(reason)
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            published.update(request=request, publish=publish)
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            published["frame"] = frame
+
+        async def wait_idle(self):
+            request = published["request"]
+            frame = published["frame"]
+            identity = {
+                "session_id": request.session_id,
+                "direction_id": request.direction_id,
+                "stream_id": frame.stream_id,
+                "utterance_id": frame.utterance_id,
+            }
+            await published["publish"](
+                tuple(event.model_copy(update=identity) for event, _ in _events()),
+                lambda: None,
+            )
+
+        async def health(self, session_id):
+            return _health(published["request"], asr_id="faster-whisper-small")
+
+    async def finish_cleanup(_pending):
+        return SimpleNamespace(delivery_error=None)
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    with pytest.raises(RuntimeError, match="effective model") as failure:
+        asyncio.run(
+            product_audio_pair._run_case(
+                Provider(),
+                {"language": "ru_ru", "pcm": b"\x01\x02" * 1600},
+                TranslationMode.QUALITY_FIRST,
+                VoiceGender.FEMALE,
+                expected_asr_id=product_audio_pair.ASR_ID,
+                expected_mt_id=product_audio_pair.BACKENDS["nllb"],
+            )
+        )
+    assert (
+        failure.value.post_attempt_effective_models["asr"]["id"]
+        == "faster-whisper-small"
+    )
+    assert len(drained) == 1
+
+
+def test_run_case_records_effective_asr_fallback_at_open(monkeypatch) -> None:
+    published = {}
+    drained = []
+
+    class Reservation:
+        async def open(self):
+            return None, _health(published["request"], asr_id="faster-whisper-small")
+
+        def drain(self, reason):
+            drained.append(reason)
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            published["request"] = request
+            return Reservation()
+
+        async def health(self, session_id):
+            return _health(published["request"], asr_id="faster-whisper-small")
+
+    async def finish_cleanup(_pending):
+        return SimpleNamespace(delivery_error=None)
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    with pytest.raises(RuntimeError, match="effective model") as failure:
+        asyncio.run(
+            product_audio_pair._run_case(
+                Provider(),
+                {"language": "ru_ru", "pcm": b"\x01\x02" * 1600},
+                TranslationMode.QUALITY_FIRST,
+                VoiceGender.FEMALE,
+                expected_asr_id=product_audio_pair.ASR_ID,
+                expected_mt_id=product_audio_pair.BACKENDS["nllb"],
+            )
+        )
+    assert failure.value.open_effective_models["asr"]["id"] == "faster-whisper-small"
+    assert len(drained) == 1
+
+
+def _pair_fixture_rows() -> list[dict]:
+    return [
+        {
+            "origin_id": "ru-1",
+            "condition": "clean",
+            "backend": "small_nllb_same_code",
+            "mode": "quality_first",
+            "asr_text": "small source",
+            "status": "completed",
+            "wav_sha256": "same",
+            "language": "ru_ru",
+            "speaker_id": "speaker-1",
+            "reference": "reference",
+            "voice_gender": "female",
+        },
         {
             "origin_id": "ru-1",
             "condition": "clean",
@@ -251,6 +551,11 @@ def test_pair_flags_asr_divergence() -> None:
             "mode": "quality_first",
             "asr_text": "a",
             "status": "completed",
+            "wav_sha256": "same",
+            "language": "ru_ru",
+            "speaker_id": "speaker-1",
+            "reference": "reference",
+            "voice_gender": "female",
         },
         {
             "origin_id": "ru-1",
@@ -259,17 +564,63 @@ def test_pair_flags_asr_divergence() -> None:
             "mode": "quality_first",
             "asr_text": "b",
             "status": "completed",
+            "wav_sha256": "same",
+            "language": "ru_ru",
+            "speaker_id": "speaker-1",
+            "reference": "reference",
+            "voice_gender": "female",
         },
     ]
-    assert (
-        pair_rows(rows, TranslationMode.QUALITY_FIRST)[0]["mt_confounded_by_asr"]
-        is True
-    )
-    assert (
-        pair_rows(rows[:1], TranslationMode.QUALITY_FIRST)[0]["status"] == "incomplete"
-    )
+
+
+def test_pair_flags_asr_divergence() -> None:
+    rows = _pair_fixture_rows()
+    pair = pair_rows(rows, TranslationMode.QUALITY_FIRST)[0]
+    assert pair["status"] == "complete"
+    assert pair["mt_confounded_by_asr"] is True
+    assert pair["baseline_asr_divergent"] is True
+
+
+def test_pair_requires_small_same_code_arm() -> None:
+    rows = _pair_fixture_rows()[1:]
+    assert pair_rows(rows, TranslationMode.QUALITY_FIRST)[0]["status"] == "incomplete"
+
+
+def test_pair_rejects_duplicate_or_unknown_arm() -> None:
+    rows = _pair_fixture_rows()
     with pytest.raises(ValueError, match="duplicate"):
         pair_rows(rows + [rows[0]], TranslationMode.QUALITY_FIRST)
+    with pytest.raises(ValueError, match="unknown"):
+        pair_rows(
+            rows + [{**rows[0], "backend": "unlisted"}], TranslationMode.QUALITY_FIRST
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("wav_sha256", "different"),
+        ("language", "en_us"),
+        ("speaker_id", "different"),
+        ("reference", "different"),
+        ("voice_gender", "male"),
+    ],
+)
+def test_pair_rejects_mismatched_input_identity(field, value) -> None:
+    rows = _pair_fixture_rows()
+    with pytest.raises(ValueError, match="identity"):
+        pair_rows(
+            rows[:2] + [{**rows[2], field: value}],
+            TranslationMode.QUALITY_FIRST,
+        )
+
+
+def test_pair_rejects_missing_identity_in_all_arms() -> None:
+    rows = _pair_fixture_rows()
+    for row in rows:
+        row.pop("speaker_id")
+    with pytest.raises(ValueError, match="missing.*identity"):
+        pair_rows(rows, TranslationMode.QUALITY_FIRST)
 
 
 def test_journal_is_private_exclusive_and_durable(tmp_path: Path) -> None:
@@ -299,7 +650,7 @@ def test_selected_mode_reaches_session_and_every_frame(
 
     class Reservation:
         async def open(self):
-            return None, SimpleNamespace(state=ProviderState.READY)
+            return None, _health(sessions[-1])
 
         def drain(self, reason):
             return reason
@@ -315,6 +666,9 @@ def test_selected_mode_reaches_session_and_every_frame(
         async def wait_idle(self):
             return None
 
+        async def health(self, session_id):
+            return _health(sessions[-1])
+
     async def finish_cleanup(_pending):
         return SimpleNamespace(delivery_error=None)
 
@@ -322,7 +676,7 @@ def test_selected_mode_reaches_session_and_every_frame(
     monkeypatch.setattr(
         product_audio_pair,
         "evaluate_events",
-        lambda events, *, started_ns: {"status": "completed"},
+        lambda events, **identity: {"status": "completed"},
     )
     result = asyncio.run(
         product_audio_pair._run_case(
@@ -330,6 +684,8 @@ def test_selected_mode_reaches_session_and_every_frame(
             {"language": language, "pcm": b"\x01\x02" * 3200},
             mode,
             gender,
+            expected_asr_id=product_audio_pair.ASR_ID,
+            expected_mt_id=product_audio_pair.BACKENDS["nllb"],
         )
     )
     assert result["status"] == "completed"
@@ -481,7 +837,8 @@ def test_pair_rejects_missing_or_wrong_mode_relative_to_requested(
 
 
 @pytest.mark.parametrize(
-    "failure_stage", ["complete", "build", "attempt", "provider_drop", "shutdown"]
+    "failure_stage",
+    ["complete", "build", "attempt", "provider_drop", "shutdown", "pair_validation"],
 )
 def test_run_journal_binds_mode_to_success_and_failure_paths(
     tmp_path, monkeypatch, failure_stage
@@ -506,12 +863,12 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
     monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(tmp_path))
     requested = TranslationMode.BALANCED
     requested_gender = VoiceGender.MALE
+    observed_builds = []
 
     class Provider:
-        _asr_model_id = product_audio_pair.ASR_ID
-
         def __init__(self):
-            self._mt_model_id = os.environ["TRANSLATOR_MT_MODEL_ID"]
+            self.selected_asr_id = os.environ["TRANSLATOR_ASR_MODEL_ID"]
+            self.selected_mt_id = os.environ["TRANSLATOR_MT_MODEL_ID"]
 
         async def shutdown(self):
             if failure_stage == "shutdown":
@@ -520,10 +877,20 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
     def build_provider(**kwargs):
         if failure_stage == "build":
             raise RuntimeError("synthetic build failure")
+        observed_builds.append(
+            (
+                os.environ["TRANSLATOR_ASR_MODEL_ID"],
+                os.environ["TRANSLATOR_MT_MODEL_ID"],
+            )
+        )
         return Provider()
 
-    async def run_case(provider, case, mode, voice_gender):
+    async def run_case(provider, case, mode, voice_gender, **expected_models):
         assert voice_gender is requested_gender
+        assert expected_models == {
+            "expected_asr_id": provider.selected_asr_id,
+            "expected_mt_id": provider.selected_mt_id,
+        }
         if failure_stage == "attempt":
             raise RuntimeError("synthetic case failure")
         if failure_stage == "provider_drop":
@@ -545,6 +912,12 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
 
     monkeypatch.setattr(product_audio_pair, "build_local_provider", build_provider)
     monkeypatch.setattr(product_audio_pair, "_run_case", run_case)
+    if failure_stage == "pair_validation":
+
+        def invalid_pairs(rows, mode):
+            raise ValueError("synthetic pair identity failure")
+
+        monkeypatch.setattr(product_audio_pair, "pair_rows", invalid_pairs)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     private.chmod(0o700)
@@ -556,7 +929,7 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
         output=output,
         case_id=None,
         smoke=True,
-        order="nllb-hy",
+        order="small-nllb-hy",
         mode=requested,
         voice_gender=requested_gender,
     )
@@ -568,6 +941,19 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
     assert result["status"] == ("complete" if failure_stage == "complete" else "failed")
     assert all(record.get("mode") == requested.value for record in records)
     assert records[0]["voice_gender"] == requested_gender.value
+    assert records[0]["schema"] == "translator.product-audio-pair.v2"
+    assert records[0]["baseline_role"] == "same_code_ablation_not_original_main"
+    assert records[0]["input_selection"] == "turbo_screened_development_only"
+    assert (
+        "exact voice not independently observed"
+        in records[0]["voice_observation_scope"]
+    )
+    if failure_stage in {"complete", "pair_validation"}:
+        assert observed_builds == [
+            ("faster-whisper-small", "nllb-200-distilled-600m-ct2-int8"),
+            ("faster-whisper-large-v3-turbo", "nllb-200-distilled-600m-ct2-int8"),
+            ("faster-whisper-large-v3-turbo", "hy-mt2-1.8b-gguf-q4-k-m"),
+        ]
     assert all(
         record["voice_gender"] == requested_gender.value
         for record in records
@@ -586,7 +972,7 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
         assert {"attempt", "not_run", "arm_end"} <= {
             record["type"] for record in records
         }
-        assert len([record for record in records if record["type"] == "not_run"]) == 3
+        assert len([record for record in records if record["type"] == "not_run"]) == 5
     if failure_stage == "shutdown":
         assert {"cleanup_error", "arm_end"} <= {record["type"] for record in records}
     if failure_stage == "provider_drop":
@@ -601,6 +987,9 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
             "provider_total_ms": 130,
         }
         assert records[-1]["status"] == "failed"
+    if failure_stage == "pair_validation":
+        assert any(record["type"] == "pair_error" for record in records)
+        assert records[-1]["status"] == "failed"
 
 
 @pytest.mark.parametrize(
@@ -614,7 +1003,7 @@ def test_dropped_provider_latency_is_exactly_allowlisted_or_unmeasured(
 
     class Reservation:
         async def open(self):
-            return None, SimpleNamespace(state=ProviderState.READY)
+            return None, _health(published["request"])
 
         def drain(self, reason):
             return reason
@@ -667,6 +1056,9 @@ def test_dropped_provider_latency_is_exactly_allowlisted_or_unmeasured(
                 lambda: None,
             )
 
+        async def health(self, session_id):
+            return _health(published["request"])
+
     async def finish_cleanup(_pending):
         return SimpleNamespace(delivery_error=None)
 
@@ -678,6 +1070,8 @@ def test_dropped_provider_latency_is_exactly_allowlisted_or_unmeasured(
                 {"language": "en_us", "pcm": b"\x01\x02" * 1600},
                 TranslationMode.STREAMING_FIRST,
                 VoiceGender.FEMALE,
+                expected_asr_id=product_audio_pair.ASR_ID,
+                expected_mt_id=product_audio_pair.BACKENDS["nllb"],
             )
         )
     assert failure.value.safe_provider_codes == ["provider_unavailable"]
@@ -703,16 +1097,22 @@ def test_dropped_provider_latency_is_exactly_allowlisted_or_unmeasured(
         assert all(value is None or type(value) is int for value in expected.values())
 
 
-def test_wait_idle_failure_does_not_invent_latency(monkeypatch) -> None:
+@pytest.mark.parametrize("fallback", [False, True])
+def test_wait_idle_failure_checks_post_attempt_model_without_inventing_latency(
+    monkeypatch, fallback
+) -> None:
+    health_checks = []
+
     class Reservation:
         async def open(self):
-            return None, SimpleNamespace(state=ProviderState.READY)
+            return None, _health(published["request"])
 
         def drain(self, reason):
             return reason
 
     class Provider:
         def reserve_session(self, request, publish):
+            published["request"] = request
             return Reservation()
 
         async def submit_frame(self, frame):
@@ -721,9 +1121,19 @@ def test_wait_idle_failure_does_not_invent_latency(monkeypatch) -> None:
         async def wait_idle(self):
             raise RuntimeError("synthetic wait_idle failure")
 
+        async def health(self, session_id):
+            health_checks.append(session_id)
+            return _health(
+                published["request"],
+                asr_id="faster-whisper-small"
+                if fallback
+                else product_audio_pair.ASR_ID,
+            )
+
     async def finish_cleanup(_pending):
         return SimpleNamespace(delivery_error=None)
 
+    published = {}
     monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
     with pytest.raises(RuntimeError, match="wait_idle failure") as failure:
         asyncio.run(
@@ -732,6 +1142,77 @@ def test_wait_idle_failure_does_not_invent_latency(monkeypatch) -> None:
                 {"language": "en_us", "pcm": b"\x01\x02" * 1600},
                 TranslationMode.STREAMING_FIRST,
                 VoiceGender.FEMALE,
+                expected_asr_id=product_audio_pair.ASR_ID,
+                expected_mt_id=product_audio_pair.BACKENDS["nllb"],
             )
         )
     assert not hasattr(failure.value, "safe_provider_latency")
+    assert health_checks == [published["request"].session_id]
+    if fallback:
+        assert (
+            failure.value.post_attempt_model_error == "effective model identity differs"
+        )
+        assert (
+            failure.value.post_attempt_effective_models["asr"]["id"]
+            == "faster-whisper-small"
+        )
+    else:
+        assert (
+            failure.value.post_attempt_effective_models["asr"]["id"]
+            == product_audio_pair.ASR_ID
+        )
+
+
+@pytest.mark.parametrize("health_failure", ["timeout", "runtime"])
+def test_failed_attempt_bounds_health_probe_and_preserves_cleanup_error(
+    monkeypatch, health_failure
+) -> None:
+    published = {}
+    drained = []
+
+    class Reservation:
+        async def open(self):
+            return None, _health(published["request"])
+
+        def drain(self, reason):
+            drained.append(reason)
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            published["request"] = request
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            return None
+
+        async def wait_idle(self):
+            raise RuntimeError("original attempt failure")
+
+        async def health(self, session_id):
+            if health_failure == "runtime":
+                raise RuntimeError("synthetic health failure")
+            await asyncio.sleep(0.05)
+            return _health(published["request"])
+
+    async def finish_cleanup(_pending):
+        raise RuntimeError("cleanup also failed")
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    monkeypatch.setattr(product_audio_pair, "HEALTH_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(RuntimeError, match="original attempt failure") as failure:
+        asyncio.run(
+            product_audio_pair._run_case(
+                Provider(),
+                {"language": "ru_ru", "pcm": b"\x01\x02" * 1600},
+                TranslationMode.QUALITY_FIRST,
+                VoiceGender.FEMALE,
+                expected_asr_id=product_audio_pair.ASR_ID,
+                expected_mt_id=product_audio_pair.BACKENDS["nllb"],
+            )
+        )
+    assert failure.value.post_attempt_health_error == (
+        "TimeoutError" if health_failure == "timeout" else "RuntimeError"
+    )
+    assert failure.value.cleanup_error_type == "RuntimeError"
+    assert len(drained) == 1
