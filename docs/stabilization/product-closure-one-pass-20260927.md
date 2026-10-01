@@ -211,6 +211,19 @@ inspect critical/long-turn coverage and audio-reference alignment. Tatoeba
 itself warns that sentence translations may need correction. Do not download
 audio or score models until the metadata, terms and selection are frozen.
 
+A bounded 2026-10-01 metadata-only screen of the official weekly audio and
+RU/EN sentence exports (HTTP `Last-Modified`: 2026-09-26) found 7,018 RU
+audio-linked sentences from four audio authors and 3,838 EN sentences
+(3,841 audio entries) from seven authors after conservatively allowing only
+explicit `CC BY 4.0` or `CC0 1.0` audio licenses. EN author counts were
+1,894, 1,852, 86, 3, 3, 2 and 1 entries. These counts are an upper bound
+*before* translation links, speaker checks and critical/long-case labels.
+The export bytes were not hashed or retained, and an audio author is not a
+verified speaker. Therefore Tatoeba is **not admitted** as the standalone
+EVAL-0 holdout; this screen does not prove it impossible either. Stop the
+150-MB translation-links fetch for now and seek a source with independently
+identified RU/EN speakers, permitted reuse and bilingual reference review.
+
 ## Proposed single development pass
 
 1. Freeze the original Small → NLLB → Piper baseline, both candidate chains

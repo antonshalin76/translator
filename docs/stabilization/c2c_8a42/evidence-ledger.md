@@ -351,3 +351,12 @@ passed. No new model inference, physical audio, independent holdout score,
 quality/latency comparison, or release was performed on this v2 tree.
 High existing swap use at the resource preflight argues for a separate
 bounded serial model run, not an unbounded benchmark in this checkpoint.
+
+The follow-on Tatoeba metadata screen used official weekly audio and RU/EN
+sentence exports only. With explicit CC BY 4.0/CC0 audio licenses it found
+7,018 RU audio-linked sentences from four upload authors and 3,838 EN
+sentences/3,841 audio entries from seven authors, before checking translation
+links. Authors are not verified speakers; no audio, translations, input-byte
+hashes, gender, accent or critical-case labels were established. This is a
+feasibility signal, **not** a frozen EVAL-0 corpus or a mathematical proof of
+ineligibility. Tatoeba remains unadmitted as a standalone release holdout.
