@@ -34,11 +34,11 @@ separate USB card, not the production analog pair.
 | Boundary | Current evidence | Missing for product completion |
 | --- | --- | --- |
 | No-headphones audio | Acoustic admission rejects open-speaker mic without a proof for the exact physical pair. AEC coordinator/controller and Pulse graph components exist. | `main.rs` still constructs the watcher with unavailable AEC and passes no calibration controller to the API. `round_trip_preconditions` also hardcodes headphones, so even a validated AEC pair cannot run that test path. There is no live calibration engine, runtime proof attachment, revocation, or physical AEC result. |
-| Audio lifecycle | Owned original-loopback creation and volume control passed deterministic and private virtual-Pulse checks. | On an observed unsafe output change, stale raw-mic cleanup can fail silently; one-sided owned streams can be overlooked. Start/reconcile can report success without route-safety proof or stopping a newly unsafe running mic. The one-second watcher cannot prove zero exposure at the instant of an external port change. |
+| Audio lifecycle | Owned original-loopback creation and volume control passed deterministic and private virtual-Pulse checks. `ReconcileAudio` now stops a running microphone when refreshed facts show an unsafe or changed acoustic path. | The one-second watcher cannot prove zero exposure at the instant of an external port change. Physical fail-closed behavior and cleanup on the actual device pair remain untested. |
 | Effective model chain | The original `main` chain is Small → NLLB → Piper. Turbo is the input development leader; NLLB remains the default MT, and Hy is a quality challenger with unresolved failures. | The original chain has not been measured against both Turbo chains on an independent full-chain holdout. Freeze the effective binaries, configuration and model hashes for each arm before comparative claims. |
 | Output voice | Piper is the configured product voice, not a demonstrated winner. A direct eight-cell CPU pilot compared it with Supertonic 3; the tested Supertonic path was slower to first PCM and its ASR proxy changed four numeric values. | No blind, loudness-controlled RU/EN audible decision, complete voice/gender matrix, or paired first-audible product result. Qwen3-TTS is an untested bilingual matrix candidate; Kokoro is English-only in this project's matrix. Research-only or license-blocked models are not release arms. |
-| Quality and speed | Frozen 24-WAV accelerated saved-audio diagnostics include complete quality-first and balanced runs; one full streaming-first run failed. Historical physical Task 7 first-audible is 5968 ms. | No independent speaker-disjoint RU/EN holdout, full mode/voice matrix, independently transcribed audible TTS, physical first-audible comparison, or quantified reliability gain. Replays do not erase retained failures. |
-| User and release path | Daemon/API/UI, installer and release contracts exist. | No native calibration UX or live status; no complete physical Meet/Telegram/Zoom matrix, 30-minute soak, install/rollback proof, or exact-SHA release evidence. |
+| Quality and speed | Frozen 24-WAV accelerated saved-audio diagnostics include complete quality-first and balanced runs; one full streaming-first run failed. A three-arm quality-first development run on fork SHA `7460f8a` completed 72/72 attempts, but an earlier exact-input run stopped on a Small-arm `queue_overflow`. Historical physical Task 7 first-audible is 5968 ms. | No independent speaker-disjoint RU/EN holdout, full mode/voice matrix, independently transcribed audible TTS, physical first-audible comparison, or quantified reliability gain. A successful later run does not erase retained failures. |
+| User and release path | Daemon/API/UI, native calibration controls and status projection, installer and release contracts exist. | Calibration remains unavailable in the production composition root. No complete physical Meet/Telegram/Zoom matrix, 30-minute soak, install/rollback proof, or exact-SHA release evidence. |
 
 Baseline configuration check on 2026-10-01: the unchanged `main` revision
 `9291e8beafee3e02aaa179178ce460ac9e6c6de2` defaults to
@@ -46,15 +46,14 @@ Baseline configuration check on 2026-10-01: the unchanged `main` revision
 also selects Small for ASR; no MT-model override was found. The service unit
 was inactive at inspection. This establishes the configured baseline, not a
 live runtime or model-file identity; freeze those separately for the eval.
-The fork's `translator_product_audio_pair.py` v2 runner now has a separate
-Small → NLLB → Piper arm alongside Turbo → NLLB and Turbo → Hy. Its 70 focused
-contract tests pass on 2026-10-01, including effective-model fallback,
-event identity/order, and terminal failure recording. A single guarded RU
-saved-audio smoke completed all three arms on exact fork SHA `13557cbf6875`;
-it is not a comparative quality result or the full 24-case run. The Small arm
-uses the candidate code and is explicitly labelled a same-code ablation; it
-is **not** a receipt from the untouched
-original `main` baseline.
+The fork's `translator_product_audio_pair.py` v2 runner has a separate
+Small → NLLB → Piper arm alongside Turbo → NLLB and Turbo → Hy. Focused
+runner/provider tests and the complete 24-case three-arm quality-first
+development diagnostic passed on 2026-10-01 at fork SHA `7460f8a`.
+The earlier identical-input run on SHA `467c6ea` failed in the Small arm;
+its receipt remains a reliability finding. The Small arm uses candidate code
+and is explicitly labelled a same-code ablation, **not** a receipt from the
+untouched original `main` baseline. Neither run is release-holdout evidence.
 
 The existing 24-WAV Turbo/NLLB-versus-Hy screen is development evidence. Use
 it to debug the three-chain runner, not to claim improvement over the original
@@ -81,12 +80,9 @@ to a production calibration attempt. The device watcher also receives an
 immutable `AecCapability::Unavailable` at construction today. These are one
 end-to-end wiring problem, not independent evidence of a working AEC path.
 The unsafe-device transition is a separate acceptance case within that path.
-`ReconcileAudio` currently refreshes facts and mix without re-admitting an
-active microphone. An original-loopback unload error is logged but not returned.
-Normal `Bypass` sets original microphone volume to 100%, so calling it before
-proven loopback removal can increase leakage. A one-sided owned stream is now
-ignored by discovery; it must instead keep ownership uncertain without blindly
-unloading a possibly foreign module. Polling can prove bounded reaction after a
+`ReconcileAudio` now stops a running microphone on an observed unsafe path or
+failed refresh. This is a deterministic/source-level gate, not proof of the
+physical reaction interval. Polling can prove bounded reaction after a
 transition is observed, not zero exposure at the physical event instant.
 
 The transition's deterministic acceptance matrix uses the real control seam.

@@ -376,3 +376,41 @@ capture or playback occurred. This smoke validates execution and cleanup
 only; its accelerated saved-audio PCM timing is not first-audible latency,
 and it cannot establish RU/EN accuracy, reliability or an original-`main`
 baseline gain. No broad run was attempted with existing swap use.
+
+## 2026-10-01 three-arm quality-first development run — not release evidence
+
+The fork-only runner fix at `7460f8a41acb0d226fd97d692b395597bc95b22e`
+preserves a verified terminal `queue_overflow`/`dropped` attempt and continues
+the remaining distinct cases and model arms only after same-session cleanup
+and unchanged READY health. An unverified error still aborts. BDD critic,
+BDD auditor, pre-RED SRP auditor, RED critic, and final independent code/SRP
+review all returned PASS; focused runner/provider tests, Ruff and diff checks
+passed. The change was pushed to `origin/codex/product-clean-20260923`.
+
+The prior exact-input 24-case diagnostic on `467c6ea` failed after three
+Small-arm attempts on `ru-71573` with `queue_overflow`/`dropped`. Its private
+receipt SHA-256 is
+`4213ccf8b559adffe528fd7eb56d48f41b13c4dfe065fdac93de72b1956cc52e`.
+The direct reason for that safe code was not independently localized; the
+provider also uses it for a translation budget. Preserve this failure.
+
+One serial, offline, resource-scoped rerun on `7460f8a` used the same frozen
+24 RU/EN WAVs and private eval cache. It completed **72/72 attempts, 24/24
+three-arm pairs**, with no `NOT_RUN`; private `0600` receipt
+`three-arm-full-qf-20261001-BpeA2P/full.jsonl` has SHA-256
+`fab049e7952d84b6bbcf7265e0cde1e41bf8cc692e3193fe9c32ae60ec5ede8e`.
+The user scope requested 9 GB RAM, 1 GB swap, 200% CPU and 1800 seconds.
+The prior failed attempt remains a reliability finding; the successful run
+does not estimate its rate. A source-level Small arm is not the unchanged
+`main` baseline, and the Turbo-screened development set is not an independent
+holdout. Saved-audio first-provider-PCM values are not physical first-audible
+latency. No physical capture, playback or production route was touched.
+
+Current source still constructs `AecCapability::Unavailable` and passes
+`aec_calibration: None` in `main.rs`, despite existing API/UI calibration
+controls. `ReconcileAudio` does stop a running microphone when refreshed
+facts show an unsafe or changed acoustic path, but its one-second watcher
+does not prove zero exposure at the physical switch instant. Physical AEC,
+original-main baseline, independent RU/EN holdout, voice adjudication,
+all-mode/native-app matrix, 30-minute soak, merge and release remain
+**NOT_DONE**.
