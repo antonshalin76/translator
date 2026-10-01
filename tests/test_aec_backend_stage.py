@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import io
 import json
 import runpy
+import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 STAGE = Path(__file__).resolve().parents[1] / "scripts/translator-aec-backend-stage"
+CHECK = STAGE.with_name("translator-aec-backend-check")
 
 
 def stage() -> dict[str, object]:
@@ -40,6 +47,25 @@ def trial(case: str, **changes: object) -> dict[str, object]:
             "aec_plugin": FROZEN["plugin"],
         },
         "plugin_mapped": True,
+        "component_states": {
+            role: {
+                "status": "NOT_FAILED",
+                "session": "0123456789abcdef",
+                "source": role,
+                "reason": 0,
+                "callback": 4500,
+                "expected_position": 2_169_600,
+                "position": 2_169_120,
+                "duration": 480,
+                "clock": 1,
+                "xrun": 0,
+                "sequence": 4500,
+                "valid_mask": 7,
+                "queue_head": 4500,
+                "queue_tail": 4500,
+            }
+            for role in ("backend", "fixture", "witness")
+        },
         "fixture_delay_ms": 0,
         "speech": None,
         "metric": {"median_erle_db": 17.0},
@@ -49,6 +75,539 @@ def trial(case: str, **changes: object) -> dict[str, object]:
 
 
 class AecBackendStageTests(unittest.TestCase):
+    def test_first_failure_temporal_order_is_conservative(self) -> None:
+        classify = __import__("runpy").run_path(
+            str(CHECK), run_name="aec_pause_classification"
+        )["classify_failure_order"]
+        session = "0123456789abcdef"
+        pause = {
+            "session": session,
+            "time_namespace": 1234,
+            "control_mode": "impact",
+            "supervisor_reaped": True,
+            "backend_resumed": True,
+            "stop_signals": 1,
+            "continue_signals": 1,
+            "stop_send_before_ns": 100,
+            "stop_send_after_ns": 110,
+            "stop_observed_ns": 120,
+            "continue_send_before_ns": 200,
+            "continue_send_after_ns": 210,
+            "resume_observed_ns": 230,
+        }
+        native = {
+            "status": "OBSERVED",
+            "session": session,
+            "time_namespace": 1234,
+            "clock": "CLOCK_MONOTONIC",
+            "failure_before_ns": 50,
+            "failure_after_ns": 90,
+        }
+        cases = (
+            ((50, 90), "BEFORE_INTERVENTION"),
+            ((211, 215), "AFTER_INTERVENTION"),
+            ((205, 220), "OVERLAP"),
+            ((90, 115), "OVERLAP"),
+            ((90, 100), "OVERLAP"),
+            ((210, 215), "OVERLAP"),
+            ((215, 211), "UNVERIFIED"),
+        )
+        for (before, after), expected in cases:
+            with self.subTest(before=before, after=after):
+                native["failure_before_ns"] = before
+                native["failure_after_ns"] = after
+                self.assertEqual(classify(pause, native, session, True), expected)
+        native["failure_before_ns"] = 211
+        native["failure_after_ns"] = 215
+        for changed_pause, changed_native, cleaned in (
+            ({**pause, "session": "0000000000000001"}, native, True),
+            (pause, {**native, "time_namespace": 1235}, True),
+            (pause, {**native, "failure_before_ns": None}, True),
+            ({**pause, "continue_send_after_ns": 190}, native, True),
+            (pause, native, False),
+            (pause, {**native, "clock": "CLOCK_REALTIME"}, True),
+            ({**pause, "control_mode": "control"}, native, True),
+            ({**pause, "supervisor_reaped": False}, native, True),
+            ({**pause, "backend_resumed": False}, native, True),
+        ):
+            self.assertEqual(
+                classify(changed_pause, changed_native, session, cleaned), "UNVERIFIED"
+            )
+
+    def test_public_pause_receipt_keeps_temporal_order_diagnostic_only(self) -> None:
+        classify = __import__("runpy").run_path(
+            str(CHECK), run_name="aec_pause_classification"
+        )["classify_pause_outcome"]
+        session = "0123456789abcdef"
+        pause = {
+            "session": session,
+            "requested_ms": 30,
+            "after_witness_frames": 100,
+            "control_mode": "impact",
+            "time_namespace": 1234,
+            "supervisor_ready": True,
+            "supervisor_reaped": True,
+            "backend_resumed": True,
+            "stop_observed": True,
+            "resume_observed": True,
+            "stop_signals": 1,
+            "continue_signals": 1,
+            "stop_send_before_ns": 1_000_000_000,
+            "stop_send_after_ns": 1_001_000_000,
+            "stop_observed_ns": 1_002_000_000,
+            "continue_send_before_ns": 1_031_000_000,
+            "continue_send_after_ns": 1_032_000_000,
+            "resume_observed_ns": 1_033_000_000,
+            "actual_ms": 31.0,
+        }
+        native = {
+            "status": "OBSERVED",
+            "session": session,
+            "source": "backend",
+            "gap_kind": 1,
+            "clock": "CLOCK_MONOTONIC",
+            "time_namespace": 1234,
+            "failure_before_ns": 1_032_100_000,
+            "failure_after_ns": 1_032_200_000,
+        }
+        failure = "".join(
+            (
+                "AEC_PAUSE_RECEIPT=" + json.dumps(pause) + "\n",
+                "AEC_NATIVE_DIAGNOSTICS=" + json.dumps(native) + "\n",
+                "AEC isolated session NOT_DONE: AEC helper FATAL reason=3 processed=100; cleanup_reaped=True cleanup_ms=5\n",
+            )
+        )
+        result = classify(2, "", failure, session)
+        self.assertEqual(result["temporal_order"], "AFTER_INTERVENTION")
+        self.assertEqual(result["classification"], "OTHER_FAILURE")
+        self.assertFalse(result["aec_proof"])
+        duplicate = failure + "AEC_PAUSE_RECEIPT=" + json.dumps(pause) + "\n"
+        self.assertEqual(
+            classify(2, "", duplicate, session)["temporal_order"], "UNVERIFIED"
+        )
+
+    def test_pause_outcome_requires_verified_impact_and_first_gap(self) -> None:
+        classify_pause = __import__("runpy").run_path(
+            str(CHECK), run_name="aec_pause_classification"
+        )["classify_pause_outcome"]
+        session = "0123456789abcdef"
+        pause = {
+            "session": session,
+            "requested_ms": 30,
+            "after_witness_frames": 100,
+            "supervisor_ready": True,
+            "stop_observed": True,
+            "resume_observed": True,
+            "stop_observed_ns": 1_000_000_000,
+            "resume_observed_ns": 1_031_000_000,
+            "actual_ms": 31.0,
+            "stop_signals": 1,
+            "continue_signals": 1,
+            "supervisor_reaped": True,
+            "backend_resumed": True,
+        }
+        marker = "AEC_PAUSE_RECEIPT=" + json.dumps(pause) + "\n"
+        clean = json.dumps(
+            trial("wrong-reference", metric={"median_erle_db": 3.0}, test_pause=pause)
+        )
+        self.assertEqual(
+            classify_pause(0, clean, marker, session)["classification"], "NO_REPRO"
+        )
+        components = {
+            role: {
+                "status": "OBSERVED",
+                "session": session,
+                "source": role,
+                "reason": 3,
+                "callback": 101,
+                "expected_position": 48_000,
+                "position": 48_480,
+            }
+            for role in ("backend", "fixture", "witness")
+        }
+        native = {
+            "status": "OBSERVED",
+            "session": session,
+            "source": "backend",
+            "gap_kind": 1,
+            "expected_position": 48_000,
+            "observed_position": 48_480,
+            "expected_sequences": [100, 100],
+            "observed_sequences": [100, 101],
+        }
+        fixture = {
+            "status": "OBSERVED",
+            "session": session,
+            "source": "fixture",
+            "expected_pos": 48_000,
+            "observed_pos": 48_480,
+        }
+        failure = "".join(
+            (
+                marker,
+                "AEC_COMPONENT_DIAGNOSTICS=" + json.dumps(components) + "\n",
+                "AEC_NATIVE_DIAGNOSTICS=" + json.dumps(native) + "\n",
+                "AEC_FIXTURE_DIAGNOSTICS=" + json.dumps(fixture) + "\n",
+                "AEC isolated session NOT_DONE: AEC helper FATAL reason=3 processed=100; cleanup_reaped=True cleanup_ms=5\n",
+            )
+        )
+        self.assertNotIn("callback", native)
+        result = classify_pause(2, "", failure, session)
+        self.assertEqual(result["classification"], "OTHER_FAILURE")
+        self.assertEqual(result["temporal_order"], "UNVERIFIED")
+        self.assertEqual(result["diagnostics"]["backend"], native)
+        self.assertFalse(
+            stage()["classify"]("wrong-reference", 2, "", failure, FROZEN)[0]
+        )
+        for bad in (
+            failure.replace('callback": 101', 'callback": 99'),
+            failure.replace("cleanup_reaped=True", "cleanup_reaped=False"),
+            failure.replace(session, "0000000000000001"),
+            failure.replace("AEC helper FATAL reason=3", "AEC IPC timeout"),
+            failure.replace('gap_kind": 1', 'gap_kind": 0'),
+            failure.replace("AEC_PAUSE_RECEIPT=", "AEC_PAUSE_MISSING="),
+            failure + "AEC_PAUSE_RECEIPT=" + json.dumps(pause) + "\n",
+        ):
+            with self.subTest(bad=bad[-70:]):
+                self.assertEqual(
+                    classify_pause(2, "", bad, session)["classification"],
+                    "OTHER_FAILURE",
+                )
+        self.assertEqual(
+            classify_pause(2, "", marker + "IPC timeout\n", session)["classification"],
+            "OTHER_FAILURE",
+        )
+        self.assertEqual(
+            classify_pause(
+                2, "", marker + "AEC_BUFFER_PRECONDITION site=311\n", session
+            )["classification"],
+            "OTHER_FAILURE",
+        )
+
+    def test_unexpected_native_failure_retains_bounded_first_failure(self) -> None:
+        classify = stage()["classify"]
+        session = "0123456789abcdef"
+        components = {
+            role: {
+                "status": "OBSERVED",
+                "session": session,
+                "source": role,
+                "reason": 5,
+                "callback": 2256,
+                "expected_position": 1_082_880,
+                "position": 1_083_360,
+            }
+            for role in ("backend", "fixture", "witness")
+        }
+        native = {
+            "status": "OBSERVED",
+            "session": session,
+            "source": "backend",
+            "gap_kind": 1,
+            "expected_position": 1_082_880,
+            "observed_position": 1_083_360,
+        }
+        fixture = {
+            "status": "OBSERVED",
+            "session": session,
+            "source": "fixture",
+            "expected_pos": 1_082_880,
+            "observed_pos": 1_083_360,
+        }
+        stderr = "\n".join(
+            (
+                "AEC_COMPONENT_DIAGNOSTICS=" + json.dumps(components),
+                "AEC_NATIVE_DIAGNOSTICS=" + json.dumps(native),
+                "AEC_FIXTURE_DIAGNOSTICS=" + json.dumps(fixture),
+                "AEC isolated session NOT_DONE: AEC FRAME gap or graph change; cleanup_reaped=True cleanup_ms=4",
+            )
+        )
+        passed, detail = classify("wrong-reference", 2, "", stderr, FROZEN)
+        self.assertFalse(passed)
+        self.assertEqual(detail["reason"], "nonzero exit")
+        self.assertEqual(detail["diagnostics"]["components"], components)
+        self.assertEqual(detail["diagnostics"]["backend"], native)
+        self.assertEqual(detail["diagnostics"]["fixture"], fixture)
+        self.assertIn("AEC FRAME gap", detail["failure"])
+
+    def test_held_outer_request_retains_custody_through_late_outcome(self) -> None:
+        namespace = stage()
+        supervise = namespace["supervise_outer_scope_acquisition"]
+        outer = Path("/sys/fs/cgroup/missing-outer.scope")
+        inner = Path("/sys/fs/cgroup/missing-inner.scope")
+
+        class ScopeRejected(Exception):
+            pass
+
+        class ScopeCreationUnknown(Exception):
+            pass
+
+        class StopObservation(Exception):
+            pass
+
+        for outcome in ("rejected", "late_success", "unknown"):
+            with self.subTest(outcome=outcome):
+                released = threading.Event()
+                clock = [0.0]
+                child = mock.Mock(pid=1234, returncode=None)
+                child.poll.side_effect = functools.partial(
+                    lambda target: target.returncode,
+                    child,
+                )
+                child.wait.side_effect = functools.partial(
+                    lambda target, **_kwargs: setattr(target, "returncode", -9),
+                    child,
+                )
+
+                def acquire(
+                    *_args: object, release: threading.Event, result: str
+                ) -> Path:
+                    release.wait()
+                    if result == "rejected":
+                        raise ScopeRejected("manager rejected")
+                    if result == "unknown":
+                        raise ScopeCreationUnknown("manager outcome unknown")
+                    return outer
+
+                def tick(
+                    _seconds: float,
+                    *,
+                    current_clock: list[float],
+                    release: threading.Event,
+                    result: str,
+                ) -> None:
+                    current_clock[0] += 0.05
+                    if current_clock[0] >= 9:
+                        release.set()
+                    if result == "unknown" and current_clock[0] >= 10:
+                        raise StopObservation
+                    threading.Event().wait(0.0001)
+
+                bound_acquire = functools.partial(
+                    acquire, release=released, result=outcome
+                )
+                bound_tick = functools.partial(
+                    tick,
+                    current_clock=clock,
+                    release=released,
+                    result=outcome,
+                )
+
+                output = io.StringIO()
+                gate_read, gate_write = namespace["os"].pipe()
+                namespace["os"].close(gate_read)
+                try:
+                    with (
+                        mock.patch.object(
+                            namespace["time"],
+                            "monotonic",
+                            side_effect=functools.partial(
+                                lambda current: current[0], clock
+                            ),
+                        ),
+                        mock.patch.object(
+                            namespace["time"], "sleep", side_effect=bound_tick
+                        ),
+                        mock.patch.object(
+                            namespace["signal"], "pidfd_send_signal"
+                        ) as kill_child,
+                        mock.patch.dict(
+                            supervise.__globals__,
+                            {
+                                "kill_exact_scope": lambda _scope, bound: (bound, True),
+                            },
+                        ),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        kill_child.side_effect = functools.partial(
+                            lambda target, *_args: setattr(target, "returncode", -9),
+                            child,
+                        )
+                        runner = {
+                            "acquire_scope": bound_acquire,
+                            "ScopeRejected": ScopeRejected,
+                        }
+                        args = (
+                            runner,
+                            child,
+                            55,
+                            outer,
+                            inner,
+                            "translator-aec-" + "a" * 32,
+                            gate_write,
+                            "held-case",
+                        )
+                        if outcome == "unknown":
+                            with self.assertRaises(StopObservation):
+                                supervise(*args)
+                        else:
+                            admitted, bound, reason = supervise(*args)
+                            self.assertFalse(admitted)
+                            self.assertIsNone(bound)
+                            self.assertEqual(
+                                reason,
+                                "outer_scope_rejected"
+                                if outcome == "rejected"
+                                else "outer_scope_timeout",
+                            )
+                        kill_child.assert_called()
+                        self.assertIn('"status": "CleanupPending"', output.getvalue())
+                finally:
+                    released.set()
+
+    def test_outer_request_admits_only_bound_live_scope(self) -> None:
+        namespace = stage()
+        child = mock.Mock(pid=1234)
+        child.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            gate_read, gate_write = namespace["os"].pipe()
+            namespace["os"].close(gate_read)
+            try:
+                admitted, bound, reason = namespace[
+                    "supervise_outer_scope_acquisition"
+                ](
+                    {
+                        "acquire_scope": lambda *_args: outer,
+                        "ScopeRejected": RuntimeError,
+                    },
+                    child,
+                    55,
+                    outer,
+                    outer / "inner",
+                    "translator-aec-" + "a" * 32,
+                    gate_write,
+                    "fast-case",
+                )
+                self.assertTrue(admitted)
+                self.assertIsNotNone(bound)
+                self.assertIsNone(reason)
+                child.poll.assert_called()
+                namespace["os"].close(bound)
+            finally:
+                namespace["os"].close(gate_write)
+
+    def test_native_case_selects_exact_prebuilt_binary_without_cargo_runtime(
+        self,
+    ) -> None:
+        namespace = stage()
+        artifact = {
+            "reason": "compiler-artifact",
+            "target": {"name": "aec_backend_session", "kind": ["test"]},
+            "profile": {"test": True},
+            "executable": "/tmp/target/debug/deps/aec_backend_session-abc",
+        }
+        output = (
+            json.dumps({"reason": "build-script-executed"})
+            + "\n"
+            + json.dumps(artifact)
+        )
+        binary = namespace["native_test_binary_from_build_output"](output)
+        self.assertEqual(str(binary), artifact["executable"])
+        self.assertEqual(
+            namespace["native_test_command"](
+                binary, "isolated_native_stream_is_owned_and_cancelled"
+            ),
+            [
+                artifact["executable"],
+                "--exact",
+                "isolated_native_stream_is_owned_and_cancelled",
+                "--ignored",
+                "--nocapture",
+            ],
+        )
+        with self.assertRaises(ValueError):
+            namespace["native_test_binary_from_build_output"](
+                output + "\n" + json.dumps(artifact)
+            )
+
+    def test_stage_lifecycle_requires_exact_p_then_terminal_identity(self) -> None:
+        parse = stage()["parse_native_lifecycle"]
+        unit = "translator-aec-" + "a" * 32
+        session = "0123456789abcdef"
+        p = {
+            "event": "P",
+            "unit": unit,
+            "pid": 1234,
+            "session": session,
+            "manager_owner": ":1.42",
+        }
+        a = dict(p, event="A", job="/org/freedesktop/systemd1/job/17")
+        self.assertEqual(
+            parse((json.dumps(p) + "\n" + json.dumps(a) + "\n").encode(), unit), "A"
+        )
+        self.assertEqual(parse((json.dumps(p) + "\n").encode(), unit), "PENDING")
+        self.assertEqual(
+            parse(
+                (
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in p.items()
+                            if key != "manager_owner"
+                        }
+                        | {"event": "N"}
+                    )
+                    + "\n"
+                ).encode(),
+                unit,
+            ),
+            "N",
+        )
+        for events in (
+            [a],
+            [p, p],
+            [p, dict(a, unit="translator-aec-" + "b" * 32)],
+            [p, dict(a, pid=1235)],
+        ):
+            with self.assertRaises(ValueError):
+                parse(
+                    "".join(json.dumps(event) + "\n" for event in events).encode(), unit
+                )
+
+    def test_stage_binds_launcher_from_real_newline_p_marker(self) -> None:
+        bind = stage()["bind_stage_launcher"]
+        unit = "translator-aec-" + "a" * 32
+        outer = Path("/sys/fs/cgroup/user.slice/test.scope")
+        event = {
+            "event": "P",
+            "unit": unit,
+            "pid": 1234,
+            "session": "0123456789abcdef",
+            "manager_owner": ":1.42",
+        }
+        with (
+            mock.patch("os.pidfd_open", return_value=77),
+            mock.patch.object(
+                Path, "read_text", return_value="0::/user.slice/test.scope"
+            ),
+        ):
+            self.assertEqual(
+                bind((json.dumps(event) + "\n").encode(), unit, outer),
+                (1234, 77),
+            )
+
+    def test_native_settlement_keeps_ambiguous_and_direct_failures_pending(
+        self,
+    ) -> None:
+        settled = stage()["native_case_settled"]
+        self.assertTrue(settled("A", False, False, True, True))
+        self.assertTrue(settled("N", False, False, True, True))
+        self.assertTrue(settled("N", False, True, True, True))
+        self.assertTrue(settled("NO_REQUEST", False, False, True, True))
+        self.assertTrue(settled("NO_REQUEST", False, True, True, True))
+        self.assertTrue(settled("NO_REQUEST", True, True, True, True))
+        self.assertFalse(settled("PENDING", False, False, True, True))
+        self.assertTrue(settled("NO_REQUEST", True, False, True, True))
+        accepted = stage()["native_case_accepted"]
+        self.assertTrue(accepted("A", False, True))
+        self.assertTrue(accepted("NO_REQUEST", True, True))
+        self.assertFalse(accepted("N", False, True))
+        self.assertFalse(accepted("NO_REQUEST", True, False))
+        self.assertFalse(accepted("A", True, True))
+        self.assertFalse(settled("A", False, True, False, True))
+        self.assertFalse(settled("A", False, True, True, False))
+
     def test_gio_runtime_is_in_frozen_artifact_set(self) -> None:
         namespace = stage()
         frozen = namespace["frozen_inputs"]()
@@ -138,6 +697,63 @@ class AecBackendStageTests(unittest.TestCase):
                 FROZEN,
             )[0]
         )
+
+    def test_success_requires_three_bound_component_states(self) -> None:
+        classify = stage()["classify"]
+        good = trial("far-only")
+        self.assertTrue(classify("far-only", 0, json.dumps(good), "", FROZEN)[0])
+        crossed = {
+            **good["component_states"],
+            "backend": {
+                **good["component_states"]["backend"],
+                "queue_head": 1,
+                "queue_tail": 2,
+            },
+        }
+        self.assertTrue(
+            classify(
+                "far-only",
+                0,
+                json.dumps(trial("far-only", component_states=crossed)),
+                "",
+                FROZEN,
+            )[0]
+        )
+        for states in (
+            {},
+            {
+                key: value
+                for key, value in good["component_states"].items()
+                if key != "witness"
+            },
+            {
+                **good["component_states"],
+                "backend": {
+                    **good["component_states"]["backend"],
+                    "status": "UNOBSERVED",
+                },
+            },
+            {
+                **good["component_states"],
+                "fixture": {
+                    **good["component_states"]["fixture"],
+                    "session": "fedcba9876543210",
+                },
+            },
+            {
+                **good["component_states"],
+                "witness": {**good["component_states"]["witness"], "source": "backend"},
+            },
+        ):
+            self.assertFalse(
+                classify(
+                    "far-only",
+                    0,
+                    json.dumps(trial("far-only", component_states=states)),
+                    "",
+                    FROZEN,
+                )[0]
+            )
 
     def test_near_and_startup_have_distinct_contracts(self) -> None:
         classify = stage()["classify"]

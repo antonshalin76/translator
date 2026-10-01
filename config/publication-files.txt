@@ -31,12 +31,14 @@ crates/translator-aec-backend/.gitignore
 crates/translator-aec-backend/Cargo.toml
 crates/translator-aec-backend/README.md
 crates/translator-aec-backend/build.rs
+crates/translator-aec-backend/src/callback_history.h
 crates/translator-aec-backend/src/fixture.c
 crates/translator-aec-backend/src/fixture.rs
 crates/translator-aec-backend/src/main.rs
 crates/translator-aec-backend/src/native.c
 crates/translator-aec-backend/src/witness.c
 crates/translator-aec-backend/src/witness.rs
+crates/translator-aec-backend/tests/callback_history_wire.c
 crates/translator-aec-backend/tests/cli.rs
 crates/translator-aec-backend/tests/fixture_cli.rs
 crates/translator-aec-backend/tests/native_diagnostics.c
@@ -293,6 +295,8 @@ tests/test_aec_backend_check.py
 tests/test_aec_backend_isolation.py
 tests/test_aec_backend_isolation_hardening.py
 tests/test_aec_backend_stage.py
+tests/test_aec_callback_history.py
+tests/test_aec_native_custodian.py
 tests/test_aec_public_boundary.py
 tests/test_ci_contract.py
 tests/test_manifest_execution_gate.py

@@ -136,6 +136,133 @@ class AecBackendIsolationHardeningTests(unittest.TestCase):
         finally:
             os.close(read_fd)
 
+    def test_broken_stage_lifecycle_channel_prevents_scope_submit(self) -> None:
+        namespace = runpy.run_path(str(CHECK), run_name="aec_runner_contract")
+        run_scoped = namespace["run_scoped"]
+        globals_ = run_scoped.__globals__
+        stage_read, stage_write = os.pipe()
+        os.close(stage_read)
+        unit = "translator-aec-" + "c" * 32
+        process = mock.Mock(pid=12347, returncode=0)
+        process.communicate.return_value = (b"", b"")
+        submitted = False
+        acquire_calls = 0
+        request_calls = 0
+        cleanup = mock.Mock(return_value=(True, 1))
+        stderr = io.StringIO()
+
+        def fake_acquire(_pid, _unit, _process, _check_cancel, on_created, on_request):
+            nonlocal submitted, acquire_calls, request_calls
+            acquire_calls += 1
+            request_calls += 1
+            on_request()
+            submitted = True
+            raise namespace["ScopeRejected"]("mock manager rejection")
+
+        try:
+            with (
+                mock.patch.dict(
+                    globals_,
+                    {
+                        "acquire_scope": fake_acquire,
+                        "cleanup_scope": cleanup,
+                        "scope_present": mock.Mock(return_value=False),
+                    },
+                ),
+                mock.patch.object(Path, "is_socket", return_value=True),
+                mock.patch("subprocess.Popen", return_value=process),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "TRANSLATOR_AEC_SCOPE_UNIT": unit,
+                        "TRANSLATOR_AEC_EXPECTED_SESSION": "0123456789abcdef",
+                        "TRANSLATOR_AEC_STAGE_LIFECYCLE_FD": str(stage_write),
+                    },
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(
+                    run_scoped(["/usr/bin/true"], stream=False, quick=True), 2
+                )
+        finally:
+            os.close(stage_write)
+        self.assertEqual(acquire_calls, 1)
+        self.assertEqual(request_calls, 1)
+        self.assertEqual(cleanup.call_count, 1)
+        self.assertIn("BrokenPipeError", stderr.getvalue())
+        self.assertFalse(
+            submitted, "scope request was sent after custody channel failed"
+        )
+
+    def test_stage_lifecycle_receives_p_before_manager_submit_and_n_after_rejection(
+        self,
+    ) -> None:
+        namespace = runpy.run_path(str(CHECK), run_name="aec_runner_contract")
+        run_scoped = namespace["run_scoped"]
+        globals_ = run_scoped.__globals__
+        stage_read, stage_write = os.pipe()
+        os.set_blocking(stage_read, False)
+        unit = "translator-aec-" + "d" * 32
+        process = mock.Mock(pid=12348, returncode=0)
+        cleanup = mock.Mock(return_value=(True, 1))
+        observed_before_submit = b""
+
+        def fake_acquire(_pid, _unit, _process, _check_cancel, on_created, on_request):
+            nonlocal observed_before_submit
+            on_request()
+            try:
+                observed_before_submit = os.read(stage_read, 4096)
+            except BlockingIOError:
+                pass
+            raise namespace["ScopeRejected"]("mock manager rejection")
+
+        try:
+            with (
+                mock.patch.dict(
+                    globals_,
+                    {
+                        "acquire_scope": fake_acquire,
+                        "cleanup_scope": cleanup,
+                        "scope_present": mock.Mock(return_value=False),
+                    },
+                ),
+                mock.patch.object(Path, "is_socket", return_value=True),
+                mock.patch("subprocess.Popen", return_value=process),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "TRANSLATOR_AEC_SCOPE_UNIT": unit,
+                        "TRANSLATOR_AEC_EXPECTED_SESSION": "0123456789abcdef",
+                        "TRANSLATOR_AEC_STAGE_LIFECYCLE_FD": str(stage_write),
+                    },
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(
+                    run_scoped(["/usr/bin/true"], stream=False, quick=True), 2
+                )
+            try:
+                tail = os.read(stage_read, 4096)
+            except BlockingIOError:
+                tail = b""
+        finally:
+            os.close(stage_write)
+            os.close(stage_read)
+        self.assertEqual(cleanup.call_count, 1)
+        lines = (observed_before_submit + tail).splitlines()
+        self.assertEqual(len(lines), 2)
+        events = [json.loads(line) for line in lines]
+        self.assertEqual([event["event"] for event in events], ["P", "N"])
+        self.assertIn(b'"event": "P"', observed_before_submit)
+        self.assertTrue(
+            all(
+                event["unit"] == unit
+                and event["session"] == "0123456789abcdef"
+                and event["pid"] == os.getpid()
+                for event in events
+            )
+        )
+
     def test_inherited_fd_is_rejected_before_probe(self) -> None:
         with open(os.devnull, "rb") as inherited:
             result = _run("--preflight-only", pass_fds=(inherited.fileno(),))
@@ -420,7 +547,7 @@ class AecBackendIsolationHardeningTests(unittest.TestCase):
         created = mock.Mock()
 
         def verify_admission(*_args: object) -> Path:
-            created.assert_called_once_with()
+            created.assert_called_once_with(job, ":1.321")
             return Path("/tmp/verified-scope")
 
         await_scope = mock.Mock(side_effect=verify_admission)
@@ -476,7 +603,7 @@ class AecBackendIsolationHardeningTests(unittest.TestCase):
                     "translator-aec-" + "1" * 32,
                     mock.Mock(),
                     mock.Mock(),
-                    on_request=lambda: requests.append("P"),
+                    on_request=lambda _owner: requests.append("P"),
                 )
         self.assertEqual(requests, ["P"])
         self.assertNotIsInstance(raised.exception, namespace["ScopeRejected"])
@@ -721,7 +848,7 @@ class AecBackendIsolationHardeningTests(unittest.TestCase):
                     unit,
                     mock.Mock(),
                     mock.Mock(),
-                    on_request=lambda: events.append("P"),
+                    on_request=lambda _owner: events.append("P"),
                 )
         self.assertEqual(events.count("P"), 1)
         events.clear()

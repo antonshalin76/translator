@@ -32,6 +32,7 @@ use tokio::{
     time::Instant,
 };
 use translator_audio::{AecBackendLink, AecBackendWindow, AecBackendWire};
+#[cfg(not(test))]
 use uuid::Uuid;
 
 const NO_PROGRESS_BUDGET: Duration = Duration::from_secs(4);
@@ -117,6 +118,23 @@ impl OwnedScope {
             return Err(AecBackendSessionError::RandomnessUnavailable);
         }
         let uid = rustix::process::getuid().as_raw();
+        #[cfg(test)]
+        let unit = {
+            let value = std::env::var("TRANSLATOR_AEC_NATIVE_SCOPE_UNIT")
+                .map_err(|_| AecBackendSessionError::SpawnFailed)?;
+            let suffix = value
+                .strip_prefix("translator-aec-")
+                .ok_or(AecBackendSessionError::SpawnFailed)?;
+            if suffix.len() != 32
+                || !suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(AecBackendSessionError::SpawnFailed);
+            }
+            value
+        };
+        #[cfg(not(test))]
         let unit = format!("translator-aec-{}", Uuid::new_v4().simple());
         let cgroup = PathBuf::from(format!(
             "/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/{unit}.scope"
@@ -441,6 +459,22 @@ impl AecBackendSessionOwner {
             "TRANSLATOR_AEC_EXPECTED_SESSION",
             format!("{:016x}", scope.expected_session),
         );
+        #[cfg(test)]
+        {
+            let stage_fd = std::env::var("TRANSLATOR_AEC_STAGE_LIFECYCLE_FD")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .filter(|fd| *fd >= 3)
+                .ok_or(AecBackendSessionError::SpawnFailed)?;
+            command.env("TRANSLATOR_AEC_STAGE_LIFECYCLE_FD", stage_fd.to_string());
+            unsafe {
+                command.as_std_mut().pre_exec(move || {
+                    let borrowed = std::os::fd::BorrowedFd::borrow_raw(stage_fd);
+                    fcntl_setfd(borrowed, FdFlags::empty())
+                        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))
+                });
+            }
+        }
         self.start_inner(command, Some(scope)).await
     }
 
@@ -1572,10 +1606,12 @@ mod scope_tests {
         let owner = AecBackendSessionOwner::new();
         owner.state.lock().await.status = AecBackendSessionStatus::Running;
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel::<()>();
         let state = Arc::clone(&owner.state);
         owner.control.lock().await.task = Some(thread::spawn(move || {
             let _ = release_rx.recv();
             state.blocking_lock().status = AecBackendSessionStatus::Idle;
+            let _ = finished_tx.send(());
         }));
         let (first_entered_tx, first_entered_rx) = tokio::sync::oneshot::channel();
         let first_owner = owner.clone();
@@ -1622,7 +1658,10 @@ mod scope_tests {
             Err(AecBackendSessionError::Busy)
         ));
         release_tx.send(()).unwrap();
-        tokio::task::yield_now().await;
+        tokio::task::spawn_blocking(move || finished_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("owned cleanup thread did not finish");
         assert_eq!(owner.shutdown().await, AecBackendSessionStatus::Idle);
     }
 

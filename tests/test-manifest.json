@@ -11681,12 +11681,14 @@
     },
     "unittest": {
       "external_skip_count": 22,
-      "file_count": 19,
+      "file_count": 21,
       "files": [
         "tests/test_aec_backend_check.py",
         "tests/test_aec_backend_isolation.py",
         "tests/test_aec_backend_isolation_hardening.py",
         "tests/test_aec_backend_stage.py",
+        "tests/test_aec_callback_history.py",
+        "tests/test_aec_native_custodian.py",
         "tests/test_aec_public_boundary.py",
         "tests/test_ci_contract.py",
         "tests/test_manifest_execution_gate.py",
@@ -11703,11 +11705,17 @@
         "tests/test_task9_desktop_run_mode.py",
         "tests/test_translator_ui_compact_layout.py"
       ],
-      "node_count": 322,
+      "node_count": 357,
       "nodes": [
         {
           "file": "tests/test_aec_backend_check.py",
           "id": "test_aec_backend_check.AecBackendCheckTests.test_cancel_lifecycle_accepts_ordered_armed_before_frames",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_component_state_is_numeric_and_first_failure_only",
           "reason": "",
           "status": "deterministic"
         },
@@ -11725,6 +11733,12 @@
         },
         {
           "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_first_failure_time_binds_to_failed_snapshot_and_session",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
           "id": "test_aec_backend_check.AecBackendCheckTests.test_first_gap_snapshot_contains_only_numeric_provenance",
           "reason": "",
           "status": "deterministic"
@@ -11737,13 +11751,61 @@
         },
         {
           "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_frame_consumer_only_triggers_prepared_supervisor",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
           "id": "test_aec_backend_check.AecBackendCheckTests.test_oversized_native_diagnostic_is_unobserved",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_pause_owner_loss_after_stop_resumes_owned_child_only",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_pause_rejects_before_hundred_verified_frames",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_pause_rejects_foreign_pidfd_before_signal",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_pause_scope_rejects_other_invocations_before_graph",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_pause_supervisor_loss_after_stop_is_rescued",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_pause_supervisor_resumes_exact_child_after_real_stop",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
           "id": "test_aec_backend_check.AecBackendCheckTests.test_preflight_reports_private_namespace",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_prepared_pause_trigger_does_not_wait_for_supervisor",
           "reason": "",
           "status": "deterministic"
         },
@@ -11756,6 +11818,18 @@
         {
           "file": "tests/test_aec_backend_check.py",
           "id": "test_aec_backend_check.AecBackendCheckTests.test_seq_skew_verdict_uses_structured_native_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_supervisor_cleanup_error_still_reaps_child",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_check.py",
+          "id": "test_aec_backend_check.AecBackendCheckTests.test_supervisor_pidfd_open_failure_reaps_spawned_child",
           "reason": "",
           "status": "deterministic"
         },
@@ -11786,6 +11860,12 @@
         {
           "file": "tests/test_aec_backend_isolation_hardening.py",
           "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_await_scope_checks_cancel_after_negative_membership_read",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_broken_stage_lifecycle_channel_prevents_scope_submit",
           "reason": "",
           "status": "deterministic"
         },
@@ -11887,6 +11967,12 @@
         },
         {
           "file": "tests/test_aec_backend_isolation_hardening.py",
+          "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_stage_lifecycle_receives_p_before_manager_submit_and_n_after_rejection",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_isolation_hardening.py",
           "id": "test_aec_backend_isolation_hardening.AecBackendIsolationHardeningTests.test_transport_failure_is_not_definitive_manager_rejection",
           "reason": "",
           "status": "deterministic"
@@ -11905,6 +11991,12 @@
         },
         {
           "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_first_failure_temporal_order_is_conservative",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
           "id": "test_aec_backend_stage.AecBackendStageTests.test_frozen_artifact_set_includes_runtime_and_harness",
           "reason": "",
           "status": "deterministic"
@@ -11917,7 +12009,25 @@
         },
         {
           "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_held_outer_request_retains_custody_through_late_outcome",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
           "id": "test_aec_backend_stage.AecBackendStageTests.test_lifecycle_and_gap_require_causal_receipt",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_native_case_selects_exact_prebuilt_binary_without_cargo_runtime",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_native_settlement_keeps_ambiguous_and_direct_failures_pending",
           "reason": "",
           "status": "deterministic"
         },
@@ -11929,13 +12039,115 @@
         },
         {
           "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_outer_request_admits_only_bound_live_scope",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
           "id": "test_aec_backend_stage.AecBackendStageTests.test_owner_receipt_requires_exact_test_count",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_pause_outcome_requires_verified_impact_and_first_gap",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_public_pause_receipt_keeps_temporal_order_diagnostic_only",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_stage_binds_launcher_from_real_newline_p_marker",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_stage_lifecycle_requires_exact_p_then_terminal_identity",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_success_requires_three_bound_component_states",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
           "id": "test_aec_backend_stage.AecBackendStageTests.test_trials_bind_mode_frames_metric_and_identity",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_backend_stage.py",
+          "id": "test_aec_backend_stage.AecBackendStageTests.test_unexpected_native_failure_retains_bounded_first_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_callback_history.py",
+          "id": "test_aec_callback_history.CallbackHistoryParserTests.test_complete_wrapped_histories_are_session_bound",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_callback_history.py",
+          "id": "test_aec_callback_history.CallbackHistoryParserTests.test_corrupt_or_cross_session_histories_are_unobserved",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_callback_history.py",
+          "id": "test_aec_callback_history.CallbackHistoryParserTests.test_real_c_wire_output_is_accepted",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_callback_history.py",
+          "id": "test_aec_callback_history.CallbackHistoryParserTests.test_short_circuit_position_is_explicitly_missing",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_callback_history.py",
+          "id": "test_aec_callback_history.CallbackHistoryParserTests.test_stage_preserves_bounded_full_history_on_failure",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_native_custodian.py",
+          "id": "test_aec_native_custodian.NativeCustodianTests.test_guardian_exception_after_spawn_reaps_native_child",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_native_custodian.py",
+          "id": "test_aec_native_custodian.NativeCustodianTests.test_post_gate_exception_settles_terminal_a_and_n",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_native_custodian.py",
+          "id": "test_aec_native_custodian.NativeCustodianTests.test_stage_sigkill_after_admission_cleans_exact_scope",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_native_custodian.py",
+          "id": "test_aec_native_custodian.NativeCustodianTests.test_stage_sigkill_after_request_cleans_late_owned_scope",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_aec_native_custodian.py",
+          "id": "test_aec_native_custodian.NativeCustodianTests.test_stage_sigkill_before_permit_starts_no_case",
           "reason": "",
           "status": "deterministic"
         },

@@ -25,8 +25,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "callback_history.h"
 
 #define RATE 48000u
 #define QUANTUM 480u
@@ -55,6 +57,11 @@ struct frame {
     float raw[QUANTUM];
     float reference[QUANTUM];
     float clean[QUANTUM];
+};
+
+struct frame_state {
+    uint32_t reason, callback, duration, clock, valid_mask, queue_head, queue_tail;
+    uint64_t expected_position, position, xrun, sequence;
 };
 
 struct backend;
@@ -163,6 +170,14 @@ struct backend {
     _Atomic uint64_t last_position_xrun;
     _Atomic uint32_t head;
     _Atomic uint32_t tail;
+    _Atomic uint64_t observed_sequence;
+    _Atomic uint64_t accepted_next_position;
+    _Atomic uint32_t valid_mask;
+    _Atomic bool snapshot_ready;
+    uint64_t first_failure_before_ns;
+    uint64_t first_failure_after_ns;
+    struct frame_state snapshot;
+    struct aec_callback_history history;
     struct frame frames[QUEUE_SLOTS];
     pthread_t writer;
     bool writer_started;
@@ -179,6 +194,12 @@ static void put64(uint8_t *dst, uint64_t value) {
 static uint32_t get32(const uint8_t *src) {
     return (uint32_t)src[0] | (uint32_t)src[1] << 8 | (uint32_t)src[2] << 16 | (uint32_t)src[3] << 24;
 }
+static uint64_t monotonic_ns(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0) return 0;
+    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+}
+
 static void poison_at(struct backend *b, enum failure reason, unsigned site) {
     if (reason == FAIL_BUFFER) {
         uint32_t unknown = 0;
@@ -187,10 +208,29 @@ static void poison_at(struct backend *b, enum failure reason, unsigned site) {
             atomic_store(&b->bad_buffer_position, atomic_load(&b->last_position_tick));
         }
     }
+    uint64_t before_ns = monotonic_ns();
     uint32_t none = FAIL_NONE;
-    if (atomic_compare_exchange_strong(&b->failure, &none, (uint32_t)reason) &&
-        reason == FAIL_LINK)
-        fprintf(stderr, "AEC_FAILURE reason=%u site=%u\n", (unsigned)reason, site);
+    if (atomic_compare_exchange_strong(&b->failure, &none, (uint32_t)reason)) {
+        aec_history_fail(&b->history);
+        b->first_failure_before_ns = before_ns;
+        b->first_failure_after_ns = monotonic_ns();
+        b->snapshot = (struct frame_state) {
+            .reason = (uint32_t)reason,
+            .callback = atomic_load(&b->callback_count),
+            .duration = atomic_load(&b->last_position_duration),
+            .clock = atomic_load(&b->last_position_clock_id),
+            .valid_mask = atomic_load(&b->valid_mask),
+            .queue_head = atomic_load(&b->head),
+            .queue_tail = atomic_load(&b->tail),
+            .expected_position = atomic_load(&b->accepted_next_position),
+            .position = atomic_load(&b->last_position_tick),
+            .xrun = atomic_load(&b->last_position_xrun),
+            .sequence = atomic_load(&b->observed_sequence),
+        };
+        atomic_store_explicit(&b->snapshot_ready, true, memory_order_release);
+        if (reason == FAIL_LINK)
+            fprintf(stderr, "AEC_FAILURE reason=%u site=%u\n", (unsigned)reason, site);
+    }
 }
 #define poison(b, reason) poison_at((b), (reason), __LINE__)
 static bool finite_pcm(const float *samples) {
@@ -294,6 +334,17 @@ static void recycle(struct backend *b, struct pw_buffer *raw, struct pw_buffer *
 static void on_process(void *userdata, struct spa_io_position *position) {
     struct backend *b = userdata;
     uint32_t callbacks = atomic_fetch_add(&b->callback_count, 1);
+    struct aec_callback_event trace;
+    bool trace_active = aec_history_begin(&b->history, &trace, (uint64_t)callbacks + 1, position);
+    if (trace_active) {
+        trace.expected_position = b->next_position;
+        trace.admission_position = UINT64_MAX;
+        trace.head = atomic_load(&b->head);
+        trace.tail = atomic_load(&b->tail);
+        trace.stage = 1;
+    }
+    atomic_store(&b->observed_sequence, 0);
+    atomic_store(&b->valid_mask, 0);
     if (position != NULL) {
         if (callbacks == 0) atomic_store(&b->first_position_tick, position->clock.position);
         atomic_store(&b->last_position_state, (uint32_t)position->state);
@@ -311,6 +362,8 @@ static void on_process(void *userdata, struct spa_io_position *position) {
             atomic_store(&b->bad_position_rate_denom, position->clock.rate.denom);
         }
         poison(b, FAIL_GRAPH_STATE);
+        if (trace_active) { trace.reason = FAIL_GRAPH_STATE; trace.stage = 5; }
+        aec_history_end(&b->history, &trace, trace_active);
         return;
     }
     struct pw_buffer *raw_buffer = pw_filter_dequeue_buffer(b->raw_port);
@@ -322,6 +375,16 @@ static void on_process(void *userdata, struct spa_io_position *position) {
     float *raw = checked_pcm(raw_buffer, true, &raw_seq, &buffer_reason[0]);
     float *reference = checked_pcm(reference_buffer, true, &reference_seq, &buffer_reason[1]);
     float *out = checked_pcm(clean_buffer, false, &output_seq, &buffer_reason[2]);
+    atomic_store(&b->observed_sequence, raw_seq);
+    atomic_store(&b->valid_mask, (raw != NULL ? 1u : 0u) |
+                 (reference != NULL ? 2u : 0u) | (out != NULL ? 4u : 0u));
+    if (trace_active) {
+        trace.raw_seq = raw_seq;
+        trace.reference_seq = reference_seq;
+        trace.output_seq = output_seq;
+        trace.valid_mask = atomic_load(&b->valid_mask);
+        trace.stage = 2;
+    }
     if (atomic_load_explicit(&b->failure, memory_order_relaxed) != FAIL_NONE ||
         atomic_load_explicit(&b->stopping, memory_order_relaxed)) goto muted;
     if (atomic_load_explicit(&b->started, memory_order_relaxed) &&
@@ -354,6 +417,7 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         goto muted;
     }
     const struct spa_io_clock *clock = &position->clock;
+    if (trace_active) aec_history_admission(&trace, clock);
     if (clock->rate.num == 0 || clock->rate.denom != RATE * clock->rate.num ||
         clock->id == SPA_ID_INVALID) {
         poison(b, FAIL_CLOCK);
@@ -363,7 +427,8 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         if (clock->id != b->first_clock_id ||
             clock->rate.num != b->first_rate_num ||
             clock->rate.denom != b->first_rate_denom ||
-            clock->xrun != b->last_xrun || clock->position != b->next_position) {
+            clock->xrun != b->last_xrun ||
+            aec_history_used_position(clock->position, &trace, trace_active) != b->next_position) {
             atomic_store(&b->bad_gap_kind, 1);
             atomic_store(&b->bad_gap_expected_position, b->next_position);
             atomic_store(&b->bad_gap_observed_position, clock->position);
@@ -380,7 +445,13 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         b->first_rate_num = clock->rate.num;
         b->first_rate_denom = clock->rate.denom;
     }
-    uint64_t expected_seq = b->producer_seq_base + clock->position / QUANTUM;
+    uint64_t seq_position = clock->position;
+    uint64_t expected_seq = b->producer_seq_base + seq_position / QUANTUM;
+    if (trace_active) {
+        trace.seq_position = seq_position;
+        if (trace.admission_position == UINT64_MAX) trace.admission_position = seq_position;
+        trace.expected_seq = expected_seq;
+    }
     if (raw_seq != expected_seq || reference_seq != expected_seq ||
         raw_seq != reference_seq ||
         (b->have_port_seq &&
@@ -415,13 +486,28 @@ static void on_process(void *userdata, struct spa_io_position *position) {
     const float *rec_channels[] = { raw };
     const float *play_channels[] = { reference };
     float *out_channels[] = { out };
+    if (trace_active) { trace.stage = 3; trace.dsp_begin_ns = aec_history_time(CLOCK_MONOTONIC); }
     int aec_status = spa_audio_aec_run(b->aec, rec_channels, play_channels, out_channels, QUANTUM);
+    if (trace_active) trace.dsp_end_ns = aec_history_time(CLOCK_MONOTONIC);
     if (aec_status < 0 || atomic_exchange(&b->inject_aec_error, false) || !finite_pcm(out)) {
         poison(b, FAIL_AEC);
         goto muted;
     }
     memcpy(frame->clean, out, QUANTUM * sizeof(float));
-    b->next_position = clock->position + QUANTUM;
+    if (trace_active) {
+        trace.publication_position = frame->position;
+        trace.publication_duration = (uint32_t)frame->duration;
+        trace.publication_xrun = frame->xrun;
+        trace.publication_clock = frame->clock_id;
+        trace.publication_rate_num = frame->rate_num;
+        trace.publication_rate_denom = frame->rate_denom;
+        aec_history_next_source(&trace, clock);
+    }
+    uint64_t next_source_position = clock->position;
+    b->next_position = next_source_position + QUANTUM;
+    if (trace_active) trace.next_source_position = next_source_position;
+    if (trace_active) { trace.next_position = b->next_position; trace.stage = 4; }
+    atomic_store(&b->accepted_next_position, b->next_position);
     b->last_xrun = clock->xrun;
     b->last_raw_seq = raw_seq;
     b->last_reference_seq = reference_seq;
@@ -431,11 +517,24 @@ static void on_process(void *userdata, struct spa_io_position *position) {
     recycle(b, raw_buffer, reference_buffer, clean_buffer);
     if (head == 0 && atomic_load(&b->failure) == FAIL_NONE)
         atomic_store_explicit(&b->armed_ready, true, memory_order_release);
+    if (trace_active) {
+        trace.head = head + 1;
+        trace.tail = atomic_load(&b->tail);
+        trace.reason = atomic_load(&b->failure);
+    }
+    aec_history_end(&b->history, &trace, trace_active);
     return;
 muted:
     if (out != NULL) memset(out, 0, QUANTUM * sizeof(float));
     invalidate_output(clean_buffer);
     recycle(b, raw_buffer, reference_buffer, clean_buffer);
+    if (trace_active) {
+        trace.reason = atomic_load(&b->failure);
+        trace.head = atomic_load(&b->head);
+        trace.tail = atomic_load(&b->tail);
+        trace.stage = 5;
+    }
+    aec_history_end(&b->history, &trace, trace_active);
 }
 static void on_state(void *userdata, enum pw_filter_state old_state,
                      enum pw_filter_state state, const char *error) {
@@ -964,7 +1063,45 @@ static bool load_aec(struct backend *b) {
     return b->aec->latency != NULL && strcmp(b->aec->latency, "480/48000") == 0;
 }
 
+static void report_frame_state(const struct backend *b) {
+    bool failed = atomic_load_explicit(&b->snapshot_ready, memory_order_acquire);
+    if (atomic_load(&b->failure) != FAIL_NONE && !failed) return;
+    struct frame_state state = failed ? b->snapshot : (struct frame_state) {
+        .callback = atomic_load(&b->callback_count),
+        .duration = atomic_load(&b->last_position_duration),
+        .clock = atomic_load(&b->last_position_clock_id),
+        .valid_mask = atomic_load(&b->valid_mask),
+        .queue_head = atomic_load(&b->head),
+        .queue_tail = atomic_load(&b->tail),
+        .expected_position = atomic_load(&b->accepted_next_position),
+        .position = atomic_load(&b->last_position_tick),
+        .xrun = atomic_load(&b->last_position_xrun),
+        .sequence = atomic_load(&b->observed_sequence),
+    };
+    fprintf(stderr,
+            "AEC_FRAME_STATE session=%llu failed=%d reason=%u callback=%u expected_pos=%llu position=%llu duration=%u clock=%u xrun=%llu seq=%llu valid=%u queue_head=%u queue_tail=%u\n",
+            (unsigned long long)b->session, failed, state.reason, state.callback,
+            (unsigned long long)state.expected_position,
+            (unsigned long long)state.position, state.duration, state.clock,
+            (unsigned long long)state.xrun, (unsigned long long)state.sequence,
+            state.valid_mask, state.queue_head, state.queue_tail);
+    if (failed) {
+        struct stat time_namespace;
+        if (stat("/proc/self/ns/time", &time_namespace) == 0
+                && b->first_failure_before_ns > 0
+                && b->first_failure_after_ns >= b->first_failure_before_ns) {
+            fprintf(stderr,
+                    "AEC_FIRST_FAILURE session=%llu clock=CLOCK_MONOTONIC time_ns=%llu before_ns=%llu after_ns=%llu\n",
+                    (unsigned long long)b->session,
+                    (unsigned long long)time_namespace.st_ino,
+                    (unsigned long long)b->first_failure_before_ns,
+                    (unsigned long long)b->first_failure_after_ns);
+        }
+    }
+}
+
 static void cleanup(struct backend *b) {
+    atomic_store(&b->stopping, true);
     atomic_store(&b->writer_stop, true);
     if (b->writer_started) pthread_join(b->writer, NULL);
     uint32_t quarantined = atomic_load(&b->prevalid_quarantine_count);
@@ -990,6 +1127,8 @@ static void cleanup(struct backend *b) {
     if (b->plugin_library != NULL) dlclose(b->plugin_library);
     if (b->ipc_fd >= 0) close(b->ipc_fd);
     pw_deinit();
+    report_frame_state(b);
+    aec_history_report(&b->history, b->session, "backend");
 }
 
 static bool parse_fd(const char *text, int *fd) {
@@ -1104,6 +1243,8 @@ int translator_aec_backend_run(int argc, const char **argv) {
 out:
     if (pw_fd >= 0) close(pw_fd);
     cleanup(b);
+    if (result != 2)
+        result = atomic_load(&b->failure) == FAIL_NONE ? 0 : 1;
     free(b);
     return result;
 }

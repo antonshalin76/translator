@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include "callback_history.h"
 
 #define RATE 48000u
 #define QUANTUM 480u
@@ -31,6 +32,11 @@ enum witness_failure {
     WITNESS_GAP = 3, WITNESS_PCM = 4, WITNESS_QUEUE = 5,
     WITNESS_IO = 6, WITNESS_GRAPH = 7
 };
+struct frame_state {
+    uint32_t reason, callback, duration, clock, valid_mask, queue_head, queue_tail;
+    uint64_t expected_position, position, xrun, sequence;
+};
+
 struct witness_frame {
     uint64_t seq;
     uint32_t clock_id;
@@ -38,6 +44,7 @@ struct witness_frame {
     float samples[QUANTUM];
 };
 struct witness {
+    uint64_t session;
     struct pw_main_loop *loop;
     struct pw_context *context;
     struct pw_core *core;
@@ -55,9 +62,21 @@ struct witness {
     uint64_t previous_seq;
     _Atomic bool have_frame;
     _Atomic bool started;
+    _Atomic bool stopping;
     _Atomic bool ack_sent;
     _Atomic bool stop_writer;
     _Atomic uint32_t failure;
+    _Atomic uint32_t callback_count;
+    _Atomic uint32_t last_duration;
+    _Atomic uint32_t last_clock;
+    _Atomic uint64_t last_position;
+    _Atomic uint64_t last_xrun;
+    _Atomic uint64_t observed_sequence;
+    _Atomic uint64_t accepted_next_position;
+    _Atomic uint32_t valid_mask;
+    _Atomic bool snapshot_ready;
+    struct frame_state snapshot;
+    struct aec_callback_history history;
     _Atomic uint32_t head;
     _Atomic uint32_t tail;
     struct witness_frame queue[QUEUE_SLOTS];
@@ -73,7 +92,23 @@ static void put64(uint8_t *dst, uint64_t value) {
 }
 static void fail(struct witness *w, enum witness_failure reason) {
     uint32_t none = WITNESS_OK;
-    atomic_compare_exchange_strong(&w->failure, &none, (uint32_t)reason);
+    if (atomic_compare_exchange_strong(&w->failure, &none, (uint32_t)reason)) {
+        aec_history_fail(&w->history);
+        w->snapshot = (struct frame_state) {
+            .reason = (uint32_t)reason,
+            .callback = atomic_load(&w->callback_count),
+            .duration = atomic_load(&w->last_duration),
+            .clock = atomic_load(&w->last_clock),
+            .valid_mask = atomic_load(&w->valid_mask),
+            .queue_head = atomic_load(&w->head),
+            .queue_tail = atomic_load(&w->tail),
+            .expected_position = atomic_load(&w->accepted_next_position),
+            .position = atomic_load(&w->last_position),
+            .xrun = atomic_load(&w->last_xrun),
+            .sequence = atomic_load(&w->observed_sequence),
+        };
+        atomic_store_explicit(&w->snapshot_ready, true, memory_order_release);
+    }
 }
 static bool write_all_bounded(int fd, const uint8_t *bytes, size_t length) {
     struct timespec start, now;
@@ -113,7 +148,7 @@ static void *writer_main(void *userdata) {
             put32(record + 21, QUANTUM);
             memcpy(record + 25, frame->samples, QUANTUM * sizeof(float));
             if (!write_all_bounded(w->output_fd, record, sizeof(record))) {
-                fail(w, WITNESS_IO);
+                if (!atomic_load(&w->stopping)) fail(w, WITNESS_IO);
                 break;
             }
             atomic_store_explicit(&w->tail, tail + 1, memory_order_release);
@@ -152,11 +187,34 @@ static bool checked_input(struct pw_buffer *pw_buffer, const float **samples,
 }
 static void on_process(void *userdata, struct spa_io_position *position) {
     struct witness *w = userdata;
+    uint32_t callbacks = atomic_fetch_add(&w->callback_count, 1);
+    struct aec_callback_event trace;
+    bool trace_active = aec_history_begin(&w->history, &trace, (uint64_t)callbacks + 1, position);
+    if (trace_active) {
+        trace.expected_position = w->next_position;
+        trace.admission_position = UINT64_MAX;
+        trace.expected_seq = w->previous_seq + 1;
+        trace.head = atomic_load(&w->head);
+        trace.tail = atomic_load(&w->tail);
+        trace.stage = 1;
+    }
+    atomic_store(&w->observed_sequence, 0);
+    atomic_store(&w->valid_mask, 0);
+    if (position != NULL) {
+        atomic_store(&w->last_duration, (uint32_t)position->clock.duration);
+        atomic_store(&w->last_clock, position->clock.id);
+        atomic_store(&w->last_position, position->clock.position);
+        atomic_store(&w->last_xrun, position->clock.xrun);
+    }
     struct pw_buffer *buffer = pw_filter_dequeue_buffer(w->clean_port);
     const float *samples = NULL;
     uint64_t seq = 0;
     bool input_valid = checked_input(buffer, &samples, &seq);
-    if (atomic_load(&w->failure) != WITNESS_OK) goto done;
+    atomic_store(&w->observed_sequence, seq);
+    atomic_store(&w->valid_mask, input_valid ? 4u : 0u);
+    if (trace_active) { trace.output_seq = seq; trace.valid_mask = input_valid ? 4u : 0u; trace.stage = 2; }
+    if (atomic_load(&w->stopping) ||
+        atomic_load(&w->failure) != WITNESS_OK) goto done;
     if (position == NULL || position->clock.duration != QUANTUM ||
         position->clock.rate.num == 0 ||
         position->clock.rate.denom != RATE * position->clock.rate.num ||
@@ -170,10 +228,12 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         goto done;
     }
     const struct spa_io_clock *clock = &position->clock;
+    if (trace_active) aec_history_admission(&trace, clock);
     if (atomic_load(&w->have_frame) &&
         (seq != w->previous_seq + 1 || clock->id != w->clock_id ||
          clock->rate.num != w->rate_num || clock->rate.denom != w->rate_denom ||
-         clock->position != w->next_position || clock->xrun != w->previous_xrun)) {
+         aec_history_used_position(clock->position, &trace, trace_active) != w->next_position ||
+         clock->xrun != w->previous_xrun)) {
         fail(w, WITNESS_GAP);
         goto done;
     }
@@ -187,26 +247,42 @@ static void on_process(void *userdata, struct spa_io_position *position) {
     frame->seq = seq;
     frame->clock_id = clock->id;
     frame->position = clock->position;
+    if (trace_active) { aec_history_publication(&trace, clock); trace.publication_position = frame->position; }
     memcpy(frame->samples, samples, sizeof(frame->samples));
     w->clock_id = clock->id;
     w->rate_num = clock->rate.num;
     w->rate_denom = clock->rate.denom;
-    w->next_position = clock->position + QUANTUM;
+    uint64_t next_source_position = clock->position;
+    w->next_position = next_source_position + QUANTUM;
+    if (trace_active) {
+        trace.next_source_position = next_source_position;
+        if (trace.admission_position == UINT64_MAX) trace.admission_position = next_source_position;
+        trace.next_position = w->next_position; trace.stage = 4; }
+    atomic_store(&w->accepted_next_position, w->next_position);
     w->previous_xrun = clock->xrun;
     w->previous_seq = seq;
     atomic_store(&w->have_frame, true);
     atomic_store_explicit(&w->head, head + 1, memory_order_release);
 done:
-    if (buffer != NULL && pw_filter_queue_buffer(w->clean_port, buffer) < 0)
+    if (buffer != NULL && pw_filter_queue_buffer(w->clean_port, buffer) < 0 &&
+        !atomic_load(&w->stopping))
         fail(w, WITNESS_BUFFER);
+    if (trace_active) {
+        trace.reason = atomic_load(&w->failure);
+        trace.head = atomic_load(&w->head);
+        trace.tail = atomic_load(&w->tail);
+        if (trace.reason) trace.stage = 5;
+    }
+    aec_history_end(&w->history, &trace, trace_active);
 }
 static void on_state(void *userdata, enum pw_filter_state old_state,
                      enum pw_filter_state state, const char *error) {
     struct witness *w = userdata;
     (void)error;
-    if (state == PW_FILTER_STATE_ERROR ||
-        (old_state == PW_FILTER_STATE_STREAMING &&
-         state != PW_FILTER_STATE_STREAMING && atomic_load(&w->have_frame)))
+    if (!atomic_load(&w->stopping) &&
+        (state == PW_FILTER_STATE_ERROR ||
+         (old_state == PW_FILTER_STATE_STREAMING &&
+          state != PW_FILTER_STATE_STREAMING && atomic_load(&w->have_frame))))
         fail(w, WITNESS_GRAPH);
 }
 static const struct pw_filter_events events = {
@@ -229,6 +305,7 @@ static void on_control(void *userdata, int fd, uint32_t mask) {
             }
         }
     } else if ((n == 1 && command == 'X') || n == 0) {
+        atomic_store(&w->stopping, true);
         pw_main_loop_quit(w->loop);
         return;
     } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -240,8 +317,33 @@ static void on_control(void *userdata, int fd, uint32_t mask) {
 static void on_term(void *userdata, int signum) {
     struct witness *w = userdata;
     (void)signum;
+    atomic_store(&w->stopping, true);
     pw_main_loop_quit(w->loop);
 }
+static void report_frame_state(const struct witness *w) {
+    bool failed = atomic_load_explicit(&w->snapshot_ready, memory_order_acquire);
+    if (atomic_load(&w->failure) != WITNESS_OK && !failed) return;
+    struct frame_state state = failed ? w->snapshot : (struct frame_state) {
+        .callback = atomic_load(&w->callback_count),
+        .duration = atomic_load(&w->last_duration),
+        .clock = atomic_load(&w->last_clock),
+        .valid_mask = atomic_load(&w->valid_mask),
+        .queue_head = atomic_load(&w->head),
+        .queue_tail = atomic_load(&w->tail),
+        .expected_position = atomic_load(&w->accepted_next_position),
+        .position = atomic_load(&w->last_position),
+        .xrun = atomic_load(&w->last_xrun),
+        .sequence = atomic_load(&w->observed_sequence),
+    };
+    fprintf(stderr,
+            "AEC_FRAME_STATE session=%llu failed=%d reason=%u callback=%u expected_pos=%llu position=%llu duration=%u clock=%u xrun=%llu seq=%llu valid=%u queue_head=%u queue_tail=%u\n",
+            (unsigned long long)w->session, failed, state.reason, state.callback,
+            (unsigned long long)state.expected_position,
+            (unsigned long long)state.position, state.duration, state.clock,
+            (unsigned long long)state.xrun, (unsigned long long)state.sequence,
+            state.valid_mask, state.queue_head, state.queue_tail);
+}
+
 static bool parse_fd(const char *text, int *fd) {
     char *end = NULL;
     errno = 0;
@@ -278,9 +380,11 @@ int translator_aec_witness_run(int argc, const char **argv) {
     }
     struct witness *w = calloc(1, sizeof(*w));
     if (w == NULL) return 2;
+    w->session = (uint64_t)strtoull(argv[6], NULL, 16);
     w->output_fd = output_fd;
     pw_init(NULL, NULL);
     int result = 2;
+    bool ran_loop = false;
     w->loop = pw_main_loop_new(NULL);
     if (w->loop == NULL) goto out;
     struct pw_loop *loop = pw_main_loop_get_loop(w->loop);
@@ -328,11 +432,10 @@ int translator_aec_witness_run(int argc, const char **argv) {
                           NULL, 0) < 0) goto out;
     const uint8_t ready = 'R';
     if (send(output_fd, &ready, 1, MSG_DONTWAIT | MSG_NOSIGNAL) != 1) goto out;
+    ran_loop = true;
     pw_main_loop_run(w->loop);
-    result = atomic_load(&w->failure) == WITNESS_OK ? 0 : 1;
 out:
-    atomic_store(&w->stop_writer, true);
-    if (w->writer_started) pthread_join(w->writer, NULL);
+    atomic_store(&w->stopping, true);
     if (pw_fd >= 0) close(pw_fd);
     if (w->loop != NULL) {
         struct pw_loop *loop = pw_main_loop_get_loop(w->loop);
@@ -340,11 +443,18 @@ out:
         if (w->term_source != NULL) pw_loop_destroy_source(loop, w->term_source);
     }
     if (w->filter != NULL) pw_filter_destroy(w->filter);
+    atomic_store(&w->stop_writer, true);
+    if (w->writer_started) pthread_join(w->writer, NULL);
     if (w->core != NULL) pw_core_disconnect(w->core);
     if (w->context != NULL) pw_context_destroy(w->context);
     if (w->loop != NULL) pw_main_loop_destroy(w->loop);
     if (w->output_fd >= 0) close(w->output_fd);
     pw_deinit();
+    if (ran_loop) {
+        report_frame_state(w);
+        aec_history_report(&w->history, w->session, "witness");
+        result = atomic_load(&w->failure) == WITNESS_OK ? 0 : 1;
+    }
     free(w);
     return result;
 }

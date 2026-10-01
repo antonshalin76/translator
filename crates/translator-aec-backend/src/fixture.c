@@ -19,11 +19,18 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "callback_history.h"
 
 #define RATE 48000u
 #define QUANTUM 480u
 
+struct frame_state {
+    uint32_t reason, callback, duration, clock, valid_mask;
+    uint64_t expected_position, position, xrun, sequence;
+};
+
 struct fixture {
+    uint64_t session;
     struct pw_main_loop *loop;
     struct pw_context *context;
     struct pw_core *core;
@@ -63,6 +70,7 @@ struct fixture {
     size_t far_index;
     size_t near_index;
     _Atomic bool activated;
+    _Atomic bool stopping;
     _Atomic bool failed;
     _Atomic uint32_t first_failure;
     _Atomic uint64_t failure_expected_position;
@@ -81,6 +89,12 @@ struct fixture {
     _Atomic uint64_t first_position_tick;
     _Atomic uint64_t last_position_tick;
     _Atomic uint64_t last_position_xrun;
+    _Atomic uint64_t observed_sequence;
+    _Atomic uint64_t accepted_next_position;
+    _Atomic uint32_t valid_mask;
+    _Atomic bool snapshot_ready;
+    struct frame_state snapshot;
+    struct aec_callback_history history;
 };
 
 enum fixture_failure {
@@ -91,6 +105,21 @@ enum fixture_failure {
 static bool fixture_fail(struct fixture *f, enum fixture_failure reason) {
     uint32_t none = 0;
     bool first = atomic_compare_exchange_strong(&f->first_failure, &none, (uint32_t)reason);
+    if (first) {
+        aec_history_fail(&f->history);
+        f->snapshot = (struct frame_state) {
+            .reason = (uint32_t)reason,
+            .callback = atomic_load(&f->callback_count),
+            .duration = atomic_load(&f->last_position_duration),
+            .clock = atomic_load(&f->last_position_clock_id),
+            .valid_mask = atomic_load(&f->valid_mask),
+            .expected_position = atomic_load(&f->accepted_next_position),
+            .position = atomic_load(&f->last_position_tick),
+            .xrun = atomic_load(&f->last_position_xrun),
+            .sequence = atomic_load(&f->observed_sequence),
+        };
+        atomic_store_explicit(&f->snapshot_ready, true, memory_order_release);
+    }
     atomic_store(&f->failed, true);
     return first;
 }
@@ -142,6 +171,11 @@ static void mark_valid(struct pw_buffer *pw_buffer, uint64_t seq) {
 static void on_process(void *userdata, struct spa_io_position *position) {
     struct fixture *f = userdata;
     uint32_t callbacks = atomic_fetch_add(&f->callback_count, 1);
+    struct aec_callback_event trace;
+    bool trace_active = aec_history_begin(&f->history, &trace, (uint64_t)callbacks + 1, position);
+    if (trace_active) { trace.expected_position = f->next_position; trace.admission_position = UINT64_MAX; trace.stage = 1; }
+    atomic_store(&f->observed_sequence, 0);
+    atomic_store(&f->valid_mask, 0);
     if (position != NULL) {
         if (callbacks == 0) atomic_store(&f->first_position_tick, position->clock.position);
         atomic_store(&f->last_position_state, (uint32_t)position->state);
@@ -152,6 +186,8 @@ static void on_process(void *userdata, struct spa_io_position *position) {
     }
     if (position == NULL) {
         fixture_fail(f, FIXTURE_POSITION_NULL);
+        if (trace_active) { trace.reason = FIXTURE_POSITION_NULL; trace.stage = 5; }
+        aec_history_end(&f->history, &trace, trace_active);
         return;
     }
     struct pw_buffer *raw_buffer = pw_filter_dequeue_buffer(f->raw_port);
@@ -159,7 +195,14 @@ static void on_process(void *userdata, struct spa_io_position *position) {
     uint32_t raw_reason, reference_reason;
     float *raw = prepare_output(raw_buffer, &raw_reason);
     float *reference = prepare_output(ref_buffer, &reference_reason);
+    atomic_store(&f->valid_mask, (raw != NULL ? 1u : 0u) |
+                 (reference != NULL ? 2u : 0u));
     const struct spa_io_clock *clock = &position->clock;
+    if (trace_active) {
+        trace.valid_mask = atomic_load(&f->valid_mask);
+        aec_history_admission(&trace, clock);
+        trace.stage = 2;
+    }
     bool clock_valid = clock->duration == QUANTUM &&
         clock->rate.num != 0 && clock->rate.denom == RATE * clock->rate.num &&
         clock->id != SPA_ID_INVALID;
@@ -167,7 +210,7 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         clock_valid = clock->id == f->first_clock_id &&
             clock->rate.num == f->first_rate_num &&
             clock->rate.denom == f->first_rate_denom &&
-            clock->position == f->next_position &&
+            aec_history_used_position(clock->position, &trace, trace_active) == f->next_position &&
             clock->xrun == f->previous_xrun;
     if (atomic_load(&f->failed) || !atomic_load(&f->activated) || !clock_valid) {
         bool first = false;
@@ -189,6 +232,8 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         if (reference != NULL) memset(reference, 0, QUANTUM * sizeof(float));
         if (raw_buffer != NULL) (void)pw_filter_queue_buffer(f->raw_port, raw_buffer);
         if (ref_buffer != NULL) (void)pw_filter_queue_buffer(f->reference_port, ref_buffer);
+        if (trace_active) { trace.reason = atomic_load(&f->first_failure); trace.stage = 5; }
+        aec_history_end(&f->history, &trace, trace_active);
         return;
     }
     if (!f->have_clock) {
@@ -197,7 +242,16 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         f->first_rate_denom = clock->rate.denom;
         f->have_clock = true;
     }
-    f->next_position = clock->position + QUANTUM;
+    uint64_t next_source_position = clock->position;
+    if (trace_active) {
+        aec_history_publication(&trace, clock);
+        trace.publication_position = next_source_position;
+        trace.next_source_position = next_source_position;
+        if (trace.admission_position == UINT64_MAX) trace.admission_position = next_source_position;
+    }
+    f->next_position = next_source_position + QUANTUM;
+    if (trace_active) { trace.next_position = f->next_position; trace.stage = 3; }
+    atomic_store(&f->accepted_next_position, f->next_position);
     f->previous_xrun = clock->xrun;
     if (raw == NULL || reference == NULL) {
         if (fixture_fail(f, FIXTURE_BUFFER)) {
@@ -246,10 +300,13 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         if (!f->near_only && !f->speech_near)
             memcpy(f->echo_history, f->far_current, sizeof(f->echo_history));
         if (!f->meta_gap) {
+            uint64_t seq_position = f->default_header ? 0 : clock->position;
             uint64_t seq = f->default_header ? 0 :
-                f->producer_seq_base + clock->position / QUANTUM;
+                f->producer_seq_base + seq_position / QUANTUM;
             mark_valid(raw_buffer, seq);
             mark_valid(ref_buffer, seq + (f->seq_skew ? 1u : 0u));
+            atomic_store(&f->observed_sequence, seq);
+            if (trace_active) { trace.seq_position = seq_position; trace.raw_seq = seq; trace.reference_seq = seq + (f->seq_skew ? 1u : 0u); trace.expected_seq = f->producer_seq_base + clock->position / QUANTUM; }
         }
         atomic_store(&f->have_valid_frame, true);
     }
@@ -257,12 +314,15 @@ static void on_process(void *userdata, struct spa_io_position *position) {
         fixture_fail(f, FIXTURE_RAW_QUEUE);
     if (ref_buffer != NULL && pw_filter_queue_buffer(f->reference_port, ref_buffer) < 0)
         fixture_fail(f, FIXTURE_REFERENCE_QUEUE);
+    if (trace_active) { trace.reason = atomic_load(&f->first_failure); trace.stage = trace.reason ? 5 : 4; }
+    aec_history_end(&f->history, &trace, trace_active);
 }
 static void on_state(void *userdata, enum pw_filter_state old_state,
                      enum pw_filter_state state, const char *error) {
     struct fixture *f = userdata;
     (void)old_state; (void)error;
-    if (state == PW_FILTER_STATE_ERROR) fixture_fail(f, FIXTURE_FILTER_STATE);
+    if (state == PW_FILTER_STATE_ERROR && !atomic_load(&f->stopping))
+        fixture_fail(f, FIXTURE_FILTER_STATE);
 }
 static const struct pw_filter_events events = {
     .version = PW_VERSION_FILTER_EVENTS,
@@ -292,6 +352,28 @@ static void report_fixture(const struct fixture *f) {
             atomic_load(&f->failure_raw_buffer_reason),
             atomic_load(&f->failure_reference_buffer_reason));
 }
+static void report_frame_state(const struct fixture *f) {
+    bool failed = atomic_load_explicit(&f->snapshot_ready, memory_order_acquire);
+    if (atomic_load(&f->failed) && !failed) return;
+    struct frame_state state = failed ? f->snapshot : (struct frame_state) {
+        .callback = atomic_load(&f->callback_count),
+        .duration = atomic_load(&f->last_position_duration),
+        .clock = atomic_load(&f->last_position_clock_id),
+        .valid_mask = atomic_load(&f->valid_mask),
+        .expected_position = atomic_load(&f->accepted_next_position),
+        .position = atomic_load(&f->last_position_tick),
+        .xrun = atomic_load(&f->last_position_xrun),
+        .sequence = atomic_load(&f->observed_sequence),
+    };
+    fprintf(stderr,
+            "AEC_FRAME_STATE session=%llu failed=%d reason=%u callback=%u expected_pos=%llu position=%llu duration=%u clock=%u xrun=%llu seq=%llu valid=%u queue_head=0 queue_tail=0\n",
+            (unsigned long long)f->session, failed, state.reason, state.callback,
+            (unsigned long long)state.expected_position,
+            (unsigned long long)state.position, state.duration, state.clock,
+            (unsigned long long)state.xrun, (unsigned long long)state.sequence,
+            state.valid_mask);
+}
+
 static void on_control(void *userdata, int fd, uint32_t mask) {
     struct fixture *f = userdata;
     (void)mask;
@@ -304,20 +386,20 @@ static void on_control(void *userdata, int fd, uint32_t mask) {
             if (send(fd, &active, 1, MSG_DONTWAIT | MSG_NOSIGNAL) == 1) return;
         }
     } else if ((n == 1 && command == 'X') || n == 0) {
-        report_fixture(f);
+        atomic_store(&f->stopping, true);
         pw_main_loop_quit(f->loop);
         return;
     } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         return;
     }
     fixture_fail(f, FIXTURE_CONTROL);
-    report_fixture(f);
+    atomic_store(&f->stopping, true);
     pw_main_loop_quit(f->loop);
 }
 static void on_term(void *userdata, int signum) {
     struct fixture *f = userdata;
     (void)signum;
-    report_fixture(f);
+    atomic_store(&f->stopping, true);
     pw_main_loop_quit(f->loop);
 }
 static bool parse_fd(const char *text, int *fd) {
@@ -426,6 +508,7 @@ int translator_aec_fixture_run(int argc, const char **argv) {
     f->default_header = argc == 9 && strcmp(argv[8], "default-header") == 0;
     f->prevalid_once = argc == 9 && strcmp(argv[8], "prevalid-once") == 0;
     uint64_t session = (uint64_t)strtoull(argv[6], NULL, 16);
+    f->session = session;
     f->producer_seq_base = (session & UINT64_C(0x3fffffffffffffff)) |
         UINT64_C(0x4000000000000000);
     f->speech_far = speech_mode && strcmp(argv[8], "speech-far") == 0;
@@ -436,6 +519,7 @@ int translator_aec_fixture_run(int argc, const char **argv) {
     f->wrong_noise_state = 0x6a09e667u;
     pw_init(NULL, NULL);
     int result = 2;
+    bool ran_loop = false;
     if (speech_mode &&
         (!load_sealed_pcm(far_fd, &f->far_pcm, &f->far_samples) ||
          !load_sealed_pcm(near_fd, &f->near_pcm, &f->near_samples))) goto out;
@@ -488,9 +572,10 @@ int translator_aec_fixture_run(int argc, const char **argv) {
                           NULL, 0) < 0) goto out;
     const uint8_t ready = 'R';
     if (send(control_fd, &ready, 1, MSG_DONTWAIT | MSG_NOSIGNAL) != 1) goto out;
+    ran_loop = true;
     pw_main_loop_run(f->loop);
-    result = f->failed ? 1 : 0;
 out:
+    atomic_store(&f->stopping, true);
     if (fd >= 0) close(fd);
     if (far_fd >= 0) close(far_fd);
     if (near_fd >= 0) close(near_fd);
@@ -505,6 +590,12 @@ out:
     if (f->context != NULL) pw_context_destroy(f->context);
     if (f->loop != NULL) pw_main_loop_destroy(f->loop);
     pw_deinit();
+    if (ran_loop) {
+        report_fixture(f);
+        report_frame_state(f);
+        aec_history_report(&f->history, f->session, "fixture");
+        result = atomic_load(&f->first_failure) == 0 ? 0 : 1;
+    }
     free(f->far_pcm);
     free(f->near_pcm);
     free(f);

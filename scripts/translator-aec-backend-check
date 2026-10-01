@@ -180,6 +180,277 @@ def on_stop(_signum, _frame):
 signal.signal(signal.SIGTERM, on_stop)
 signal.signal(signal.SIGINT, on_stop)
 
+PAUSE_SUPERVISOR = r"""
+import json, os, select, signal, sys, time
+from pathlib import Path
+
+pidfd, pid, start, target_ms, time_ns = map(int, sys.argv[1:6])
+mode, session = sys.argv[6:8]
+stopped = False
+continued = False
+stop_before = stop_after = stop_seen = None
+cont_before = cont_after = resume_seen = None
+stop_signals = continue_signals = 0
+
+def tick():
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+def state():
+    stat = Path("/proc/{}/stat".format(pid)).read_text(encoding="ascii")
+    if int(stat.rsplit(")", 1)[1].split()[19]) != start:
+        raise RuntimeError("pidfd target identity changed")
+    if os.stat("/proc/{}/ns/time".format(pid)).st_ino != time_ns:
+        raise RuntimeError("pidfd target time namespace changed")
+    for line in Path("/proc/{}/status".format(pid)).read_text(encoding="ascii").splitlines():
+        if line.startswith("State:"):
+            return line.split()[1]
+    raise RuntimeError("pidfd target state unavailable")
+
+def interrupted(_signum, _frame):
+    raise RuntimeError("pause supervisor interrupted")
+
+signal.signal(signal.SIGTERM, interrupted)
+try:
+    if os.stat("/proc/self/ns/time").st_ino != time_ns:
+        raise RuntimeError("supervisor time namespace mismatch")
+    if state() in ("T", "t", "Z", "X"):
+        raise RuntimeError("backend not running before pause")
+    os.write(1, b"R")
+    if not select.select([0], [], [], 12)[0] or os.read(0, 1) != b"G":
+        raise RuntimeError("pause supervisor not granted")
+    if mode == "impact":
+        stop_before = tick()
+        signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
+        stop_after = tick()
+        stopped = True
+        stop_signals = 1
+        deadline = time.monotonic() + 0.5
+        while state() not in ("T", "t"):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("backend STOP not observed")
+            time.sleep(0.001)
+        stop_seen = tick()
+        os.write(1, b"S")
+        time.sleep(target_ms / 1000)
+    elif mode == "control":
+        os.write(1, b"C")
+        time.sleep(target_ms / 1000)
+    else:
+        raise RuntimeError("invalid pause control mode")
+finally:
+    if stopped:
+        cont_before = tick()
+        signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+        cont_after = tick()
+        continued = True
+        continue_signals += 1
+        deadline = time.monotonic() + 0.5
+        while state() in ("T", "t"):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("backend CONT not observed")
+            time.sleep(0.001)
+        if state() not in ("Z", "X"):
+            resume_seen = tick()
+if mode == "impact" and (
+    stop_seen is None or resume_seen is None or not continued
+):
+    raise RuntimeError("pause observation incomplete")
+print(json.dumps({
+    "session": session, "control_mode": mode,
+    "time_namespace": time_ns,
+    "stop_send_before_ns": stop_before,
+    "stop_send_after_ns": stop_after,
+    "stop_observed_ns": stop_seen,
+    "continue_send_before_ns": cont_before,
+    "continue_send_after_ns": cont_after,
+    "resume_observed_ns": resume_seen,
+    "actual_ms": round((resume_seen - stop_seen) / 1_000_000, 3)
+                 if mode == "impact" else None,
+    "stop_observed": stop_seen is not None,
+    "resume_observed": resume_seen is not None,
+    "stop_signals": stop_signals,
+    "continue_signals": continue_signals,
+    "backend_resumed": state() not in ("T", "t", "Z", "X"),
+}, sort_keys=True), flush=True)
+"""
+
+def pause_target_identity(pidfd, pid):
+    info = Path("/proc/self/fdinfo/{}".format(pidfd)).read_text(encoding="ascii")
+    observed = re.search(r"^Pid:\s*([0-9]+)$", info, re.MULTILINE)
+    ensure(observed is not None and int(observed.group(1)) == pid,
+           "pause pidfd identity mismatch")
+    stat = Path("/proc/{}/stat".format(pid)).read_text(encoding="ascii")
+    return int(stat.rsplit(")", 1)[1].split()[19])
+
+class PreparedPauseControl:
+    def __init__(self, pidfd, pid, session, requested_ms, mode):
+        ensure(re.fullmatch(r"[0-9a-f]{16}", session) is not None
+               and int(session, 16) != 0 and requested_ms == 30
+               and mode in ("impact", "control"),
+               "pause session, duration, or mode invalid")
+        start = pause_target_identity(pidfd, pid)
+        time_ns = os.stat("/proc/self/ns/time").st_ino
+        ensure(time_ns == os.stat("/proc/{}/ns/time".format(pid)).st_ino,
+               "pause time namespace mismatch")
+        self.pidfd = pidfd
+        self.pid = pid
+        self.session = session
+        self.requested_ms = requested_ms
+        self.mode = mode
+        self.time_namespace = time_ns
+        self.triggered = False
+        self.finish_attempted = False
+        self.complete = False
+        self.supervisor = subprocess.Popen(
+            ["/usr/bin/python3", "-I", "-c", PAUSE_SUPERVISOR,
+             str(pidfd), str(pid), str(start), str(requested_ms),
+             str(time_ns), mode, session],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            pass_fds=(pidfd,), close_fds=True,
+        )
+        self.supervisor_pidfd = None
+        try:
+            self.supervisor_pidfd = os.pidfd_open(self.supervisor.pid)
+            ensure(self._marker() == b"R", "pause supervisor READY absent")
+            os.set_blocking(self.supervisor.stdin.fileno(), False)
+        except BaseException:
+            self.close()
+            raise
+
+    def _marker(self):
+        ensure(select.select([self.supervisor.stdout], [], [], 1)[0],
+               "pause supervisor made no progress")
+        value = os.read(self.supervisor.stdout.fileno(), 1)
+        ensure(value, "pause supervisor exited before proof")
+        return value
+
+    def trigger(self, after_witness_frames):
+        ensure(after_witness_frames == 100,
+               "pause requires 100 witness-confirmed frames")
+        ensure(not self.triggered, "pause trigger duplicate")
+        ensure(os.write(self.supervisor.stdin.fileno(), b"G") == 1,
+               "pause trigger incomplete")
+        self.triggered = True
+
+    def finish(self, test_kill_supervisor_after_stop=False, on_stopped=None):
+        ensure(self.triggered and not self.finish_attempted, "pause finish unavailable")
+        self.finish_attempted = True
+        try:
+            expected = b"S" if self.mode == "impact" else b"C"
+            ensure(self._marker() == expected, "pause supervisor marker invalid")
+            if on_stopped is not None:
+                on_stopped()
+            if test_kill_supervisor_after_stop:
+                signal.pidfd_send_signal(self.supervisor_pidfd, signal.SIGKILL)
+                raise RuntimeError("pause supervisor lost after STOP")
+            self.supervisor.stdin.close()
+            self.supervisor.stdin = None
+            output, error = self.supervisor.communicate(timeout=2)
+            ensure(self.supervisor.returncode == 0 and len(output) <= 2048
+                   and not error, "pause supervisor receipt unavailable")
+            payload = json.loads(output)
+            ensure(payload.get("session") == self.session
+                   and payload.get("control_mode") == self.mode
+                   and payload.get("time_namespace") == self.time_namespace
+                   and payload.get("backend_resumed") is True,
+                   "pause supervisor receipt identity invalid")
+            if self.mode == "impact":
+                ticks = [payload.get(key) for key in (
+                    "stop_send_before_ns", "stop_send_after_ns",
+                    "stop_observed_ns", "continue_send_before_ns",
+                    "continue_send_after_ns", "resume_observed_ns",
+                )]
+                ensure(payload.get("stop_observed") is True
+                       and payload.get("resume_observed") is True
+                       and payload.get("stop_signals") == 1
+                       and payload.get("continue_signals") == 1
+                       and all(type(value) is int and value > 0 for value in ticks)
+                       and ticks == sorted(ticks)
+                       and payload.get("actual_ms") >= 20,
+                       "pause supervisor impact proof invalid")
+            else:
+                ensure(payload.get("stop_signals") == 0
+                       and payload.get("continue_signals") == 0
+                       and payload.get("stop_observed") is False
+                       and payload.get("resume_observed") is False,
+                       "pause supervisor control proof invalid")
+            self.complete = True
+            return {
+                "session": self.session, "requested_ms": self.requested_ms,
+                "after_witness_frames": 100, "supervisor_ready": True,
+                "supervisor_reaped": True, **payload,
+            }
+        finally:
+            self.close()
+
+    def close(self):
+        error = None
+        if not self.complete:
+            try:
+                signal.pidfd_send_signal(self.pidfd, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            except OSError as caught:
+                error = caught
+        try:
+            if self.supervisor.poll() is None:
+                try:
+                    if self.supervisor_pidfd is not None:
+                        signal.pidfd_send_signal(self.supervisor_pidfd, signal.SIGTERM)
+                    else:
+                        self.supervisor.terminate()
+                except ProcessLookupError:
+                    pass
+                except OSError as caught:
+                    error = error or caught
+                try:
+                    self.supervisor.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        if self.supervisor_pidfd is not None:
+                            signal.pidfd_send_signal(self.supervisor_pidfd, signal.SIGKILL)
+                        else:
+                            self.supervisor.kill()
+                    except ProcessLookupError:
+                        pass
+                    except OSError as caught:
+                        error = error or caught
+                    try:
+                        self.supervisor.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired as caught:
+                        error = error or caught
+        finally:
+            if self.supervisor_pidfd is not None:
+                try:
+                    os.close(self.supervisor_pidfd)
+                except OSError as caught:
+                    error = error or caught
+                self.supervisor_pidfd = None
+            for stream in (self.supervisor.stdin, self.supervisor.stdout,
+                           self.supervisor.stderr):
+                if stream is not None and not stream.closed:
+                    try:
+                        stream.close()
+                    except OSError as caught:
+                        error = error or caught
+        if error is not None:
+            raise RuntimeError("pause supervisor cleanup unavailable") from error
+
+def prepare_pause_control(pidfd, pid, session, requested_ms, mode):
+    return PreparedPauseControl(pidfd, pid, session, requested_ms, mode)
+
+def pause_owned_backend(
+    pidfd, pid, session, after_witness_frames, requested_ms,
+    test_kill_supervisor_after_stop=False, on_stopped=None,
+):
+    ensure(after_witness_frames == 100, "pause requires 100 witness-confirmed frames")
+    control = prepare_pause_control(pidfd, pid, session, requested_ms, "impact")
+    try:
+        control.trigger(after_witness_frames)
+        return control.finish(test_kill_supervisor_after_stop, on_stopped)
+    finally:
+        control.close()
+
 def ensure(condition, reason):
     if not condition:
         raise RuntimeError(reason)
@@ -335,6 +606,37 @@ def diagnostic_bytes(diagnostic):
         return None
     return os.pread(diagnostic.fileno(), size, 0)
 
+FIRST_FAILURE = re.compile(
+    rb"AEC_FIRST_FAILURE session=([0-9]{1,20}) clock=CLOCK_MONOTONIC "
+    rb"time_ns=([0-9]{1,20}) before_ns=([0-9]{1,20}) after_ns=([0-9]{1,20})"
+)
+
+def native_first_failure(payload, label, session, gap):
+    if label != "backend":
+        return {}
+    records = [line for line in payload.splitlines()
+               if line.startswith(b"AEC_FIRST_FAILURE ")]
+    if len(records) != 1:
+        return {}
+    match = FIRST_FAILURE.fullmatch(records[0])
+    if match is None:
+        return {}
+    observed_session, namespace, before, after = map(int, match.groups())
+    if (observed_session != int(session, 16) or namespace <= 0
+            or before <= 0 or after < before
+            or any(value > (1 << 64) - 1
+                   for value in (observed_session, namespace, before, after))):
+        return {}
+    frame = read_component_state_bytes(payload, label, session)
+    if (frame.get("status") != "OBSERVED" or frame.get("reason") != 3
+            or frame.get("expected_position") != gap[1]
+            or frame.get("position") != gap[2]):
+        return {}
+    return {
+        "clock": "CLOCK_MONOTONIC", "time_namespace": namespace,
+        "failure_before_ns": before, "failure_after_ns": after,
+    }
+
 def read_native_diagnostics(diagnostic, label, session):
     result = {"status": "UNOBSERVED", "session": session, "source": label}
     payload = diagnostic_bytes(diagnostic)
@@ -358,6 +660,7 @@ def read_native_diagnostics(diagnostic, label, session):
                 "expected_xrun": values[5], "observed_xrun": values[6],
                 "expected_sequences": values[7:9],
                 "observed_sequences": values[9:11],
+                **native_first_failure(payload, label, session, values),
             }
         if not line.startswith(b"AEC_BUFFER_PRECONDITION "):
             continue
@@ -409,6 +712,156 @@ def read_fixture_diagnostics(diagnostic, session):
         return {**result, "status": "OBSERVED", **values}
     return result
 
+
+CALLBACK_TRACE_FIELDS = (
+    "index", "callback", "enter", "exit", "cpu", "entry", "admission",
+    "seq_position", "publication", "next_source", "next", "xrun", "admission_xrun", "publication_xrun", "next_source_xrun",
+    "raw", "ref", "output", "expected_seq",
+    "expected_pos", "dsp_begin", "dsp_end", "state", "duration", "clock",
+    "rate_num", "rate_denom", "admission_duration", "admission_clock",
+    "admission_rate_num", "admission_rate_denom", "publication_duration",
+    "publication_clock", "publication_rate_num", "publication_rate_denom",
+    "next_source_duration", "next_source_clock", "next_source_rate_num",
+    "next_source_rate_denom", "stage", "reason", "valid", "head", "tail",
+)
+CALLBACK_HISTORY = re.compile(
+    rb"AEC_CALLBACK_HISTORY session=([0-9]{1,20}) "
+    rb"component=(backend|fixture|witness) clock=CLOCK_MONOTONIC "
+    rb"time_ns=([0-9]{1,20}) total=([0-9]{1,20}) "
+    rb"count=([0-9]{1,2}) frozen=([01])"
+)
+CALLBACK_TRACE = re.compile(
+    rb"AEC_CALLBACK_TRACE session=([0-9]{1,20}) "
+    rb"component=(backend|fixture|witness) " +
+    b" ".join(name.encode("ascii") + rb"=([0-9]{1,20})"
+              for name in CALLBACK_TRACE_FIELDS)
+)
+
+
+def read_callback_history_bytes(payload, label, session):
+    result = {"status": "UNOBSERVED", "session": session, "source": label}
+    if label not in ("backend", "fixture", "witness"):
+        return result
+    if payload is None or len(payload) >= DIAGNOSTIC_LIMIT or not payload.endswith(b"\n"):
+        return result
+    summaries = [line for line in payload.splitlines()
+                 if line.startswith(b"AEC_CALLBACK_HISTORY ")]
+    rows = [line for line in payload.splitlines()
+            if line.startswith(b"AEC_CALLBACK_TRACE ")]
+    if len(summaries) != 1:
+        return result
+    summary = CALLBACK_HISTORY.fullmatch(summaries[0])
+    if summary is None:
+        return result
+    observed_session, component, namespace, total, count, frozen = summary.groups()
+    numbers = [int(observed_session), int(namespace), int(total),
+               int(count), int(frozen)]
+    if (component != label.encode("ascii") or numbers[0] != int(session, 16)
+            or numbers[1] <= 0 or any(value > (1 << 64) - 1 for value in numbers)
+            or numbers[3] != min(numbers[2], 16) or len(rows) != numbers[3]):
+        return result
+    parsed = []
+    for index, line in enumerate(rows):
+        match = CALLBACK_TRACE.fullmatch(line)
+        if match is None:
+            return result
+        row_session, row_component, *values = match.groups()
+        values = [int(value) for value in values]
+        data = dict(zip(CALLBACK_TRACE_FIELDS, values))
+        if (int(row_session) != numbers[0] or row_component != component
+                or any(value > (1 << 64) - 1 for value in values)
+                or data["index"] != index
+                or data["callback"] != numbers[2] - numbers[3] + index + 1
+                or data["enter"] <= 0 or data["exit"] < data["enter"]
+                or data["cpu"] <= 0 or data["cpu"] > data["exit"] - data["enter"]
+                or (label == "backend" and data["stage"] == 4 and
+                    (data["dsp_begin"] == 0 or data["dsp_end"] == 0))
+                or data["stage"] not in (1, 2, 3, 4, 5)
+                or data["valid"] > 7 or data["reason"] > 10
+                or data["duration"] > (1 << 32) - 1
+                or data["clock"] > (1 << 32) - 1
+                or data["rate_num"] > (1 << 32) - 1
+                or data["rate_denom"] > (1 << 32) - 1
+                or data["head"] > (1 << 32) - 1
+                or data["tail"] > (1 << 32) - 1
+                or any(data[field] > (1 << 32) - 1 for field in (
+                    "admission_duration", "admission_clock",
+                    "admission_rate_num", "admission_rate_denom",
+                    "publication_duration", "publication_clock",
+                    "publication_rate_num", "publication_rate_denom",
+                    "next_source_duration", "next_source_clock",
+                    "next_source_rate_num", "next_source_rate_denom"))
+                or ((data["dsp_begin"] == 0) != (data["dsp_end"] == 0))
+                or (data["dsp_begin"] and not
+                    (data["enter"] <= data["dsp_begin"] <= data["dsp_end"]
+                     <= data["exit"]))):
+            return result
+        if data["admission"] == (1 << 64) - 1:
+            values[CALLBACK_TRACE_FIELDS.index("admission")] = None
+        parsed.append(values)
+    return {
+        **result, "status": "OBSERVED", "time_namespace": numbers[1],
+        "total": numbers[2], "frozen": bool(numbers[4]),
+        "fields": CALLBACK_TRACE_FIELDS, "rows": parsed,
+    }
+
+
+def read_callback_history(diagnostic, label, session):
+    return read_callback_history_bytes(diagnostic_bytes(diagnostic), label, session)
+
+
+FRAME_STATE = re.compile(
+    rb"AEC_FRAME_STATE session=([0-9]{1,20}) failed=([01]) "
+    rb"reason=([0-9]{1,10}) callback=([0-9]{1,10}) "
+    rb"expected_pos=([0-9]{1,20}) position=([0-9]{1,20}) "
+    rb"duration=([0-9]{1,10}) clock=([0-9]{1,10}) "
+    rb"xrun=([0-9]{1,20}) seq=([0-9]{1,20}) valid=([0-9]) "
+    rb"queue_head=([0-9]{1,10}) queue_tail=([0-9]{1,10})"
+)
+
+
+def read_component_state_bytes(payload, label, session):
+    result = {"status": "UNOBSERVED", "session": session, "source": label}
+    if label not in ("backend", "fixture", "witness"):
+        return result
+    if payload is None or not payload.endswith(b"\n"):
+        return result
+    records = [
+        line for line in payload.splitlines()
+        if line.startswith(b"AEC_FRAME_STATE ")
+    ]
+    if len(records) != 1:
+        return result
+    matched = FRAME_STATE.fullmatch(records[0])
+    if matched is None:
+        return result
+    values = [int(value) for value in matched.groups()]
+    (
+        observed_session, failed, reason, callback, expected_position,
+        position, duration, clock, xrun, sequence, valid_mask,
+        queue_head, queue_tail,
+    ) = values
+    if (
+        observed_session != int(session, 16)
+        or any(value > (1 << 64) - 1 for value in values)
+        or any(value > (1 << 32) - 1 for value in
+               (reason, callback, duration, clock, valid_mask,
+                queue_head, queue_tail))
+        or (failed == 0) != (reason == 0)
+        or valid_mask > 7
+    ):
+        return result
+    return {
+        "status": "OBSERVED" if failed else "NOT_FAILED",
+        "session": session, "source": label, "reason": reason,
+        "callback": callback, "expected_position": expected_position,
+        "position": position, "duration": duration, "clock": clock,
+        "xrun": xrun, "sequence": sequence, "valid_mask": valid_mask,
+        "queue_head": queue_head, "queue_tail": queue_tail,
+    }
+
+def read_component_state(diagnostic, label, session):
+    return read_component_state_bytes(diagnostic_bytes(diagnostic), label, session)
 
 def diagnose_window_lag(raw, clean):
     ensure(len(raw) == len(clean) == 48000,
@@ -686,8 +1139,16 @@ def main():
     fault_mode = sys.argv[4] if len(sys.argv) > 4 else "none"
     fixture_delay_ms = int(sys.argv[5]) if len(sys.argv) > 5 else 0
     mutant_mode = sys.argv[7] if len(sys.argv) > 7 else "none"
+    pause_ms = int(sys.argv[8]) if len(sys.argv) > 8 else 0
+    pause_mode = sys.argv[9] if len(sys.argv) > 9 else "impact"
+    ensure(pause_mode in ("impact", "control"), "pause mode invalid")
     ensure(mutant_mode in ("none", "passthrough", "zero-clean"),
            "invalid scorer mutant")
+    ensure(pause_ms == 0 or (pause_ms == 30 and mode == "trial"
+           and fixture_mode == "wrong-reference" and target_frames == 4500
+           and fault_mode == "none" and fixture_delay_ms == 0
+           and mutant_mode == "none" and len(sys.argv) > 6 and sys.argv[6] != "-"),
+           "AEC pause control requires exact wrong-reference 4500 trial")
     ensure(mutant_mode == "none" or (mode == "trial" and target_frames == 4500
            and fixture_mode == ("far-only" if mutant_mode == "passthrough" else "near-only")),
            "scorer mutant requires matching full trial")
@@ -720,6 +1181,9 @@ def main():
     env["PIPEWIRE_CONFIG_DIR"] = "/stage"
     server_env = dict(env)
     server = fixture = backend = witness = None
+    backend_pidfd = None
+    pause_control = None
+    pause_receipt = None
     diagnostic_files = {}
     far_fd = near_fd = None
     speech_receipt = None
@@ -836,6 +1300,7 @@ def main():
                 stderr=open_diagnostic(runtime, "backend", diagnostic_files),
                 preexec_fn=limit_child_diagnostic, close_fds=True,
             )
+            backend_pidfd = os.pidfd_open(backend.pid)
         finally:
             backend_pw.close()
             helper_ipc.close()
@@ -874,6 +1339,11 @@ def main():
             control.settimeout(min(4, max(0.01, END_AT - time.monotonic())))
             ensure(control.recv(1) == b"A", "fixture activation acknowledgment absent")
             control.settimeout(None)
+        if pause_ms:
+            ensure(backend_pidfd is not None, "backend pidfd unavailable")
+            pause_control = prepare_pause_control(
+                backend_pidfd, backend.pid, session, pause_ms, pause_mode
+            )
         ipc.sendall(START)
         if fixture_delay_ms:
             time.sleep(fixture_delay_ms / 1000)
@@ -1077,6 +1547,8 @@ def main():
                     window_input_power = 0.0
             previous_raw = raw_samples
             frames += 1
+            if pause_control is not None and frames == 100:
+                pause_control.trigger(frames)
             if fault_mode != "none" and not fault_triggered and frames == 10:
                 fault_triggered = True
                 fault_at_frame = frames
@@ -1111,6 +1583,8 @@ def main():
                 forward(wire)
             if frames >= target_frames:
                 break
+        if pause_control is not None:
+            pause_receipt = pause_control.finish()
         if fault_mode != "none":
             raise RuntimeError("live fault did not invalidate session")
         if mode in ("check", "trial"):
@@ -1204,6 +1678,8 @@ def main():
                 "plugin_mapped": True,
                 "fixture_delay_ms": fixture_delay_ms,
             }
+            if pause_receipt is not None:
+                report["test_pause"] = pause_receipt
         else:
             ensure(frames == target_frames and target_frames % 100 == 0,
                    "AEC stream did not complete its declared whole-window interval")
@@ -1237,6 +1713,18 @@ def main():
                    f"native={native_detail} link_delta={changed_links} "
                    f"node_states={after_states} registry={registry_counts(inventory)}")
     finally:
+        if pause_control is not None:
+            if pause_control.triggered and not pause_control.finish_attempted:
+                try:
+                    pause_receipt = pause_control.finish()
+                except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
+                    detail = "pause supervisor receipt unavailable: {}".format(error)
+                    failure = detail if failure is None else failure + "; " + detail
+            try:
+                pause_control.close()
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                detail = "pause supervisor cleanup unavailable: {}".format(error)
+                failure = detail if failure is None else failure + "; " + detail
         for descriptor in (far_fd, near_fd):
             if descriptor is not None:
                 os.close(descriptor)
@@ -1264,6 +1752,8 @@ def main():
         cleanup_started = time.monotonic()
         cleanup_ok = shutdown_all(backend, fixture, witness, server)
         cleanup_ms = round((time.monotonic() - cleanup_started) * 1000)
+        if backend_pidfd is not None:
+            os.close(backend_pidfd)
         if not cleanup_ok:
             failure = "private graph cleanup uncertain"
     if failure is None and backend is not None and report is not None:
@@ -1300,7 +1790,37 @@ def main():
             failure = "native premeasurement empty-input quarantine not witnessed"
         elif counters is not None:
             report["prevalid"] = counters
+    if pause_receipt is not None:
+        print("AEC_PAUSE_RECEIPT=" + json.dumps(pause_receipt, sort_keys=True),
+              file=sys.stderr)
+    component_states = {
+        label: read_component_state(diagnostic_files.get(label), label, session)
+        for label in ("backend", "fixture", "witness")
+    }
+    callback_histories = {
+        label: read_callback_history(diagnostic_files.get(label), label, session)
+        for label in ("backend", "fixture", "witness")
+    }
+    observed_namespaces = {
+        entry["time_namespace"] for entry in callback_histories.values()
+        if entry["status"] == "OBSERVED"
+    }
+    if len(observed_namespaces) > 1:
+        callback_histories = {
+            label: {"status": "UNOBSERVED", "session": session, "source": label}
+            for label in callback_histories
+        }
+    if report is not None:
+        report["component_states"] = component_states
+        report["callback_histories"] = callback_histories
     if failure is not None:
+        print("AEC_COMPONENT_DIAGNOSTICS=" + json.dumps(
+            component_states, sort_keys=True
+        ), file=sys.stderr)
+        for label, history in callback_histories.items():
+            print("AEC_CALLBACK_DIAGNOSTICS_" + label.upper() + "=" +
+                  json.dumps(history, separators=(",", ":"), sort_keys=True),
+                  file=sys.stderr)
         diagnostic = read_native_diagnostics(
             diagnostic_files.get("backend"), "backend", session
         )
@@ -1435,8 +1955,8 @@ def await_scope(
 
 def acquire_scope(
     pid: int, unit: str, process: subprocess.Popen[bytes],
-    check_cancel: Callable[[], None], on_created: Callable[[], None] = lambda: None,
-    on_request: Callable[[], None] = lambda: None,
+    check_cancel: Callable[[], None], on_created: Callable[..., None] = lambda *_: None,
+    on_request: Callable[..., None] = lambda *_: None,
 ) -> Path:
     """Keep the manager transaction owned until its exact job terminates."""
     try:
@@ -1528,7 +2048,7 @@ def acquire_scope(
         pre_request_timer.cancel()
         if pre_request.is_cancelled():
             raise ScopeRejected("AEC manager pre-request deadline elapsed")
-        on_request()
+        on_request(owner)
         request_started = True
         try:
             job = call(owner, "StartTransientUnit", start_parameters).unpack()[0]
@@ -1555,7 +2075,7 @@ def acquire_scope(
             if connection.is_closed():
                 raise UnsafeInvocation("AEC manager connection closed before job result")
             time.sleep(0.02)
-        on_created()
+        on_created(job, owner)
         return await_scope(pid, unit, process, lambda: None)
     except ScopeRejected:
         raise
@@ -1690,6 +2210,26 @@ def run_scoped(command: list[str], stream: bool, quick: bool) -> int:
     gate_read, gate_write = os.pipe()
     lifecycle_fd = os.environ.get("TRANSLATOR_AEC_LIFECYCLE_FD")
     lifecycle_fd = int(lifecycle_fd) if lifecycle_fd is not None else None
+    stage_fd_value = os.environ.get("TRANSLATOR_AEC_STAGE_LIFECYCLE_FD")
+    stage_fd = int(stage_fd_value) if stage_fd_value is not None else None
+    stage_session = os.environ.get("TRANSLATOR_AEC_EXPECTED_SESSION")
+    if stage_fd is not None and (
+        re.fullmatch(r"[0-9a-f]{16}", stage_session or "") is None
+        or stage_fd == lifecycle_fd
+    ):
+        raise UnsafeInvocation("invalid AEC stage lifecycle identity")
+
+    def stage_event(event: str, **facts: object) -> None:
+        if stage_fd is None:
+            return
+        payload = {
+            "event": event, "unit": unit, "session": stage_session,
+            "pid": os.getpid(), **facts,
+        }
+        message = json.dumps(payload, sort_keys=True).encode("ascii") + b"\n"
+        if os.write(stage_fd, message) != len(message):
+            raise UnsafeInvocation("AEC stage lifecycle marker incomplete")
+
     process = None
     result = None
     failure = None
@@ -1710,13 +2250,15 @@ def run_scoped(command: list[str], stream: bool, quick: bool) -> int:
         if cancel_requested:
             raise ScopeCancelled("AEC scope cancelled")
 
-    def on_created() -> None:
+    def on_created(job: str | None = None, manager_owner: str | None = None) -> None:
         nonlocal manager_created
         manager_created = True
+        stage_event("A", job=job, manager_owner=manager_owner)
         if lifecycle_fd is not None:
             os.write(lifecycle_fd, b"A")
 
-    def on_request() -> None:
+    def on_request(manager_owner: str | None = None) -> None:
+        stage_event("P", manager_owner=manager_owner)
         if lifecycle_fd is not None:
             os.write(lifecycle_fd, b"P")
 
@@ -1767,14 +2309,17 @@ def run_scoped(command: list[str], stream: bool, quick: bool) -> int:
             if gate_write >= 0:
                 os.close(gate_write)
             if process is None:
+                stage_event("N")
                 if lifecycle_fd is not None:
                     os.write(lifecycle_fd, b"N")
             else:
                 cleanup_ok, cleanup_ms = cleanup_scope(process, expected_scope, unit, environment)
                 no_request = not acquisition_started or isinstance(failure, ScopeRejected)
                 cleanup_ok = cleanup_ok and (admitted or manager_created or no_request)
-                if no_request and cleanup_ok and lifecycle_fd is not None:
-                    os.write(lifecycle_fd, b"N")
+                if no_request and cleanup_ok:
+                    stage_event("N")
+                    if lifecycle_fd is not None:
+                        os.write(lifecycle_fd, b"N")
                 if isinstance(failure, ScopeCreationUnknown) and not manager_created:
                     retain_ambiguous_scope(process, expected_scope, unit, environment)
                 elif (manager_created or no_request) and not cleanup_ok:
@@ -2050,10 +2595,32 @@ def reject_inherited_authority() -> None:
             raise UnsafeInvocation("invalid AEC lifecycle descriptor") from error
         if not stat.S_ISFIFO(mode) or access != os.O_WRONLY:
             raise UnsafeInvocation("invalid AEC lifecycle descriptor")
+    stage_value = os.environ.get("TRANSLATOR_AEC_STAGE_LIFECYCLE_FD")
+    stage_fd = None
+    if stage_value is not None:
+        if re.fullmatch(r"[1-9][0-9]*", stage_value) is None or int(stage_value) < 3:
+            raise UnsafeInvocation("invalid AEC stage lifecycle descriptor")
+        stage_fd = int(stage_value)
+        if stage_fd == allowed_fd:
+            raise UnsafeInvocation("duplicate AEC lifecycle descriptor")
+        try:
+            mode = os.fstat(stage_fd).st_mode
+            access = fcntl.fcntl(stage_fd, fcntl.F_GETFL) & os.O_ACCMODE
+        except OSError as error:
+            raise UnsafeInvocation("invalid AEC stage lifecycle descriptor") from error
+        if not stat.S_ISFIFO(mode) or access != os.O_WRONLY:
+            raise UnsafeInvocation("invalid AEC stage lifecycle descriptor")
+        if (
+            re.fullmatch(r"translator-aec-[0-9a-f]{32}",
+                         os.environ.get("TRANSLATOR_AEC_SCOPE_UNIT", "")) is None
+            or re.fullmatch(r"[0-9a-f]{16}",
+                            os.environ.get("TRANSLATOR_AEC_EXPECTED_SESSION", "")) is None
+        ):
+            raise UnsafeInvocation("invalid AEC stage lifecycle identity")
     inherited = []
     for name in os.listdir("/proc/self/fd"):
         fd = int(name)
-        if fd <= 2 or fd == allowed_fd:
+        if fd <= 2 or fd in (allowed_fd, stage_fd):
             continue
         try:
             os.fstat(fd)
@@ -2175,6 +2742,151 @@ def limit_child() -> None:
     resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
 
 
+def classify_failure_order(pause, native, expected_session, cleanup_reaped):
+    if not (cleanup_reaped is True and isinstance(pause, dict)
+            and isinstance(native, dict)
+            and re.fullmatch(r"[0-9a-f]{16}", expected_session)
+            and int(expected_session, 16) != 0
+            and pause.get("session") == native.get("session") == expected_session
+            and pause.get("control_mode") == "impact"
+            and pause.get("supervisor_reaped") is True
+            and pause.get("backend_resumed") is True
+            and pause.get("stop_signals") == 1
+            and pause.get("continue_signals") == 1
+            and native.get("status") == "OBSERVED"
+            and native.get("clock") == "CLOCK_MONOTONIC"):
+        return "UNVERIFIED"
+    namespace = pause.get("time_namespace")
+    if (type(namespace) is not int or namespace <= 0
+            or type(native.get("time_namespace")) is not int
+            or native.get("time_namespace") != namespace):
+        return "UNVERIFIED"
+    keys = (
+        "stop_send_before_ns", "stop_send_after_ns", "stop_observed_ns",
+        "continue_send_before_ns", "continue_send_after_ns", "resume_observed_ns",
+    )
+    ticks = [pause.get(key) for key in keys]
+    before = native.get("failure_before_ns")
+    after = native.get("failure_after_ns")
+    if (any(type(value) is not int or value <= 0 for value in (*ticks, before, after))
+            or ticks != sorted(ticks) or before > after):
+        return "UNVERIFIED"
+    if after < ticks[0]:
+        return "BEFORE_INTERVENTION"
+    if before > ticks[4]:
+        return "AFTER_INTERVENTION"
+    return "OVERLAP"
+
+
+def classify_pause_outcome(
+    returncode: int, stdout: str, stderr: str, expected_session: str,
+) -> dict[str, object]:
+    """Report the test-only impact without inferring unmeasured event order."""
+    result: dict[str, object] = {
+        "classification": "OTHER_FAILURE", "aec_proof": False,
+        "temporal_order": "UNVERIFIED", "diagnostics": {},
+    }
+    if re.fullmatch(r"[0-9a-f]{16}", expected_session) is None:
+        return result
+
+    def marker(name: str) -> dict[str, object] | None:
+        lines = [
+            line.removeprefix(name + "=")
+            for line in stderr.splitlines()
+            if line.startswith(name + "=")
+        ]
+        if len(lines) != 1 or len(lines[0]) > 4096:
+            return None
+        try:
+            payload = json.loads(lines[0])
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    pause = marker("AEC_PAUSE_RECEIPT")
+    if pause is None:
+        return result
+    start = pause.get("stop_observed_ns")
+    end = pause.get("resume_observed_ns")
+    if not (
+        pause.get("session") == expected_session
+        and pause.get("requested_ms") == 30
+        and pause.get("after_witness_frames") == 100
+        and pause.get("supervisor_ready") is True
+        and pause.get("supervisor_reaped") is True
+        and pause.get("backend_resumed") is True
+        and pause.get("stop_observed") is True
+        and pause.get("resume_observed") is True
+        and pause.get("stop_signals") == 1
+        and pause.get("continue_signals") == 1
+        and type(start) is int and type(end) is int and end > start
+        and type(pause.get("actual_ms")) in (int, float)
+        and pause["actual_ms"] >= 20
+        and abs(pause["actual_ms"] - (end - start) / 1_000_000) <= 0.001
+        and "AEC scope NOT_DONE:" not in stderr
+    ):
+        return result
+    result["pause"] = pause
+    if returncode == 0:
+        try:
+            trial = json.loads(stdout)
+        except ValueError:
+            return result
+        if not isinstance(trial, dict):
+            return result
+        states = trial.get("component_states")
+        metric = trial.get("metric")
+        if (
+            trial.get("status") == "NONPHYSICAL_TRIAL_PASS"
+            and trial.get("aec_proof") is False
+            and trial.get("fixture_mode") == "wrong-reference"
+            and trial.get("frames") == 4500
+            and trial.get("cleanup_reaped") is True
+            and trial.get("test_pause") == pause
+            and isinstance(metric, dict)
+            and type(metric.get("median_erle_db")) in (int, float)
+            and metric["median_erle_db"] < 15
+            and isinstance(states, dict)
+            and all(
+                isinstance(states.get(role), dict)
+                and states[role].get("session") == expected_session
+                and states[role].get("status") == "NOT_FAILED"
+                for role in ("backend", "fixture", "witness")
+            )
+        ):
+            result["classification"] = "NO_REPRO"
+        return result
+    result["diagnostics"] = {
+        "components": marker("AEC_COMPONENT_DIAGNOSTICS"),
+        "backend": marker("AEC_NATIVE_DIAGNOSTICS"),
+        "fixture": marker("AEC_FIXTURE_DIAGNOSTICS"),
+    }
+    result["temporal_order"] = classify_failure_order(
+        pause, result["diagnostics"]["backend"], expected_session,
+        len(cleanup_lines := [
+            line for line in stderr.splitlines()
+            if line.startswith("AEC isolated session NOT_DONE:")
+        ]) == 1 and re.search(
+            r"; cleanup_reaped=True cleanup_ms=[0-9]+$", cleanup_lines[0]
+        ) is not None,
+    )
+    return result
+
+
+def validate_pause_request(
+    fixture_mode: str | None, frames: int, fault: str | None,
+    mutant: str | None, delay_ms: int, pause_ms: int,
+) -> None:
+    if pause_ms and not (
+        pause_ms == 30 and fixture_mode == "wrong-reference"
+        and frames == 4500 and fault is None and mutant is None
+        and delay_ms == 0
+    ):
+        raise UnsafeInvocation(
+            "AEC pause control requires exact wrong-reference 4500 trial"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--isolated", action="store_true", required=True)
@@ -2196,6 +2908,9 @@ def main() -> int:
     parser.add_argument("--trial-frames", type=int, default=100, help=argparse.SUPPRESS)
     parser.add_argument("--fixture-delay-ms", type=int, default=0,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--pause-helper-ms", type=int, default=0,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--pause-control", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--scorer-mutant", choices=("passthrough", "zero-clean"),
                         help=argparse.SUPPRESS)
     parser.add_argument(
@@ -2217,6 +2932,19 @@ def main() -> int:
         if expected_session != "-" and (re.fullmatch(r"[0-9a-f]{16}", expected_session) is None
                                         or int(expected_session, 16) == 0):
             raise UnsafeInvocation("invalid owner-provided AEC session")
+        validate_pause_request(args.trial_mode, args.trial_frames, args.fault_mode,
+                               args.scorer_mutant, args.fixture_delay_ms,
+                               args.pause_helper_ms)
+        if args.pause_control and args.pause_helper_ms != 30:
+            raise UnsafeInvocation("AEC pause control requires 30ms helper path")
+        if args.pause_helper_ms and any((args.preflight_only, args.probe is not None,
+                                         args.stream, args.native_backtrace,
+                                         args.lifecycle_only, args.single_check)):
+            raise UnsafeInvocation(
+                "AEC pause control requires exact wrong-reference 4500 trial"
+            )
+        if args.pause_helper_ms and expected_session == "-":
+            raise UnsafeInvocation("AEC pause control requires owner session")
         if args.trial_mode is not None and args.fault_mode is not None:
             raise UnsafeInvocation("trial and fault modes must not be combined")
         if args.scorer_mutant is not None and args.trial_mode is None:
@@ -2261,7 +2989,9 @@ def main() -> int:
                            "trial" if args.trial_mode or args.fault_mode else "check",
                            args.trial_mode or "far-only", str(args.trial_frames),
                            args.fault_mode or "none", str(args.fixture_delay_ms),
-                           expected_session, args.scorer_mutant or "none"]
+                           expected_session, args.scorer_mutant or "none",
+                           str(args.pause_helper_ms),
+                           "control" if args.pause_control else "impact"]
             command = isolated_argv(stage, program)
             return run_scoped(
                 command, stream=args.stream,

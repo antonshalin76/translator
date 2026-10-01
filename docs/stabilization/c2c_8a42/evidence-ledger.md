@@ -293,3 +293,43 @@ handling. No physical microphone/speaker path, 30s/60s calibration proof,
 production attachment, RU/EN paired product quality/latency, native-app soak,
 merge, or release was executed. The earlier WIP table and failures remain
 historical observations; this section does not promote them to product PASS.
+
+## 2026-10-01 product verification checkpoint — not a release gate
+
+C2C iteration 12 accepted the offline callback-history R1/R2 correction on
+staged tree `6270fda297cb6dca0daa2a38469c0d38f20c12c7`. Its review did
+not verify the full deterministic aggregate or authorize a native graph rerun,
+physical proof, production attachment, merge, or release. This checkpoint
+adds no such authorization or evidence.
+
+The product-phase source check found three timing assumptions in tests, not a
+confirmed production failure. The preflight test exhausted 10,000 scheduler
+yields while waiting for a worker; it now uses a bounded wall-clock wait and
+checks the retry attempt ID and failure code. The concurrent shutdown test
+waited one scheduler yield after releasing an OS thread; it now waits for that
+thread's terminal write. The keep-alive HTTP test started its five-second
+clock after reading the preceding response, although Hyper may already have
+started the next header timer; the clock now starts before that response is
+read. Runtime deadlines and admission policy were unchanged. Each original
+failure remains in the local gate logs; a passing rerun does not erase it.
+
+The final Rust inputs passed the workspace test and doc-test gates in the
+sequential `RUST_TEST_THREADS=1` run. Later Python-only lint/format corrections
+did not change those Rust inputs. The corrected Python lint and format checks
+passed; manifest-bound pytest reported **1133 passed / 5 external skips** and
+unittest **335 passed / 22 external skips**. Shellcheck, systemd unit verify,
+schema bindings and the pinned supply-chain scan passed. These are composed
+source checks, not a single green deterministic aggregate on the final tree.
+The publication candidate receipt and manifest check must be read against
+the final staged tree; neither result is release evidence.
+
+The physical AEC product boundary is unchanged. The private runner hides
+`/dev/snd`; its 48-kHz callback trace and virtual acoustic controls are not
+hardware evidence. Production still sets `AecCapability::Unavailable` and
+`aec_calibration: None`, while independent `parec` capture is explicitly
+`MeasurementUnavailable`. A read-only device inventory found the USB
+capture/playback card selected as the system default, so it is not an isolated
+physical test path on this snapshot. No playback, capture, route change, or
+production service change occurred. The independent RU/EN 120-pair holdout,
+paired physical first-audible and quality comparison, real-app matrix,
+30-minute soak, install/rollback, merge and release remain **NOT_DONE**.

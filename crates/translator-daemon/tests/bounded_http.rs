@@ -150,8 +150,8 @@ async fn keep_alive_headers_get_a_fresh_deadline() {
     let server = Server::start().await;
     let mut stream = server.connect().await;
     sleep(Duration::from_secs(1)).await;
-    status(&mut stream).await;
     let start = Instant::now();
+    status(&mut stream).await;
     stream.write_all(b"G").await.unwrap();
     sleep(Duration::from_millis(4700)).await;
     let early = closed(&mut stream, Duration::from_millis(10)).await;

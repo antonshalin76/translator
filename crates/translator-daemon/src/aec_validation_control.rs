@@ -1471,7 +1471,7 @@ mod tests {
             );
             assert!(gate.acquire_production().is_err());
             engine.release_cleanup();
-            wait_until(&controller, |status| {
+            wait_for_preflight_status(&controller, &engine, "first cleanup", attempt_id, |status| {
                 matches!(status, AecCalibrationControlStatus::CleanupUncertain { attempt_id: current } if *current == attempt_id)
             })
             .await;
@@ -1497,14 +1497,21 @@ mod tests {
                 AudioOperationState::Calibration { attempt_id }
             );
             engine.cleanup_confirmed.store(true, Ordering::SeqCst);
-            controller.start().await.unwrap();
-            wait_until(&controller, |status| {
-                matches!(status, AecCalibrationControlStatus::Failed { .. })
+            let AecCalibrationControlStatus::Running {
+                attempt_id: retry_id,
+            } = controller.start().await.unwrap()
+            else {
+                panic!("retry not admitted")
+            };
+            assert_ne!(retry_id, attempt_id);
+            wait_for_preflight_status(&controller, &engine, "retry", retry_id, |status| {
+                matches!(status, AecCalibrationControlStatus::Failed { attempt_id: current, code: "injected_calibration_terminal" } if *current == retry_id)
             })
             .await;
             assert_eq!(engine.inspections.load(Ordering::SeqCst), 2);
             assert_eq!(engine.calibrations.load(Ordering::SeqCst), 1);
             assert!(!engine.graph_owned.load(Ordering::SeqCst));
+            assert_eq!(gate.state(), AudioOperationState::Idle);
             assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
             controller.shutdown().await.unwrap();
         }
@@ -2136,6 +2143,32 @@ mod tests {
         panic!(
             "status did not reach expected state: {:?}",
             controller.status()
+        );
+    }
+
+    async fn wait_for_preflight_status(
+        controller: &AecCalibrationController,
+        engine: &PreflightGraphEngine,
+        phase: &str,
+        attempt_id: Uuid,
+        predicate: impl Fn(&AecCalibrationControlStatus) -> bool,
+    ) {
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if predicate(&controller.status()) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "{phase} attempt {attempt_id} did not reach expected state: {:?}; inspections={}, cleanups={}, calibrations={}",
+            controller.status(),
+            engine.inspections.load(Ordering::SeqCst),
+            engine.cleanups.load(Ordering::SeqCst),
+            engine.calibrations.load(Ordering::SeqCst),
         );
     }
 

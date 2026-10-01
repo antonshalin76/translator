@@ -32,6 +32,7 @@ fn main() {
     println!("cargo:rustc-link-lib=pthread");
     println!("cargo:rustc-link-lib=m");
     println!("cargo:rerun-if-changed=src/native.c");
+    println!("cargo:rerun-if-changed=src/callback_history.h");
     println!("cargo:rerun-if-changed=src/fixture.c");
     println!("cargo:rerun-if-changed=src/witness.c");
     println!("cargo:rerun-if-changed=build.rs");
