@@ -42,6 +42,7 @@ from translator_sidecar.provider_contract import (
     TranslationMode,
     UtteranceOutcome,
     VoiceGender,
+    make_provider_error,
 )
 
 SESSION_ID = uuid4()
@@ -298,6 +299,115 @@ def _evaluate(events):
     )
 
 
+def _drop_events(code: SafeErrorCode = SafeErrorCode.QUEUE_OVERFLOW):
+    return [
+        (
+            ProviderLatency(
+                **EVENT_IDENTITY,
+                event_sequence=1,
+                asr_final_text_ms=120,
+                mt_first_text_ms=140,
+                provider_total_ms=140,
+            ),
+            1_140_000_000,
+        ),
+        (
+            make_provider_error(
+                session_id=SESSION_ID,
+                direction_id=AudioDirection.MICROPHONE,
+                stream_id=STREAM_ID,
+                utterance_id=UTTERANCE_ID,
+                event_sequence=2,
+                code=code,
+                retryable=True,
+            ),
+            1_145_000_000,
+        ),
+        (
+            ProviderUtteranceFinal(
+                **EVENT_IDENTITY,
+                event_sequence=3,
+                outcome=UtteranceOutcome.DROPPED,
+            ),
+            1_150_000_000,
+        ),
+    ]
+
+
+def test_only_bound_ordered_terminal_drop_can_continue() -> None:
+    with pytest.raises(ValueError) as result:
+        _evaluate(_drop_events())
+    assert isinstance(result.value, product_audio_pair.VerifiedProviderDrop)
+    assert result.value.safe_provider_codes == ["queue_overflow"]
+    assert result.value.outcomes == ["dropped"]
+
+
+def test_complete_debug_pair_before_terminal_drop_can_continue() -> None:
+    terminal = [
+        (event.model_copy(update={"event_sequence": event.event_sequence + 2}), at)
+        for event, at in _drop_events()
+    ]
+    with pytest.raises(product_audio_pair.VerifiedProviderDrop):
+        _evaluate(_events()[:2] + terminal)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda rows: (
+            rows[:1]
+            + [(rows[1][0].model_copy(update={"utterance_id": uuid4()}), rows[1][1])]
+            + rows[2:]
+        ),
+        lambda rows: (
+            rows[:2]
+            + [(rows[2][0].model_copy(update={"session_id": uuid4()}), rows[2][1])]
+        ),
+        lambda rows: rows[:2] + [rows[1]] + rows[2:],
+        lambda rows: rows[:1] + list(reversed(rows[1:])),
+        lambda rows: rows[:-1],
+        lambda rows: rows[:1] + [rows[0]] + rows[1:],
+        lambda rows: _drop_events(SafeErrorCode.PROVIDER_UNAVAILABLE),
+        lambda rows: (
+            rows[:1]
+            + [(rows[1][0].model_copy(update={"retryable": False}), rows[1][1])]
+            + rows[2:]
+        ),
+        lambda rows: (
+            rows[:1]
+            + [
+                (rows[1][0].model_copy(update={"event_sequence": 4}), rows[1][1]),
+                (rows[2][0].model_copy(update={"event_sequence": 5}), rows[2][1]),
+            ]
+        ),
+        lambda rows: (
+            rows[:2]
+            + [(rows[2][0].model_copy(update={"event_sequence": 5}), rows[2][1])]
+        ),
+        lambda rows: (
+            [(rows[0][0].model_copy(update={"provider_total_ms": None}), rows[0][1])]
+            + rows[1:]
+        ),
+        lambda rows: (
+            [(event, at) for event, at in _events()[:1]]
+            + [
+                (
+                    event.model_copy(
+                        update={"event_sequence": event.event_sequence + 1}
+                    ),
+                    at,
+                )
+                for event, at in rows
+            ]
+        ),
+    ],
+)
+def test_unbound_or_malformed_drop_cannot_continue(mutation) -> None:
+    with pytest.raises(ValueError) as result:
+        _evaluate(mutation(_drop_events()))
+    assert type(result.value) is ValueError
+
+
 def test_event_result_requires_complete_text_audio_and_final() -> None:
     result = _evaluate(_events())
     assert result["status"] == "completed"
@@ -409,7 +519,9 @@ def test_run_case_binds_published_events_to_submitted_utterance(
             return _health(published["request"], asr_id=asr_id)
 
     async def finish_cleanup(_pending):
-        return SimpleNamespace(delivery_error=None)
+        return SimpleNamespace(
+            session_id=published["request"].session_id, delivery_error=None
+        )
 
     monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
     call = product_audio_pair._run_case(
@@ -428,6 +540,95 @@ def test_run_case_binds_published_events_to_submitted_utterance(
     else:
         with pytest.raises(ValueError, match="identity"):
             asyncio.run(call)
+    assert len(drained) == 1
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("health_fallback", [False, True])
+@pytest.mark.parametrize("receipt_foreign", [False, True])
+def test_verified_drop_requires_stable_health_and_clean_drain(
+    monkeypatch, cleanup_fails, health_fallback, receipt_foreign
+) -> None:
+    published = {}
+    drained = []
+
+    class Reservation:
+        async def open(self):
+            return None, _health(published["request"])
+
+        def drain(self, reason):
+            drained.append(reason)
+            return reason
+
+    class Provider:
+        def reserve_session(self, request, publish):
+            published.update(request=request, publish=publish)
+            return Reservation()
+
+        async def submit_frame(self, frame):
+            published["frame"] = frame
+
+        async def wait_idle(self):
+            request = published["request"]
+            frame = published["frame"]
+            identity = {
+                "session_id": request.session_id,
+                "direction_id": request.direction_id,
+                "stream_id": frame.stream_id,
+                "utterance_id": frame.utterance_id,
+            }
+            await published["publish"](
+                tuple(event.model_copy(update=identity) for event, _ in _drop_events()),
+                lambda: None,
+            )
+
+        async def health(self, session_id):
+            return _health(
+                published["request"],
+                asr_id=(
+                    product_audio_pair.SMALL_ASR_ID
+                    if health_fallback
+                    else product_audio_pair.ASR_ID
+                ),
+            )
+
+    async def finish_cleanup(_pending):
+        if cleanup_fails:
+            raise RuntimeError("synthetic cleanup failure")
+        return SimpleNamespace(
+            session_id=(
+                uuid4() if receipt_foreign else published["request"].session_id
+            ),
+            delivery_error=None,
+        )
+
+    monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
+    with pytest.raises(RuntimeError if health_fallback else ValueError) as failure:
+        asyncio.run(
+            product_audio_pair._run_case(
+                Provider(),
+                {"language": "ru_ru", "pcm": b"\x01\x02" * 1600},
+                TranslationMode.QUALITY_FIRST,
+                VoiceGender.FEMALE,
+                expected_asr_id=product_audio_pair.ASR_ID,
+                expected_mt_id=product_audio_pair.BACKENDS["nllb"],
+            )
+        )
+    if health_fallback:
+        assert not isinstance(failure.value, product_audio_pair.VerifiedProviderDrop)
+        assert (
+            failure.value.post_attempt_effective_models["asr"]["id"]
+            == product_audio_pair.SMALL_ASR_ID
+        )
+    else:
+        assert isinstance(failure.value, product_audio_pair.VerifiedProviderDrop)
+        assert (
+            failure.value.open_effective_models
+            == failure.value.post_attempt_effective_models
+        )
+        assert failure.value.attested_after_drain is not (
+            cleanup_fails or receipt_foreign
+        )
     assert len(drained) == 1
 
 
@@ -469,7 +670,9 @@ def test_run_case_rejects_effective_asr_fallback_after_submission(monkeypatch) -
             return _health(published["request"], asr_id="faster-whisper-small")
 
     async def finish_cleanup(_pending):
-        return SimpleNamespace(delivery_error=None)
+        return SimpleNamespace(
+            session_id=published["request"].session_id, delivery_error=None
+        )
 
     monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
     with pytest.raises(RuntimeError, match="effective model") as failure:
@@ -511,7 +714,9 @@ def test_run_case_records_effective_asr_fallback_at_open(monkeypatch) -> None:
             return _health(published["request"], asr_id="faster-whisper-small")
 
     async def finish_cleanup(_pending):
-        return SimpleNamespace(delivery_error=None)
+        return SimpleNamespace(
+            session_id=published["request"].session_id, delivery_error=None
+        )
 
     monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
     with pytest.raises(RuntimeError, match="effective model") as failure:
@@ -670,7 +875,7 @@ def test_selected_mode_reaches_session_and_every_frame(
             return _health(sessions[-1])
 
     async def finish_cleanup(_pending):
-        return SimpleNamespace(delivery_error=None)
+        return SimpleNamespace(session_id=sessions[-1].session_id, delivery_error=None)
 
     monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
     monkeypatch.setattr(
@@ -992,6 +1197,156 @@ def test_run_journal_binds_mode_to_success_and_failure_paths(
         assert records[-1]["status"] == "failed"
 
 
+@pytest.mark.parametrize("attested_after_drain", [False, True])
+def test_distinct_cases_and_arms_continue_after_one_verified_drop(
+    tmp_path, monkeypatch, attested_after_drain
+) -> None:
+    cases = [
+        {
+            "origin_id": f"{language}-{index}",
+            "condition": "clean",
+            "language": language,
+            "speaker_id": f"speaker-{index}",
+            "wav_sha256": f"{index:064x}",
+            "reference": "reference",
+            "turbo_text": "source",
+            "critical_labels": [],
+        }
+        for language in ("ru_ru", "en_us")
+        for index in range(12)
+    ]
+    monkeypatch.setattr(product_audio_pair, "load_cases", lambda *args: cases)
+    monkeypatch.setattr(product_audio_pair, "_resources", lambda provider: {})
+    monkeypatch.setattr(product_audio_pair, "HY_SERVER", tmp_path / "absent")
+    monkeypatch.setenv("TRANSLATOR_MODEL_CACHE_ROOT", str(tmp_path))
+    seen = []
+    shutdowns = []
+
+    class Provider:
+        async def shutdown(self):
+            shutdowns.append(True)
+
+    monkeypatch.setattr(
+        product_audio_pair, "build_local_provider", lambda **kw: Provider()
+    )
+
+    async def run_case(provider, case, mode, gender, **expected_models):
+        seen.append(
+            (
+                expected_models["expected_asr_id"],
+                expected_models["expected_mt_id"],
+                case["origin_id"],
+            )
+        )
+        if (
+            expected_models["expected_asr_id"] == product_audio_pair.SMALL_ASR_ID
+            and case["origin_id"] == "ru_ru-2"
+        ):
+            with pytest.raises(product_audio_pair.VerifiedProviderDrop) as drop:
+                _evaluate(_drop_events())
+            drop.value.open_effective_models = {"asr": "small"}
+            drop.value.post_attempt_effective_models = {"asr": "small"}
+            drop.value.attested_after_drain = attested_after_drain
+            raise drop.value
+        return {"status": "completed", "asr_text": "source", "mt_text": "target"}
+
+    monkeypatch.setattr(product_audio_pair, "_run_case", run_case)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    arguments = SimpleNamespace(
+        manifest=tmp_path / "manifest",
+        screen=tmp_path / "screen",
+        turbo=tmp_path / "turbo",
+        output=private / "attempts.jsonl",
+        case_id=None,
+        smoke=False,
+        order="small-nllb-hy",
+        mode=TranslationMode.QUALITY_FIRST,
+        voice_gender=VoiceGender.FEMALE,
+    )
+    result = asyncio.run(product_audio_pair.run(arguments))
+    records = [
+        json.loads(line)
+        for line in arguments.output.read_text(encoding="utf-8").splitlines()
+    ]
+    attempts = [record for record in records if record["type"] == "attempt"]
+    expected_attempts = 72 if attested_after_drain else 3
+    assert result == {
+        "status": "failed",
+        "attempts": expected_attempts,
+        "pairs": 24 if attested_after_drain else 3,
+    }
+    assert len(attempts) == len(seen) == len(set(seen)) == expected_attempts
+    assert len([row for row in attempts if row["status"] == "failed"]) == 1
+    assert len([record for record in records if record["type"] == "not_run"]) == (
+        0 if attested_after_drain else 69
+    )
+    assert len(shutdowns) == (3 if attested_after_drain else 1)
+    assert records[-1]["status"] == "failed"
+    assert len(
+        [pair for pair in records[-1]["pairs"] if pair["status"] == "incomplete"]
+    ) == (1 if attested_after_drain else 3)
+
+
+def test_incomplete_pair_still_rejects_cross_arm_input_mismatch() -> None:
+    rows = [
+        {
+            "origin_id": "ru-1",
+            "condition": "clean",
+            "backend": backend,
+            "status": "failed" if backend == "small_nllb_same_code" else "completed",
+            "mode": TranslationMode.QUALITY_FIRST.value,
+            "wav_sha256": "wrong" if backend == "hy" else "same",
+            "language": "ru_ru",
+            "speaker_id": "speaker-1",
+            "reference": "reference",
+            "voice_gender": "female",
+        }
+        for backend in product_audio_pair.ARMS
+    ]
+    with pytest.raises(ValueError, match="input identity"):
+        pair_rows(rows, TranslationMode.QUALITY_FIRST)
+
+
+def test_journal_fsync_failure_never_reports_complete(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    output = private / "attempts.jsonl"
+
+    async def fail_during_journal(arguments):
+        with open_journal(arguments.output) as journal:
+            write_record(journal, {"type": "header"})
+
+    def failed_fsync(fd):
+        raise OSError("private filesystem detail")
+
+    monkeypatch.setattr(product_audio_pair, "run", fail_during_journal)
+    monkeypatch.setattr(product_audio_pair.os, "fsync", failed_fsync)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "translator_product_audio_pair.py",
+            "--manifest",
+            "/tmp/manifest",
+            "--screen",
+            "/tmp/screen",
+            "--turbo",
+            "/tmp/turbo",
+            "--output",
+            str(output),
+        ],
+    )
+    assert product_audio_pair.main() == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "failed",
+        "error_type": "OSError",
+    }
+    assert "terminal" not in output.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     "latency_kind",
     ["one", "none", "duplicate", "foreign_session", "foreign_utterance", "invalid"],
@@ -1060,7 +1415,9 @@ def test_dropped_provider_latency_is_exactly_allowlisted_or_unmeasured(
             return _health(published["request"])
 
     async def finish_cleanup(_pending):
-        return SimpleNamespace(delivery_error=None)
+        return SimpleNamespace(
+            session_id=published["request"].session_id, delivery_error=None
+        )
 
     monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)
     with pytest.raises(ValueError, match="provider returned a safe error") as failure:
@@ -1131,7 +1488,9 @@ def test_wait_idle_failure_checks_post_attempt_model_without_inventing_latency(
             )
 
     async def finish_cleanup(_pending):
-        return SimpleNamespace(delivery_error=None)
+        return SimpleNamespace(
+            session_id=published["request"].session_id, delivery_error=None
+        )
 
     published = {}
     monkeypatch.setattr(product_audio_pair, "finish_cleanup", finish_cleanup)

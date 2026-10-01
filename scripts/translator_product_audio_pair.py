@@ -43,6 +43,7 @@ from translator_sidecar.provider_contract import (
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
     ProviderUtteranceFinal,
+    SafeErrorCode,
     SampleFormat,
     TranslationMode,
     UtteranceOutcome,
@@ -85,6 +86,87 @@ SAFE_EVALUATION_REASONS = frozenset(
         "provider event sequence or terminal order differs",
     }
 )
+
+
+class VerifiedProviderDrop(ValueError):
+    def __init__(self, latency: ProviderLatency) -> None:
+        super().__init__("provider returned a safe error")
+        self.safe_provider_codes = [SafeErrorCode.QUEUE_OVERFLOW.value]
+        self.outcomes = [UtteranceOutcome.DROPPED.value]
+        self.safe_provider_latency = {
+            field: getattr(latency, field)
+            for field in (
+                "asr_final_text_ms",
+                "mt_first_text_ms",
+                "tts_first_audio_ms",
+                "provider_total_ms",
+            )
+        }
+        self.attested_after_drain = False
+
+
+def _verified_terminal_drop(
+    event_times: list[tuple[Any, int]],
+    *,
+    session_id: UUID,
+    direction_id: AudioDirection,
+    stream_id: UUID,
+    utterance_id: UUID,
+) -> ProviderLatency | None:
+    events = [event for event, _ in event_times]
+    if len(events) < 3 or not (
+        isinstance(events[-3], ProviderLatency)
+        and isinstance(events[-2], PrivacySafeProviderError)
+        and isinstance(events[-1], ProviderUtteranceFinal)
+    ):
+        return None
+    latency, error, final = events[-3:]
+    prefix = events[:-3]
+    if (
+        error.code is not SafeErrorCode.QUEUE_OVERFLOW
+        or error.retryable is not True
+        or final.outcome is not UtteranceOutcome.DROPPED
+        or final.final_audio_sequence is not None
+        or error.event_sequence != latency.event_sequence + 1
+        or final.event_sequence != error.event_sequence + 1
+        or latency.provider_total_ms is None
+        or (
+            bool(prefix)
+            and not (
+                len(prefix) == 2
+                and isinstance(prefix[0], ProviderTranscriptDelta)
+                and prefix[0].is_final
+                and isinstance(prefix[1], ProviderTranslationDelta)
+                and prefix[1].is_final
+            )
+        )
+        or any(
+            event.session_id != session_id
+            or event.direction_id is not direction_id
+            or event.stream_id != stream_id
+            or event.utterance_id != utterance_id
+            for event in events
+        )
+        or any(
+            current.event_sequence <= previous.event_sequence
+            for previous, current in pairwise(events)
+        )
+        or any(
+            current_at < previous_at
+            for (_, previous_at), (_, current_at) in pairwise(event_times)
+        )
+        or any(
+            value is not None and (type(value) is not int or value < 0)
+            for value in (
+                latency.asr_final_text_ms,
+                latency.mt_first_text_ms,
+                latency.tts_first_audio_ms,
+                latency.provider_total_ms,
+            )
+        )
+    ):
+        return None
+    return latency
 
 
 def sha256(path: Path) -> str:
@@ -233,6 +315,15 @@ def evaluate_events(
     if any(at < started_ns for _, at in event_times):
         raise ValueError("provider event precedes saved-audio submission")
     if any(isinstance(event, PrivacySafeProviderError) for event, _ in event_times):
+        latency = _verified_terminal_drop(
+            event_times,
+            session_id=session_id,
+            direction_id=direction_id,
+            stream_id=stream_id,
+            utterance_id=utterance_id,
+        )
+        if latency is not None:
+            raise VerifiedProviderDrop(latency)
         raise ValueError("provider returned a safe error")
     utterance_events = [
         event
@@ -364,17 +455,16 @@ def pair_rows(
             and right is not None
             and baseline["status"] == left["status"] == right["status"] == "completed"
         )
-        if complete and (
-            any(
-                baseline.get(field) != candidate.get(field)
-                for candidate in (left, right)
-                for field in (
-                    "wav_sha256",
-                    "language",
-                    "speaker_id",
-                    "reference",
-                    "voice_gender",
-                )
+        anchor = next(iter(arm.values()))
+        if any(
+            anchor.get(field) != candidate.get(field)
+            for candidate in arm.values()
+            for field in (
+                "wav_sha256",
+                "language",
+                "speaker_id",
+                "reference",
+                "voice_gender",
             )
         ):
             raise ValueError("paired diagnostic input identity differs")
@@ -499,6 +589,7 @@ async def _run_case(
     opened = False
     post_health_attempted = False
     open_models: dict[str, dict[str, str]] | None = None
+    after_models: dict[str, dict[str, str]] | None = None
     try:
         _, health = await reservation.open()
         opened = True
@@ -555,40 +646,41 @@ async def _run_case(
             result["effective_models_after"] = after_models
             return result
         except ValueError as observation_error:
-            observation_error.safe_provider_codes = [
-                event.code.value
-                for event, _ in event_times
-                if isinstance(event, PrivacySafeProviderError)
-            ]
-            observation_error.outcomes = [
-                event.outcome.value
-                for event, _ in event_times
-                if isinstance(event, ProviderUtteranceFinal)
-            ]
-            latencies = [
-                event
-                for event, _ in event_times
-                if isinstance(event, ProviderLatency)
-                and event.session_id == request.session_id
-                and event.utterance_id == utterance_id
-            ]
-            safe_latency = None
-            if len(latencies) == 1:
-                candidate = {
-                    field: getattr(latencies[0], field)
-                    for field in (
-                        "asr_final_text_ms",
-                        "mt_first_text_ms",
-                        "tts_first_audio_ms",
-                        "provider_total_ms",
-                    )
-                }
-                if all(
-                    value is None or (type(value) is int and value >= 0)
-                    for value in candidate.values()
-                ):
-                    safe_latency = candidate
-            observation_error.safe_provider_latency = safe_latency
+            if not isinstance(observation_error, VerifiedProviderDrop):
+                observation_error.safe_provider_codes = [
+                    event.code.value
+                    for event, _ in event_times
+                    if isinstance(event, PrivacySafeProviderError)
+                ]
+                observation_error.outcomes = [
+                    event.outcome.value
+                    for event, _ in event_times
+                    if isinstance(event, ProviderUtteranceFinal)
+                ]
+                latencies = [
+                    event
+                    for event, _ in event_times
+                    if isinstance(event, ProviderLatency)
+                    and event.session_id == request.session_id
+                    and event.utterance_id == utterance_id
+                ]
+                safe_latency = None
+                if len(latencies) == 1:
+                    candidate = {
+                        field: getattr(latencies[0], field)
+                        for field in (
+                            "asr_final_text_ms",
+                            "mt_first_text_ms",
+                            "tts_first_audio_ms",
+                            "provider_total_ms",
+                        )
+                    }
+                    if all(
+                        value is None or (type(value) is int and value >= 0)
+                        for value in candidate.values()
+                    ):
+                        safe_latency = candidate
+                observation_error.safe_provider_latency = safe_latency
             raise
     except BaseException as caught:
         error = caught
@@ -596,7 +688,9 @@ async def _run_case(
             caught.open_effective_models = open_models
         elif not post_health_attempted and hasattr(caught, "observed_models"):
             caught.open_effective_models = caught.observed_models
-        if post_health_attempted and hasattr(caught, "observed_models"):
+        if after_models is not None:
+            caught.post_attempt_effective_models = after_models
+        elif post_health_attempted and hasattr(caught, "observed_models"):
             caught.post_attempt_effective_models = caught.observed_models
         if opened and not post_health_attempted:
             try:
@@ -623,8 +717,12 @@ async def _run_case(
             receipt = await finish_cleanup(
                 reservation.drain(CloseRequestReason.USER_STOP)
             )
+            if getattr(receipt, "session_id", None) != request.session_id:
+                raise RuntimeError("product session cleanup identity differs")
             if receipt.delivery_error is not None:
                 raise RuntimeError("product session delivery failed")
+            if isinstance(error, VerifiedProviderDrop) and after_models == open_models:
+                error.attested_after_drain = True
         except BaseException as cleanup_error:
             if error is not None:
                 error.cleanup_error_type = type(cleanup_error).__name__
@@ -677,7 +775,7 @@ async def _run_arm(
     rows: list[dict[str, Any]],
     mode: TranslationMode,
     voice_gender: VoiceGender,
-) -> bool:
+) -> tuple[bool, bool]:
     previous_asr = os.environ.get("TRANSLATOR_ASR_MODEL_ID")
     previous_mt = os.environ.get("TRANSLATOR_MT_MODEL_ID")
     expected_asr_id, expected_mt_id = ARMS[backend]
@@ -685,6 +783,7 @@ async def _run_arm(
     os.environ["TRANSLATOR_MT_MODEL_ID"] = expected_mt_id
     provider = None
     failed = False
+    aborted = False
     next_index = 0
     built_ns = time.monotonic_ns()
     try:
@@ -705,6 +804,7 @@ async def _run_arm(
         )
         for index, case in enumerate(cases):
             next_index = index + 1
+            case_aborted = False
             row = {
                 "type": "attempt",
                 "backend": backend,
@@ -752,10 +852,15 @@ async def _run_arm(
                         error, "safe_provider_latency", None
                     )
                 failed = True
+                case_aborted = not (
+                    isinstance(error, VerifiedProviderDrop)
+                    and error.attested_after_drain
+                )
             row["resources"] = _resources(provider)
             rows.append(row)
             write_record(journal, row)
-            if failed:
+            if case_aborted:
+                aborted = True
                 for remaining in cases[index + 1 :]:
                     write_record(
                         journal,
@@ -770,6 +875,7 @@ async def _run_arm(
                 break
     except Exception as error:  # noqa: BLE001 - retain build and journal failures
         failed = True
+        aborted = True
         write_record(
             journal,
             {
@@ -804,6 +910,7 @@ async def _run_arm(
                 await provider.shutdown()
             except Exception as error:  # noqa: BLE001 - retain cleanup failure
                 failed = True
+                aborted = True
                 write_record(
                     journal,
                     {
@@ -825,7 +932,7 @@ async def _run_arm(
                 else None,
             },
         )
-    return not failed
+    return not aborted, not failed
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -908,7 +1015,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         all_complete = True
         for arm_index, backend in enumerate(order):
-            if not await _run_arm(backend, cases, journal, rows, mode, voice_gender):
+            can_continue, arm_complete = await _run_arm(
+                backend, cases, journal, rows, mode, voice_gender
+            )
+            all_complete &= arm_complete
+            if not can_continue:
                 all_complete = False
                 for remaining_backend in order[arm_index + 1 :]:
                     for case in cases:
