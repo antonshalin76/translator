@@ -4,15 +4,18 @@ import {
   DEFAULT_AUDIO_MIX,
   DebugTextRing,
   aecCalibrationControlState,
+  aecCalibrationPendingCancel,
   buildUiModel,
   cloudOptInChangeIntent,
   currentAudioMixPatchIntent,
   debugToggleIntent,
   directionToggleIntent,
   formatMs,
+  headphoneConfirmationIntent,
   labelLanguage,
   providerPatchIntent,
   roundTripControlState,
+  translationControlState,
   type AudioDirection,
   type AecCalibrationStatus,
   type AudioMixField,
@@ -80,8 +83,18 @@ window.addEventListener("pagehide", () => {
 });
 
 function render(): void {
+  const focused = document.activeElement;
+  const focusedId = focused instanceof HTMLElement && appRoot.contains(focused)
+    ? focused.id
+    : null;
   const model = buildUiModel(state.snapshot);
   appRoot.replaceChildren(appShell(model));
+  if (focusedId) {
+    const replacement = document.getElementById(focusedId);
+    if (replacement && appRoot.contains(replacement) && !replacement.matches(":disabled")) {
+      replacement.focus({ preventScroll: true });
+    }
+  }
 }
 
 function appShell(model: ReturnType<typeof buildUiModel>): HTMLElement {
@@ -137,6 +150,7 @@ function sidebar(model: ReturnType<typeof buildUiModel>): HTMLElement {
 function navItem(text: string, section: UiSection): HTMLElement {
   const active = state.activeSection === section;
   const item = element("a", `nav-item ${active ? "active" : ""}`, text);
+  item.id = `nav-${section}`;
   item.setAttribute("href", `#${section}`);
   if (active) {
     item.setAttribute("aria-current", "page");
@@ -210,6 +224,7 @@ function warning(kind: string, text: string): HTMLElement {
 }
 
 function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
+  const control = translationControlState(state.snapshot);
   const section = element("section", "status-band");
   section.id = "status";
   const text = element("div");
@@ -219,7 +234,7 @@ function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
       "p",
       "",
       [
-        state.snapshot.translation_running ? "Перевод запущен" : "Перевод остановлен",
+        control.summary,
         `Provider: ${state.snapshot.provider_id}`,
         `Provider health: ${providerHealthText()}`,
         `Diagnostics: ${model.diagnostics.checkpoint ?? "idle"}`,
@@ -232,7 +247,7 @@ function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
   );
   pill.append(
     element("span", "status-dot"),
-    textNode(state.snapshot.translation_running ? "Запущен" : "Остановлен"),
+    textNode(control.statusText),
   );
   section.append(text, pill);
   return section;
@@ -240,10 +255,11 @@ function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
 
 function controlsBand(): HTMLElement {
   const section = element("section", "control-band");
+  const control = translationControlState(state.snapshot);
   section.append(
     commandButton(
-      state.snapshot.translation_running ? "Stop" : "Start",
-      state.snapshot.translation_running ? "translator_stop" : "translator_start",
+      control.label,
+      control.command,
       undefined,
       "translation",
     ),
@@ -251,6 +267,24 @@ function controlsBand(): HTMLElement {
     debugControl("debug_text"),
     debugControl("debug_capture"),
   );
+  const devices = state.snapshot.devices;
+  if (devices && ["unknown_unsafe", "user_confirmed_headphones"].includes(devices.acoustic.mode)) {
+    const confirmed = devices.acoustic.mode === "user_confirmed_headphones";
+    const intent = headphoneConfirmationIntent(state.snapshot, !confirmed);
+    const headphones = element("div", "control-item");
+    headphones.append(
+      element("p", "", confirmed
+        ? "Наушники подтверждены вами. Это не проверка AEC; подтверждение сбрасывается после перезапуска или изменения устройств."
+        : `Тип выхода не определён: ${devices.sink.selected?.name ?? "нет устройства"}. Подтверждайте только реально подключённые наушники, не колонки.`),
+      commandButton(
+        confirmed ? "Отозвать подтверждение наушников" : "Подтвердить, что подключены наушники",
+        intent?.command ?? null,
+        intent?.args,
+        "headphones",
+      ),
+    );
+    section.append(headphones);
+  }
   return section;
 }
 
@@ -258,6 +292,7 @@ function providerControl(): HTMLElement {
   const wrap = element("label", "control-item");
   wrap.append(element("span", "", "Provider"));
   const select = selectControl<ProviderId>(
+    "provider",
     state.snapshot.provider_id,
     [
       ["local", "Local"],
@@ -279,6 +314,7 @@ function providerControl(): HTMLElement {
   const optIn = element("label", "inline-check");
   const checkbox = element("input") as HTMLInputElement;
   checkbox.type = "checkbox";
+  checkbox.id = "cloud-opt-in";
   checkbox.checked = state.cloudOptIn;
   checkbox.disabled = state.busy !== null || !state.connected;
   checkbox.addEventListener("change", () => {
@@ -317,6 +353,7 @@ function debugControl(control: DebugControl): HTMLElement {
       : state.snapshot.debug_capture_enabled;
   const button = element("button", `control-button ${enabled ? "active" : ""}`);
   button.type = "button";
+  button.id = control;
   button.disabled = state.busy !== null;
   const controlState = enabled ? "On" : "Off";
   button.textContent = isDebugText
@@ -379,6 +416,7 @@ function audioMixSlider(
 
   const input = element("input") as HTMLInputElement;
   input.type = "range";
+  input.id = `audio-mix-${field}`;
   input.min = "0";
   input.max = "100";
   input.step = "1";
@@ -434,6 +472,7 @@ function directionPanel(directionId: AudioDirection): HTMLElement {
   );
 
   const mode = selectControl<TranslationMode>(
+    `${directionId}-mode`,
     latency?.current_mode ?? "quality_first",
     [
       ["quality_first", "Quality"],
@@ -449,6 +488,7 @@ function directionPanel(directionId: AudioDirection): HTMLElement {
   );
 
   const voice = selectControl<VoiceGender>(
+    `${directionId}-voice`,
     direction.voice_profile.gender,
     [
       ["male", "Мужской"],
@@ -484,6 +524,7 @@ function directionToggle(direction: DirectionState): HTMLElement {
   const label = element("label", `direction-toggle ${enabled ? "enabled" : ""}`);
   const input = element("input") as HTMLInputElement;
   input.type = "checkbox";
+  input.id = `${direction.direction_id}-enabled`;
   input.checked = enabled;
   input.disabled = state.busy !== null || !state.connected;
   input.addEventListener("change", () => {
@@ -498,6 +539,7 @@ function pairButton(direction: DirectionState, source: Language, target: Languag
     direction.source_language === source && direction.target_language === target;
   const button = element("button", `segment ${active ? "active" : ""}`);
   button.type = "button";
+  button.id = `${direction.direction_id}-pair-${source}-${target}`;
   button.textContent = `${source.toUpperCase()} → ${target.toUpperCase()}`;
   button.disabled = state.busy !== null || active;
   button.addEventListener("click", () => {
@@ -638,10 +680,16 @@ function aecCalibrationSection(): HTMLElement {
   const actions = element("div", "inline-controls");
   const start = element("button", "control-button", "Начать калибровку") as HTMLButtonElement;
   start.type = "button";
+  start.id = "aec-calibration-start";
   start.disabled = !state.connected || state.snapshot.translation_running || state.busy !== null || !control.canStart;
   start.addEventListener("click", () => void invokeCalibrationAction("translator_start_aec_calibration"));
-  const cancel = element("button", "control-button", "Отменить калибровку") as HTMLButtonElement;
+  const cancel = element(
+    "button",
+    "control-button",
+    state.calibrationStatus?.state === "succeeded" ? "Освободить AEC" : "Отменить калибровку",
+  ) as HTMLButtonElement;
   cancel.type = "button";
+  cancel.id = "aec-calibration-cancel";
   cancel.disabled = !state.connected || state.busy !== null || control.cancelAttemptId === null;
   cancel.addEventListener("click", () => {
     if (control.cancelAttemptId) {
@@ -682,6 +730,7 @@ function commandButton(
   busyKey: string,
 ): HTMLButtonElement {
   const button = element("button", "control-button") as HTMLButtonElement;
+  button.id = `command-${busyKey}`;
   button.type = "button";
   button.textContent = state.busy === busyKey ? "..." : label;
   button.disabled = state.busy !== null || !state.connected || command === null;
@@ -751,9 +800,7 @@ async function invokeCalibrationAction(
 function applyCalibrationStatus(status: AecCalibrationStatus): void {
   state.calibrationStatus = status;
   state.calibrationError = null;
-  if (status.state !== "running" || status.attempt_id !== state.calibrationCancelRequested) {
-    state.calibrationCancelRequested = null;
-  }
+  state.calibrationCancelRequested = aecCalibrationPendingCancel(status, state.calibrationCancelRequested);
   render();
 }
 
@@ -979,11 +1026,13 @@ function latencyState(directionId: AudioDirection): LatencyPolicyState | undefin
 }
 
 function selectControl<T extends string>(
+  controlId: string,
   value: T,
   options: Array<[T, string]>,
   onChange: (value: T) => void,
 ): HTMLSelectElement {
   const select = element("select") as HTMLSelectElement;
+  select.id = controlId;
   select.disabled = state.busy !== null || !state.connected;
   for (const [optionValue, label] of options) {
     const option = element("option") as HTMLOptionElement;

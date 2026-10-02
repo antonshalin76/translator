@@ -156,7 +156,7 @@ pub(crate) struct DirectionAudioTargets {
     pub playback: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DuplexAudioTargets {
     pub microphone: Option<DirectionAudioTargets>,
     pub speaker: Option<DirectionAudioTargets>,
@@ -173,8 +173,24 @@ impl AdmittedDuplex {
         &self.snapshot
     }
 
+    pub(crate) fn activation_check(
+        &self,
+        facts: Arc<dyn RuntimeFactsSource>,
+    ) -> StartAdmissionCheck {
+        StartAdmissionCheck {
+            snapshot: self.snapshot.clone(),
+            targets: self.targets.clone(),
+            reservation: self.aec_reservation.clone(),
+            facts,
+        }
+    }
+
     pub(crate) fn requires_aec_authority(&self) -> bool {
         self.aec_reservation.is_some()
+    }
+
+    pub(crate) fn aec_reservation(&self) -> Option<&Arc<AecStartReservation>> {
+        self.aec_reservation.as_ref()
     }
 
     pub(crate) fn into_parts(
@@ -185,6 +201,54 @@ impl AdmittedDuplex {
         Option<Arc<AecStartReservation>>,
     ) {
         (self.snapshot, self.targets, self.aec_reservation)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StartAdmissionCheck {
+    snapshot: RuntimeSnapshot,
+    targets: DuplexAudioTargets,
+    reservation: Option<Arc<AecStartReservation>>,
+    facts: Arc<dyn RuntimeFactsSource>,
+}
+
+impl StartAdmissionCheck {
+    pub(crate) fn validate(&self, deadline: Instant) -> Result<(), ControlFailure> {
+        if Instant::now() >= deadline {
+            return Err(FactsError::Expired.translation_failure());
+        }
+        let observed = self
+            .facts
+            .inspect(deadline)
+            .map_err(FactsError::translation_failure)?;
+        if Instant::now() >= deadline {
+            return Err(FactsError::Expired.translation_failure());
+        }
+        let refreshed = admit_translation_with_reservation(
+            self.snapshot.clone(),
+            observed,
+            self.reservation.clone(),
+        )?;
+        let previous = self
+            .snapshot
+            .devices
+            .as_ref()
+            .expect("admitted physical facts");
+        let current = refreshed
+            .snapshot
+            .devices
+            .as_ref()
+            .expect("refreshed physical facts");
+        if refreshed.targets != self.targets
+            || previous.source.selected != current.source.selected
+            || previous.sink.selected != current.sink.selected
+            || previous.source.pinned_name != current.source.pinned_name
+            || previous.sink.pinned_name != current.sink.pinned_name
+            || previous.acoustic != current.acoustic
+        {
+            return Err(conflict("translation_precondition_failed"));
+        }
+        Ok(())
     }
 }
 
@@ -212,6 +276,92 @@ pub(crate) fn enabled_directions(
         return Err(conflict("no_direction_enabled"));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct ObservedFacts(&'static str);
+
+    impl RuntimeFactsSource for ObservedFacts {
+        fn inspect(&self, _deadline: Instant) -> Result<RuntimeFacts, FactsError> {
+            let mut facts = crate::control_application::safe_admission_tests::ready_facts();
+            facts.devices.output_mode = OutputMode::UserConfirmedHeadphones;
+            match self.0 {
+                "source_id" => facts.devices.source.selected.as_mut().unwrap().id += 1,
+                "sink_id" => facts.devices.sink.selected.as_mut().unwrap().id += 1,
+                "source_port" => {
+                    facts.devices.source.selected.as_mut().unwrap().active_port =
+                        Some("other".into())
+                }
+                "sink_port" => {
+                    facts.devices.sink.selected.as_mut().unwrap().active_port = Some("other".into())
+                }
+                "source_missing" => facts.devices.source.selected = None,
+                "sink_missing" => facts.devices.sink.selected = None,
+                "unknown" => facts.devices.output_mode = OutputMode::UnknownUnsafe,
+                "speakers" => facts.devices.output_mode = OutputMode::OpenSpeaker,
+                "graph" => facts.audio_graph.health = GraphHealth::Error,
+                "discovery" => return Err(FactsError::DiscoveryFailed),
+                "expired" => return Err(FactsError::Expired),
+                "late" => std::thread::sleep(Duration::from_millis(5)),
+                "none" => (),
+                _ => panic!("unknown admission fault"),
+            }
+            Ok(facts)
+        }
+    }
+
+    fn check(fault: &'static str) -> StartAdmissionCheck {
+        let initial = ObservedFacts("none").inspect(Instant::now()).unwrap();
+        admit_translation(RuntimeSnapshot::default(), initial)
+            .unwrap()
+            .activation_check(Arc::new(ObservedFacts(fault)))
+    }
+
+    #[test]
+    fn post_bootstrap_check_rejects_changed_physical_identity_and_unsafe_facts() {
+        assert!(
+            check("none")
+                .validate(Instant::now() + Duration::from_secs(4))
+                .is_ok()
+        );
+        for fault in [
+            "source_id",
+            "sink_id",
+            "source_port",
+            "sink_port",
+            "source_missing",
+            "sink_missing",
+            "unknown",
+            "speakers",
+            "graph",
+            "discovery",
+            "expired",
+        ] {
+            assert!(
+                check(fault)
+                    .validate(Instant::now() + Duration::from_secs(4))
+                    .is_err(),
+                "{fault}"
+            );
+        }
+    }
+
+    #[test]
+    fn post_bootstrap_check_rejects_expired_and_late_observation() {
+        for (fault, deadline) in [
+            ("none", Instant::now()),
+            ("late", Instant::now() + Duration::from_millis(1)),
+        ] {
+            assert_eq!(
+                check(fault).validate(deadline).unwrap_err().code,
+                "audio_facts_expired"
+            );
+        }
+    }
 }
 
 fn physical(selection: &DeviceSelectionState) -> Result<&str, AcousticAdmissionError> {
@@ -249,7 +399,7 @@ fn admit_acoustic_with_reservation(
     let (capture, playback) = if enabled.microphone {
         let source = physical(&facts.source)?;
         match facts.output_mode {
-            OutputMode::Headphones => (Some(source), sink),
+            OutputMode::Headphones | OutputMode::UserConfirmedHeadphones => (Some(source), sink),
             OutputMode::UnknownUnsafe => return Err(AcousticAdmissionError::UnknownOutput),
             OutputMode::OpenSpeaker => match &facts.aec_capability {
                 AecCapability::ValidatedFor {
@@ -260,7 +410,11 @@ fn admit_acoustic_with_reservation(
                     && reservation
                         .is_some_and(|reservation| reservation.authorizes_pair(source, sink)) =>
                 {
-                    (Some(AEC_SOURCE), AEC_SINK)
+                    if reservation.is_some_and(AecStartReservation::native_graph) {
+                        (Some(source), sink)
+                    } else {
+                        (Some(AEC_SOURCE), AEC_SINK)
+                    }
                 }
                 AecCapability::ValidationFailed => {
                     return Err(AcousticAdmissionError::AecValidationFailed);

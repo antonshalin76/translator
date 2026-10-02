@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -30,11 +31,19 @@ pub enum DeviceHealth {
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     Headphones,
+    UserConfirmedHeadphones,
     OpenSpeaker,
     UnknownUnsafe,
 }
 
+impl OutputMode {
+    pub fn is_headphones(self) -> bool {
+        matches!(self, Self::Headphones | Self::UserConfirmedHeadphones)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PhysicalDevice {
     pub id: u32,
     pub name: String,
@@ -42,6 +51,26 @@ pub struct PhysicalDevice {
     pub active_port: Option<String>,
     pub active_port_type: Option<String>,
     pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadphoneConfirmation {
+    pub source: PhysicalDevice,
+    pub sink: PhysicalDevice,
+}
+
+impl HeadphoneConfirmation {
+    fn matches(&self, facts: &DeviceFacts) -> bool {
+        facts.source.health == DeviceHealth::Available
+            && facts.sink.health == DeviceHealth::Available
+            && self.source.available
+            && self.sink.available
+            && facts.source.selected.as_ref() == Some(&self.source)
+            && facts.sink.selected.as_ref() == Some(&self.sink)
+            && facts.source.pinned_name.as_deref() == Some(self.source.name.as_str())
+            && facts.sink.pinned_name.as_deref() == Some(self.sink.name.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +312,7 @@ pub struct PulseDeviceWatcher<R = SystemCommandRunner, V = MetadataSinkGraphVali
     pinned_source_name: Option<String>,
     pinned_sink_name: Option<String>,
     sink_validation_required: bool,
+    confirmed_headphones: Mutex<Option<HeadphoneConfirmation>>,
 }
 
 impl<R> PulseDeviceWatcher<R, MetadataSinkGraphValidator>
@@ -307,7 +337,77 @@ where
             pinned_source_name: None,
             pinned_sink_name: None,
             sink_validation_required: true,
+            confirmed_headphones: Mutex::new(None),
         }
+    }
+
+    pub fn confirm_headphones_until(
+        &mut self,
+        confirmation: Option<HeadphoneConfirmation>,
+        deadline: Instant,
+    ) -> Result<DeviceFacts, DeviceWatcherError> {
+        if confirmation.is_none() {
+            self.revoke_headphones();
+        }
+        let mut facts = self.read_facts_until(deadline)?;
+        if let Some(expected) = confirmation {
+            if !expected.matches(&facts)
+                || classify_output_mode(&expected.sink) != OutputMode::UnknownUnsafe
+            {
+                return Err(DeviceWatcherError::new(
+                    DeviceWatcherErrorCode::InvalidPhysicalDevice,
+                ));
+            }
+            check_device_deadline(deadline)?;
+            *self
+                .confirmed_headphones
+                .lock()
+                .map_err(|_| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))? =
+                Some(expected);
+            facts.output_mode = OutputMode::UserConfirmedHeadphones;
+        }
+        Ok(facts)
+    }
+
+    pub fn confirmed_headphone_facts_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<DeviceFacts>, DeviceWatcherError> {
+        if self
+            .confirmed_headphones
+            .lock()
+            .map_err(|_| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        self.read_facts_until(deadline).map(|facts| {
+            (facts.output_mode == OutputMode::UserConfirmedHeadphones).then_some(facts)
+        })
+    }
+
+    fn revoke_headphones(&self) {
+        if let Ok(mut confirmation) = self.confirmed_headphones.lock() {
+            *confirmation = None;
+        }
+    }
+
+    fn apply_headphone_confirmation(
+        &self,
+        facts: &mut DeviceFacts,
+    ) -> Result<(), DeviceWatcherError> {
+        let mut confirmation = self
+            .confirmed_headphones
+            .lock()
+            .map_err(|_| DeviceWatcherError::new(DeviceWatcherErrorCode::DiscoveryFailed))?;
+        if let Some(expected) = confirmation.as_ref() {
+            if facts.output_mode == OutputMode::UnknownUnsafe && expected.matches(facts) {
+                facts.output_mode = OutputMode::UserConfirmedHeadphones;
+            } else {
+                *confirmation = None;
+            }
+        }
+        Ok(())
     }
 
     fn inspect_until(&self, deadline: Instant) -> Result<DeviceSnapshot, DeviceWatcherError> {
@@ -505,15 +605,14 @@ where
             .map(classify_output_mode)
             .unwrap_or(OutputMode::UnknownUnsafe);
         check_device_deadline(deadline)?;
-        Ok((
-            DeviceFacts {
-                source,
-                sink,
-                output_mode,
-                aec_capability: self.aec_capability.clone(),
-            },
-            sink_validation_required,
-        ))
+        let mut facts = DeviceFacts {
+            source,
+            sink,
+            output_mode,
+            aec_capability: self.aec_capability.clone(),
+        };
+        self.apply_headphone_confirmation(&mut facts)?;
+        Ok((facts, sink_validation_required))
     }
 }
 
@@ -523,9 +622,14 @@ where
     V: SinkGraphValidator,
 {
     fn read_facts_until(&self, deadline: Instant) -> Result<DeviceFacts, DeviceWatcherError> {
-        let snapshot = self.inspect_until(deadline)?;
-        self.propose_selection(&snapshot, DeviceOverride::default(), true, deadline)
-            .map(|(facts, _)| facts)
+        let result = self.inspect_until(deadline).and_then(|snapshot| {
+            self.propose_selection(&snapshot, DeviceOverride::default(), true, deadline)
+                .map(|(facts, _)| facts)
+        });
+        if result.is_err() {
+            self.revoke_headphones();
+        }
+        result
     }
 
     fn reconcile_until(
@@ -533,10 +637,12 @@ where
         device_override: DeviceOverride,
         deadline: Instant,
     ) -> Result<DeviceFacts, DeviceWatcherError> {
-        let snapshot = self.inspect_until(deadline)?;
-        let (facts, sink_validation_required) =
-            self.propose_selection(&snapshot, device_override, false, deadline)?;
-        check_device_deadline(deadline)?;
+        let result = self.inspect_until(deadline).and_then(|snapshot| {
+            let proposed = self.propose_selection(&snapshot, device_override, false, deadline)?;
+            check_device_deadline(deadline)?;
+            Ok(proposed)
+        });
+        let (facts, sink_validation_required) = result.inspect_err(|_| self.revoke_headphones())?;
         self.pinned_source_name = facts.source.pinned_name.clone();
         self.pinned_sink_name = facts.sink.pinned_name.clone();
         self.sink_validation_required = sink_validation_required;

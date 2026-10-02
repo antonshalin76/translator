@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    Arc, Mutex, MutexGuard,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 use tokio::sync::watch;
 
@@ -15,6 +18,7 @@ pub trait AecProofInspector: Send + Sync {
 pub struct AecRuntimeAuthority {
     coordinator: Arc<AecCalibrationCoordinator>,
     inspector: Arc<dyn AecProofInspector>,
+    controller: Option<crate::AecCalibrationController>,
 }
 
 impl AecRuntimeAuthority {
@@ -25,7 +29,17 @@ impl AecRuntimeAuthority {
         Self {
             coordinator,
             inspector,
+            controller: None,
         }
+    }
+
+    pub fn with_controller(mut self, controller: crate::AecCalibrationController) -> Self {
+        self.controller = Some(controller);
+        self
+    }
+
+    pub(crate) fn controller(&self) -> Option<crate::AecCalibrationController> {
+        self.controller.clone()
     }
 
     pub fn reserve(
@@ -42,6 +56,7 @@ impl AecRuntimeAuthority {
             binding,
             reservation: Mutex::new(Some(reservation)),
             guard: Mutex::new(None),
+            confirmed: AtomicBool::new(false),
         }))
     }
 
@@ -73,9 +88,20 @@ pub struct AecStartReservation {
     binding: AecProofBinding,
     reservation: Mutex<Option<AecAdmissionReservation>>,
     guard: Mutex<Option<AecAdmissionGuard>>,
+    confirmed: AtomicBool,
 }
 
 impl AecStartReservation {
+    pub(crate) fn binding(&self) -> &AecProofBinding {
+        &self.binding
+    }
+
+    pub(crate) fn native_graph(&self) -> bool {
+        matches!(
+            self.binding.graph,
+            translator_audio::AecGraphIdentity::Native { .. }
+        )
+    }
     pub(crate) fn authorizes_pair(&self, source_name: &str, sink_name: &str) -> bool {
         self.binding.source_name == source_name && self.binding.sink_name == sink_name
     }
@@ -106,7 +132,15 @@ impl AecStartReservation {
         })?;
         self.coordinator.validate_guard(guard_ref, &binding, true)?;
         guard.take();
+        self.confirmed.store(true, Ordering::Release);
         Ok(())
+    }
+
+    pub(crate) fn validate_retained_pcm(&self) -> Result<(), AecCoordinatorError> {
+        if !self.confirmed.load(Ordering::Acquire) {
+            return Err(AecCoordinatorError::InvalidReservation);
+        }
+        self.coordinator.validate_current(&self.binding, true)
     }
 
     fn lock_reservation(&self) -> MutexGuard<'_, Option<AecAdmissionReservation>> {
@@ -144,9 +178,11 @@ impl AecStartReservation {
                 sink_muted: false,
                 source_geometry: "test-source-geometry".into(),
                 sink_geometry: "test-sink-geometry".into(),
-                aec_module_id: 1,
-                aec_source_id: 2,
-                aec_sink_id: 3,
+                graph: translator_audio::AecGraphIdentity::PulseModule {
+                    module_id: 1,
+                    source_id: 2,
+                    sink_id: 3,
+                },
                 aec_generation: "test-generation".into(),
                 aec_config_id: "test-aec-config".into(),
                 vad_config_id: "test-vad-config".into(),
@@ -154,6 +190,7 @@ impl AecStartReservation {
             },
             reservation: Mutex::new(None),
             guard: Mutex::new(None),
+            confirmed: AtomicBool::new(false),
         }
     }
 }
@@ -222,9 +259,11 @@ mod tests {
             sink_muted: false,
             source_geometry: "source-geometry".into(),
             sink_geometry: "sink-geometry".into(),
-            aec_module_id: 1,
-            aec_source_id: 2,
-            aec_sink_id: 3,
+            graph: translator_audio::AecGraphIdentity::PulseModule {
+                module_id: 1,
+                source_id: 2,
+                sink_id: 3,
+            },
             aec_generation: "generation".into(),
             aec_config_id: "aec-config".into(),
             vad_config_id: "vad-config".into(),
@@ -267,6 +306,7 @@ mod tests {
                 })
                 .collect(),
             observation: AecObservationEvidence {
+                native_timing: None,
                 observer_generation: "observer".into(),
                 calibration_attempt_id: challenge.attempt_id().to_string(),
                 challenge_id: challenge.challenge_id().to_string(),
@@ -358,6 +398,10 @@ mod tests {
             .confirm_before_pcm(Instant::now() + std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!(
+            reservation.confirm_before_pcm(Instant::now() + std::time::Duration::from_secs(1)),
+            Err(AecCoordinatorError::InvalidReservation)
+        );
+        assert_eq!(
             reservation.consume_before_effects(Instant::now() + std::time::Duration::from_secs(1)),
             Err(AecCoordinatorError::InvalidReservation)
         );
@@ -391,6 +435,10 @@ mod tests {
         assert_eq!(
             reservation.confirm_before_pcm(Instant::now() + std::time::Duration::from_secs(1)),
             Err(AecCoordinatorError::BindingChanged)
+        );
+        assert_eq!(
+            reservation.validate_retained_pcm(),
+            Err(AecCoordinatorError::InvalidReservation)
         );
 
         let (authority, inspector, _) = test_authority();
@@ -448,5 +496,41 @@ mod tests {
             Err(AecCoordinatorError::ProofExpired)
         ));
         assert_eq!(authority.coordinator.status(), AecProofStatus::Unavailable);
+    }
+
+    #[test]
+    fn retained_pcm_requires_completed_one_shot_admission_and_current_proof() {
+        for expire in [false, true] {
+            let (authority, _, clock) = test_authority();
+            let deadline = Instant::now() + std::time::Duration::from_secs(1);
+            let reservation = authority.reserve(deadline).unwrap();
+            assert_eq!(
+                reservation.validate_retained_pcm(),
+                Err(AecCoordinatorError::InvalidReservation)
+            );
+            reservation.consume_before_effects(deadline).unwrap();
+            assert_eq!(
+                reservation.validate_retained_pcm(),
+                Err(AecCoordinatorError::InvalidReservation)
+            );
+            reservation.confirm_before_pcm(deadline).unwrap();
+            assert!(reservation.validate_retained_pcm().is_ok());
+            if expire {
+                clock.0.store(
+                    10_000_000_000 + AEC_OBSERVATION_DURATION_NS + crate::AEC_PROOF_LIFETIME_NS,
+                    Ordering::Release,
+                );
+                assert_eq!(
+                    reservation.validate_retained_pcm(),
+                    Err(AecCoordinatorError::ProofExpired)
+                );
+            } else {
+                authority.coordinator.revoke();
+                assert_eq!(
+                    reservation.validate_retained_pcm(),
+                    Err(AecCoordinatorError::ProofUnavailable)
+                );
+            }
+        }
     }
 }

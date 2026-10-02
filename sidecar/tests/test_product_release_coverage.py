@@ -165,6 +165,90 @@ def test_complete_metadata_is_coverage_only() -> None:
 
 
 @pytest.mark.parametrize(
+    "accent",
+    [
+        None,
+        "",
+        " \t\n\u00a0\u2003",
+        "unknown",
+        " UnKnOwN ",
+        "\u00a0UNKNOWN\u2003",
+        "\uff35\uff4e\uff4b\uff4e\uff4f\uff57\uff4e",
+        "null",
+        " \uff2e\uff35\uff2c\uff2c ",
+        "none",
+        "\tNoNe\n",
+        "unspecified",
+        "\u00a0UNSPECIFIED\u2003",
+        "n/a",
+        " N / A ",
+        "\uff2e\uff0f\uff21",
+    ],
+)
+@pytest.mark.parametrize("scope", ["all", "one"])
+def test_unknown_accent_cannot_supply_release_metadata(accent, scope) -> None:
+    holdout, development, attempts = evidence()
+    assert classify(holdout, development, attempts)["status"] == "COVERAGE_COMPLETE"
+    for case in holdout["cases"] if scope == "all" else holdout["cases"][:1]:
+        case["accent"] = accent
+    report = classify(holdout, development, attempts)
+    assert report["status"] == "NOT_DONE"
+    assert report["holdout"]["status"] == "NOT_DONE"
+    assert "case_metadata" in report["holdout"]["reasons"]
+    if scope == "all":
+        assert report["holdout"]["semantic_cases"] == {"ru": 0, "en": 0}
+
+
+def test_regional_speakers_cannot_cover_a_missing_case_accent() -> None:
+    holdout, development, attempts = evidence()
+    del holdout["cases"][0]["accent"]
+    report = classify(holdout, development, attempts)
+    assert report["status"] == "NOT_DONE"
+    assert "case_metadata" in report["holdout"]["reasons"]
+
+
+@pytest.mark.parametrize(
+    "accent",
+    [
+        "default",
+        "DEFAULT",
+        " DEFAULT ",
+        "\u00a0DeFaUlT\u2003",
+        "\uff24\uff25\uff26\uff21\uff35\uff2c\uff34",
+    ],
+)
+def test_normalized_default_is_not_regional_accent_coverage(accent) -> None:
+    holdout, development, attempts = evidence()
+    assert classify(holdout, development, attempts)["status"] == "COVERAGE_COMPLETE"
+    for case in holdout["cases"]:
+        case["accent"] = accent
+    report = classify(holdout, development, attempts)
+    assert report["status"] == "NOT_DONE"
+    assert "speaker_coverage" in report["holdout"]["reasons"]
+    assert "case_metadata" not in report["holdout"]["reasons"]
+
+
+def test_equivalent_accent_labels_preserve_regional_speaker_coverage() -> None:
+    holdout, development, attempts = evidence()
+    for index, case in enumerate(holdout["cases"]):
+        if case["accent"] == "default":
+            case["accent"] = ["default", " DEFAULT ", "\u00a0DeFaUlT\u2003"][index % 3]
+        else:
+            case["accent"] = ["northwestern", " NORTHWESTERN "][(index // 4) % 2]
+    report = classify(holdout, development, attempts)
+    assert report["status"] == "COVERAGE_COMPLETE"
+    assert report["holdout"]["status"] == "ELIGIBLE"
+
+
+def test_distinct_accent_labels_remain_inconsistent_for_one_speaker() -> None:
+    holdout, development, attempts = evidence()
+    holdout["cases"][0]["accent"] = "northwestern"
+    report = classify(holdout, development, attempts)
+    assert report["status"] == "NOT_DONE"
+    assert "speaker_metadata" in report["holdout"]["reasons"]
+
+
+@pytest.mark.parametrize(
     ("mutate", "reason"),
     [
         (lambda h, d: h["cases"].pop(), "case_count"),

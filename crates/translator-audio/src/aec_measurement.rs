@@ -155,13 +155,15 @@ impl AecSampleEvidence {
     }
 }
 
-// Only a future, separately reviewed synchronized backend may construct this.
-// Matching caller-supplied clock labels is not physical clock provenance.
+// Only the sealed native acquisition can construct production-ready input.
 pub struct AecProofReadyMeasurement {
     input: AecValidationInput,
 }
 
 impl AecProofReadyMeasurement {
+    pub(crate) fn from_native_acquisition(input: AecValidationInput) -> Self {
+        Self { input }
+    }
     pub fn into_validation_input(self) -> AecValidationInput {
         self.input
     }

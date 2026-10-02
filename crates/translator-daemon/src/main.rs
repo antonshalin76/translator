@@ -10,23 +10,27 @@ use clap::Parser;
 use serde::Deserialize;
 use translator_audio::{
     AecCapability, AudioGraph, AudioGraphState, CommandResult, CommandRunner, DeviceOverride,
-    DeviceWatcher, GraphHealth, MIC_OUT_SINK, OutputMode, PulseAudioGraph, PulseDeviceWatcher,
-    PulseRoutingWatcher, REMOTE_IN_SINK, RoutingProfile, RoutingWatcher, SystemCommandRunner,
-    default_journal_path, default_route_journal_path,
+    DeviceWatcher, GraphHealth, MIC_OUT_SINK, NativeAecIdentity, OutputMode, PulseAudioGraph,
+    PulseDeviceWatcher, PulseRoutingWatcher, REMOTE_IN_SINK, RoutingProfile, RoutingWatcher,
+    SystemCommandRunner, default_journal_path, default_route_journal_path,
 };
 use translator_daemon::{
-    ApiControllers, ApiLimits, AudioMixApplication, AudioMixController, AudioOperationGate,
-    AudioOperationState, ControlApplication, ControlCommand, ControlToken, DebugCaptureLimits,
-    DebugCaptureStore, FactsError, ManualRouteController, ProcessDuplexConfig, ProcessDuplexRunner,
-    RoundTripController, RoundTripOwnerShutdownError, RoundTripProcessRunner,
-    RoundTripRuntimeHandle, RuntimeFacts, RuntimeFactsSource, RuntimeLatencyObserver, RuntimeLease,
-    RuntimeMaintenance, RuntimeSnapshot, RuntimeStore, build_router_with_controllers,
-    validate_listen_address,
+    AecCalibrationController, AecCalibrationCoordinator, AecCalibrationEngineError,
+    AecRuntimeAuthority, ApiControllers, ApiLimits, AudioMixApplication, AudioMixController,
+    AudioOperationGate, AudioOperationState, ControlApplication, ControlCommand, ControlFailure,
+    ControlToken, DebugCaptureLimits, DebugCaptureStore, FactsError, ManualRouteController,
+    NativeAecCalibrationEngine, NativeAecEnvironment, NativeAecPairFacts, NativeAecPositiveFixture,
+    ProcessDuplexConfig, ProcessDuplexRunner, RoundTripController, RoundTripOwnerShutdownError,
+    RoundTripProcessRunner, RoundTripRuntimeHandle, RuntimeFacts, RuntimeFactsSource,
+    RuntimeLatencyObserver, RuntimeLease, RuntimeMaintenance, RuntimeSnapshot, RuntimeStore,
+    TranslationMixMode, build_router_with_controllers, validate_listen_address,
 };
 
 const SPEAKER_ORIGINAL_LOOPBACK: &str = "loopback-speaker-original";
 const MICROPHONE_ORIGINAL_LOOPBACK: &str = "loopback-microphone-original";
 const ORIGINAL_LOOPBACK_LATENCY_MS: u16 = 20;
+const NATIVE_SOURCE: &str = "alsa_input.pci-0000_00_1f.3.analog-stereo";
+const NATIVE_SINK: &str = "alsa_output.pci-0000_00_1f.3.analog-stereo";
 
 struct LifecycleProtected<T> {
     stopping: AtomicBool,
@@ -196,7 +200,1130 @@ struct PulseManualRoutes<R = SystemCommandRunner> {
     operation_gate: AudioOperationGate,
 }
 
+struct AecProjectedRoutes<R = SystemCommandRunner> {
+    routes: Arc<PulseManualRoutes<R>>,
+    coordinator: Arc<AecCalibrationCoordinator>,
+    environment: Arc<PulseNativeAecEnvironment<R>>,
+}
+
+impl<R: CommandRunner + Send + Sync> AecProjectedRoutes<R> {
+    fn observed_devices_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<translator_audio::DeviceFacts, FactsError> {
+        if self.routes.resources.is_stopping() {
+            return Err(FactsError::DiscoveryFailed);
+        }
+        let confirmed = self
+            .routes
+            .resources
+            .inner
+            .try_lock()
+            .map_err(|_| FactsError::Busy)?
+            .devices
+            .confirmed_headphone_facts_until(deadline)
+            .map_err(|_| FactsError::InvalidPhysicalDevice)?;
+        match confirmed {
+            Some(devices) => Ok(devices),
+            None => self
+                .environment
+                .inspect_devices(deadline)
+                .map_err(|_| FactsError::InvalidPhysicalDevice),
+        }
+    }
+
+    fn project(&self, store: &RuntimeStore) {
+        match self
+            .observed_devices_until(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        {
+            Ok(mut devices) => {
+                devices.aec_capability = self.capability();
+                store.set_devices(devices.into());
+            }
+            Err(_) => store.clear_devices("aec_pair_unavailable"),
+        }
+    }
+
+    fn capability(&self) -> AecCapability {
+        match self.coordinator.capability() {
+            validated @ AecCapability::ValidatedFor { .. } => validated,
+            AecCapability::ValidationFailed => AecCapability::ValidationFailed,
+            _ => AecCapability::Unavailable,
+        }
+    }
+
+    fn prepare_native(
+        &self,
+        candidate: &RuntimeSnapshot,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        self.routes
+            .resources
+            .with_active(|resources| {
+                resources
+                    .original_loopbacks
+                    .ensure_with_native_speaker(candidate)
+            })
+            .ok_or(native_route_failure())?
+            .map_err(|_| native_route_failure())
+    }
+}
+
+impl<R: CommandRunner + Send + Sync> RuntimeFactsSource for AecProjectedRoutes<R> {
+    fn inspect(&self, deadline: std::time::Instant) -> Result<RuntimeFacts, FactsError> {
+        let mut devices = self.observed_devices_until(deadline)?;
+        devices.aec_capability = self.capability();
+        if self.routes.resources.is_stopping() {
+            return Err(FactsError::DiscoveryFailed);
+        }
+        let resources = self
+            .routes
+            .resources
+            .inner
+            .try_lock()
+            .map_err(|_| FactsError::Busy)?;
+        if self.routes.resources.is_stopping() {
+            return Err(FactsError::DiscoveryFailed);
+        }
+        inspect_runtime_graph_facts(
+            devices,
+            resources
+                .graph
+                .as_ref()
+                .ok_or(FactsError::DiscoveryFailed)?,
+            &resources.routing,
+            deadline,
+        )
+    }
+}
+
+impl<R: CommandRunner + Send + Sync> RuntimeMaintenance for AecProjectedRoutes<R> {
+    fn confirm_headphones(
+        &self,
+        confirmation: Option<translator_audio::HeadphoneConfirmation>,
+        deadline: std::time::Instant,
+        store: &RuntimeStore,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        self.routes
+            .confirm_headphones(confirmation, deadline, store)?;
+        let mut devices = self.observed_devices_until(deadline).map_err(|_| {
+            translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "headphone_confirmation_failed",
+            }
+        })?;
+        devices.aec_capability = self.capability();
+        store.set_devices(devices.into());
+        Ok(())
+    }
+
+    fn refresh(&self, store: &RuntimeStore) -> Result<(), translator_daemon::ControlFailure> {
+        if !matches!(
+            self.routes.operation_gate.state(),
+            AudioOperationState::Idle | AudioOperationState::Production
+        ) {
+            return Err(native_route_failure());
+        }
+        self.routes
+            .resources
+            .with_active(|resources| resources.refresh_facts_only(store))
+            .ok_or(native_route_failure())?;
+        self.project(store);
+        self.prepare_start(&store.snapshot())
+    }
+
+    fn refresh_bypass_facts(
+        &self,
+        store: &RuntimeStore,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if self.routes.operation_gate.state() != AudioOperationState::Production {
+            return Err(native_route_failure());
+        }
+        self.routes
+            .resources
+            .with_active(|resources| resources.refresh_facts_only(store))
+            .ok_or(native_route_failure())?;
+        self.project(store);
+        Ok(())
+    }
+
+    fn verify_bypass_custody(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit_mic_original: bool,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if !native_pair_selected(snapshot) {
+            return self
+                .routes
+                .verify_bypass_custody(snapshot, permit_mic_original);
+        }
+        if self.routes.operation_gate.state() != AudioOperationState::Production {
+            return Err(native_route_failure());
+        }
+        self.routes
+            .resources
+            .with_active(|resources| {
+                resources
+                    .original_loopbacks
+                    .verify_with_native_speaker(snapshot, permit_mic_original)
+            })
+            .ok_or(native_route_failure())?
+            .map_err(|_| native_route_failure())
+    }
+
+    fn prepare_start(
+        &self,
+        candidate: &RuntimeSnapshot,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if native_pair_selected(candidate) {
+            self.prepare_native(candidate)
+        } else {
+            self.routes.prepare_start(candidate)
+        }
+    }
+
+    fn prepare_bypass(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if native_pair_selected(snapshot) {
+            self.prepare_native(snapshot)
+        } else {
+            self.routes.prepare_bypass(snapshot)
+        }
+    }
+}
+
+impl<R: CommandRunner + Send + Sync> ManualRouteController for AecProjectedRoutes<R> {
+    fn reconcile(
+        &self,
+        stream_id: u32,
+    ) -> Result<translator_audio::RoutingState, translator_audio::RoutingSafeError> {
+        self.routes.reconcile(stream_id)
+    }
+
+    fn refresh_audio_state(&self, store: &RuntimeStore) {
+        let _ = RuntimeMaintenance::refresh(self, store);
+    }
+
+    fn restore(&self) -> Result<(), translator_audio::RoutingSafeError> {
+        self.routes.restore()
+    }
+}
+
+struct PulseNativeAecEnvironment<R = SystemCommandRunner> {
+    runner: R,
+    facts_server: String,
+    mix: Arc<dyn AudioMixController>,
+    store: RuntimeStore,
+}
+
+#[derive(Deserialize, PartialEq)]
+struct NativePulseServer {
+    server_name: String,
+    server_cookie: String,
+    #[serde(default)]
+    default_source_name: Option<String>,
+    #[serde(default)]
+    default_sink_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NativePulseEndpoint {
+    index: u32,
+    name: String,
+    #[serde(default)]
+    properties: HashMap<String, String>,
+    #[serde(default)]
+    active_port: Option<String>,
+    #[serde(default)]
+    ports: Vec<NativePulsePort>,
+}
+
+#[derive(Deserialize)]
+struct NativePulsePort {
+    name: String,
+    #[serde(rename = "type")]
+    port_type: String,
+    availability: String,
+}
+
+fn native_environment_error(code: &'static str) -> AecCalibrationEngineError {
+    AecCalibrationEngineError {
+        code,
+        cleanup_confirmed: false,
+    }
+}
+
+fn read_native_pulse_json<T: serde::de::DeserializeOwned>(
+    runner: &impl CommandRunner,
+    server: &str,
+    args: &[&str],
+    deadline: std::time::Instant,
+) -> Result<T, AecCalibrationEngineError> {
+    if std::time::Instant::now() >= deadline {
+        return Err(native_environment_error("aec_pair_inspection_expired"));
+    }
+    if !matches!(
+        args,
+        ["--format=json", "info"] | ["--format=json", "list", "sources" | "sinks"]
+    ) {
+        return Err(native_environment_error("aec_pair_read_only_required"));
+    }
+    let mut command = vec![
+        "LANG=C.UTF-8".to_owned(),
+        "LC_ALL=C.UTF-8".to_owned(),
+        "pactl".to_owned(),
+        format!("--server={server}"),
+    ];
+    command.extend(args.iter().map(|value| (*value).to_owned()));
+    let output = runner
+        .run_until("env", &command, deadline)
+        .map_err(|_| native_environment_error("aec_pair_unavailable"))?;
+    if !output.is_success() || std::time::Instant::now() >= deadline {
+        return Err(native_environment_error("aec_pair_unavailable"));
+    }
+    serde_json::from_slice(output.stdout())
+        .map_err(|_| native_environment_error("aec_pair_provenance_unavailable"))
+}
+
+fn map_native_pulse_pair(
+    server: NativePulseServer,
+    sources: Vec<NativePulseEndpoint>,
+    sinks: Vec<NativePulseEndpoint>,
+) -> Result<(translator_audio::DeviceFacts, NativeAecPairFacts), AecCalibrationEngineError> {
+    let invalid = || native_environment_error("aec_pair_provenance_unavailable");
+    if server.server_name.trim().is_empty()
+        || !server
+            .server_cookie
+            .split_once(':')
+            .is_some_and(|(high, low)| {
+                high.len() == 4
+                    && low.len() == 4
+                    && u16::from_str_radix(high, 16)
+                        .ok()
+                        .zip(u16::from_str_radix(low, 16).ok())
+                        .is_some_and(|(high, low)| high != 0 || low != 0)
+            })
+    {
+        return Err(invalid());
+    }
+    let endpoint = |raw: Vec<NativePulseEndpoint>, name: &str, port: &str, port_type: &str| {
+        if raw.iter().filter(|value| value.name == name).count() != 1 {
+            return Err(invalid());
+        }
+        let matched = raw
+            .iter()
+            .find(|value| value.name == name)
+            .ok_or_else(invalid)?;
+        if raw
+            .iter()
+            .filter(|value| value.index == matched.index)
+            .count()
+            != 1
+        {
+            return Err(invalid());
+        }
+        let property = |name: &str| matched.properties.get(name).map(String::as_str);
+        if property("device.api") != Some("alsa")
+            || property("alsa.card") != Some("0")
+            || property("alsa.id") != Some("PCH")
+            || property("alsa.name") != Some("ALC287 Analog")
+            || property("alsa.card_name") != Some("HDA Intel PCH")
+            || property("alsa.device") != Some("0")
+            || property("api.alsa.pcm.card") != Some("0")
+            || property("api.alsa.pcm.stream")
+                != Some(if port_type == "mic" {
+                    "capture"
+                } else {
+                    "playback"
+                })
+            || property("device.class") != Some("sound")
+            || property("media.class")
+                != Some(if port_type == "mic" {
+                    "Audio/Source"
+                } else {
+                    "Audio/Sink"
+                })
+            || property("device.bus_path") != Some("pci-0000:00:1f.3")
+            || ["node.virtual", "node.network"]
+                .iter()
+                .any(|name| property(name).is_some_and(|value| value.parse::<bool>() != Ok(false)))
+            || matched.name.ends_with(".monitor")
+            || matched.active_port.as_deref() != Some(port)
+            || matched
+                .ports
+                .iter()
+                .filter(|entry| {
+                    entry.name == port
+                        && entry.port_type.eq_ignore_ascii_case(port_type)
+                        && ["available", "availability unknown"]
+                            .iter()
+                            .any(|availability| {
+                                entry.availability.eq_ignore_ascii_case(availability)
+                            })
+                })
+                .count()
+                != 1
+        {
+            return Err(invalid());
+        }
+        raw.into_iter()
+            .find(|value| value.name == name)
+            .ok_or_else(invalid)
+    };
+    let source = endpoint(sources, NATIVE_SOURCE, "analog-input-internal-mic", "mic")?;
+    let sink = endpoint(sinks, NATIVE_SINK, "analog-output-speaker", "speaker")?;
+    let selection =
+        |endpoint: &NativePulseEndpoint, port_type: &str| translator_audio::DeviceSelectionState {
+            health: translator_audio::DeviceHealth::Available,
+            selected: Some(translator_audio::PhysicalDevice {
+                id: endpoint.index,
+                name: endpoint.name.clone(),
+                description: String::new(),
+                active_port: endpoint.active_port.clone(),
+                active_port_type: Some(port_type.to_owned()),
+                available: true,
+            }),
+            pinned_name: Some(endpoint.name.clone()),
+            current_default: None,
+            pending_default: None,
+        };
+    let mut source_selection = selection(&source, "Mic");
+    source_selection.current_default = server.default_source_name;
+    source_selection.pending_default = source_selection
+        .current_default
+        .clone()
+        .filter(|name| name != &source.name);
+    let mut sink_selection = selection(&sink, "Speaker");
+    sink_selection.current_default = server.default_sink_name;
+    sink_selection.pending_default = sink_selection
+        .current_default
+        .clone()
+        .filter(|name| name != &sink.name);
+    let devices = translator_audio::DeviceFacts {
+        source: source_selection,
+        sink: sink_selection,
+        output_mode: OutputMode::OpenSpeaker,
+        aec_capability: AecCapability::Unavailable,
+    };
+    Ok((
+        devices,
+        NativeAecPairFacts {
+            audio_server_id: format!("pulse:{}:{}", server.server_name, server.server_cookie),
+            source_name: source.name,
+            sink_name: sink.name,
+            source_hardware_id: format!(
+                "alsa:{}:{}:capture",
+                source.properties.get("alsa.id").ok_or_else(invalid)?,
+                source.properties.get("alsa.name").ok_or_else(invalid)?
+            ),
+            sink_hardware_id: format!(
+                "alsa:{}:{}:playback",
+                sink.properties.get("alsa.id").ok_or_else(invalid)?,
+                sink.properties.get("alsa.name").ok_or_else(invalid)?
+            ),
+        },
+    ))
+}
+
+fn validate_native_pair_identity(
+    identity: &NativeAecIdentity,
+) -> Result<(), AecCalibrationEngineError> {
+    if identity.card != 0
+        || identity.card_id != "PCH"
+        || identity.pcm_name != "ALC287 Analog"
+        || identity.source_port != "analog-input-internal-mic"
+        || identity.sink_port != "analog-output-speaker"
+        || !identity.graph.is_valid()
+        || !matches!(identity.graph, translator_audio::AecGraphIdentity::Native { ref physical_device_id, .. } if physical_device_id == "alsa-hw:0,0:PCH:ALC287 Analog")
+    {
+        return Err(native_environment_error("aec_pair_provenance_unavailable"));
+    }
+    Ok(())
+}
+
+fn native_pair_selected(snapshot: &RuntimeSnapshot) -> bool {
+    snapshot.devices.as_ref().is_some_and(|devices| {
+        devices.acoustic.mode == OutputMode::OpenSpeaker
+            && devices
+                .source
+                .selected
+                .as_ref()
+                .is_some_and(|source| source.name == NATIVE_SOURCE)
+            && devices
+                .sink
+                .selected
+                .as_ref()
+                .is_some_and(|sink| sink.name == NATIVE_SINK)
+    })
+}
+
+fn native_route_failure() -> translator_daemon::ControlFailure {
+    translator_daemon::ControlFailure {
+        status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        code: "original_loopback_custody_unknown",
+    }
+}
+
+fn native_facts_server(
+    value: Option<&std::ffi::OsStr>,
+) -> Result<String, AecCalibrationEngineError> {
+    let server = value
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| native_environment_error("aec_facts_server_unavailable"))?;
+    let path = server
+        .strip_prefix("unix:")
+        .map(std::path::Path::new)
+        .ok_or_else(|| native_environment_error("aec_facts_server_invalid"))?;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(native_environment_error("aec_facts_server_invalid"));
+    }
+    Ok(server.to_owned())
+}
+
+impl<R: CommandRunner + Send + Sync> NativeAecEnvironment for PulseNativeAecEnvironment<R> {
+    fn inspect_pair(
+        &self,
+        identity: &NativeAecIdentity,
+        deadline: std::time::Instant,
+    ) -> Result<NativeAecPairFacts, AecCalibrationEngineError> {
+        validate_native_pair_identity(identity)?;
+        self.inspect_inventory(deadline).map(|(_, pair)| pair)
+    }
+
+    fn quarantine(&self) -> Result<(), AecCalibrationEngineError> {
+        self.mix
+            .reconcile_committed(TranslationMixMode::Quarantine {
+                mic_original_expected: self.store.snapshot().audio_mix.microphone_original_percent
+                    > 0,
+            })
+            .map_err(|_| native_environment_error("aec_quarantine_unconfirmed"))
+    }
+}
+
+impl<R: CommandRunner> PulseNativeAecEnvironment<R> {
+    fn inspect_devices(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<translator_audio::DeviceFacts, AecCalibrationEngineError> {
+        self.inspect_inventory(deadline).map(|(devices, _)| devices)
+    }
+
+    fn inspect_inventory(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<(translator_audio::DeviceFacts, NativeAecPairFacts), AecCalibrationEngineError>
+    {
+        let before = read_native_pulse_json::<NativePulseServer>(
+            &self.runner,
+            &self.facts_server,
+            &["--format=json", "info"],
+            deadline,
+        )?;
+        let sources = read_native_pulse_json(
+            &self.runner,
+            &self.facts_server,
+            &["--format=json", "list", "sources"],
+            deadline,
+        )?;
+        let sinks = read_native_pulse_json(
+            &self.runner,
+            &self.facts_server,
+            &["--format=json", "list", "sinks"],
+            deadline,
+        )?;
+        let after = read_native_pulse_json::<NativePulseServer>(
+            &self.runner,
+            &self.facts_server,
+            &["--format=json", "info"],
+            deadline,
+        )?;
+        if before != after {
+            return Err(native_environment_error("aec_audio_server_changed"));
+        }
+        let (devices, mut pair) = map_native_pulse_pair(after, sources, sinks)?;
+        pair.audio_server_id = format!("{}:{}", self.facts_server, pair.audio_server_id);
+        Ok((devices, pair))
+    }
+}
+
+fn load_native_positive_fixture(
+    path: Option<&std::path::Path>,
+    sha256: Option<&str>,
+) -> Result<Option<NativeAecPositiveFixture>, AecCalibrationEngineError> {
+    match (path, sha256) {
+        (None, None) => Ok(None),
+        (Some(path), Some(sha256)) => NativeAecPositiveFixture::read(path, sha256).map(Some),
+        _ => Err(native_environment_error(
+            "aec_positive_configuration_incomplete",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod native_aec_composition_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use translator_audio::{AecGraphIdentity, CommandRunError};
+
+    fn endpoint(source: bool) -> Value {
+        json!({
+            "index": if source { 88 } else { 87 },
+            "name": if source { NATIVE_SOURCE } else { NATIVE_SINK },
+            "active_port": if source { "analog-input-internal-mic" } else { "analog-output-speaker" },
+            "ports": [{"name": if source { "analog-input-internal-mic" } else { "analog-output-speaker" }, "type": if source { "Mic" } else { "Speaker" }, "availability": "availability unknown"}],
+            "properties": {"device.api":"alsa", "media.class": if source { "Audio/Source" } else { "Audio/Sink" }, "device.class":"sound", "device.bus_path":"pci-0000:00:1f.3", "alsa.card":"0", "alsa.device":"0", "alsa.id":"PCH", "alsa.name":"ALC287 Analog", "alsa.card_name":"HDA Intel PCH", "api.alsa.pcm.card":"0", "api.alsa.pcm.stream": if source { "capture" } else { "playback" }}
+        })
+    }
+
+    fn map(
+        source: Value,
+        sink: Value,
+        cookie: &str,
+    ) -> Result<(translator_audio::DeviceFacts, NativeAecPairFacts), AecCalibrationEngineError>
+    {
+        map_native_pulse_pair(
+            NativePulseServer {
+                server_name: "PulseAudio (on PipeWire 1.0.5)".into(),
+                server_cookie: cookie.into(),
+                default_source_name: Some("alsa_input.usb-preserved".into()),
+                default_sink_name: Some("alsa_output.usb-preserved".into()),
+            },
+            vec![serde_json::from_value(source).unwrap()],
+            vec![serde_json::from_value(sink).unwrap()],
+        )
+    }
+
+    fn identity() -> NativeAecIdentity {
+        NativeAecIdentity {
+            graph: AecGraphIdentity::Native {
+                session_id: 17,
+                generation: 4,
+                physical_device_id: "alsa-hw:0,0:PCH:ALC287 Analog".into(),
+                dsp_config_id: "installed-spa".into(),
+            },
+            card: 0,
+            card_id: "PCH".into(),
+            pcm_name: "ALC287 Analog".into(),
+            capture_channels: 2,
+            playback_channels: 2,
+            capture_buffer: 3840,
+            playback_buffer: 3840,
+            source_port: "analog-input-internal-mic".into(),
+            sink_port: "analog-output-speaker".into(),
+            control_fingerprint: "test-controls".into(),
+            capture_gains: vec![58, 58],
+            playback_gains: vec![40, 40],
+            capture_muted: false,
+            playback_muted: false,
+            playback_volume_percent: 40,
+            capture_origin_monotonic_ns: 1,
+        }
+    }
+
+    #[test]
+    fn native_actual_pch_schema_maps_real_ports_and_never_implies_aec_proof() {
+        let (devices, pair) = map(endpoint(true), endpoint(false), "e647:e3e7").unwrap();
+        assert_eq!(devices.source.selected.as_ref().unwrap().id, 88);
+        assert_eq!(devices.sink.selected.as_ref().unwrap().id, 87);
+        assert_eq!(devices.source.pinned_name.as_deref(), Some(NATIVE_SOURCE));
+        assert_eq!(devices.sink.pinned_name.as_deref(), Some(NATIVE_SINK));
+        assert_eq!(
+            devices.source.current_default.as_deref(),
+            Some("alsa_input.usb-preserved")
+        );
+        assert_eq!(
+            devices.sink.pending_default.as_deref(),
+            Some("alsa_output.usb-preserved")
+        );
+        assert_eq!(devices.aec_capability, AecCapability::Unavailable);
+        assert!(
+            !translator_daemon::DeviceState::from(devices)
+                .acoustic
+                .full_duplex_allowed
+        );
+        assert_eq!(pair.source_hardware_id, "alsa:PCH:ALC287 Analog:capture");
+        assert!(pair.audio_server_id.ends_with("e647:e3e7"));
+        validate_native_pair_identity(&identity()).unwrap();
+        let mut incorrect = identity();
+        if let AecGraphIdentity::Native {
+            physical_device_id, ..
+        } = &mut incorrect.graph
+        {
+            *physical_device_id = "alsa-hw:0,0".into();
+        }
+        assert!(validate_native_pair_identity(&incorrect).is_err());
+    }
+
+    #[test]
+    fn native_wrong_card_stream_api_class_and_ports_are_rejected() {
+        let mutations: [fn(&mut Value); 8] = [
+            |value| value["properties"]["alsa.card"] = json!("1"),
+            |value| value["properties"]["alsa.id"] = json!("USB"),
+            |value| value["properties"]["alsa.name"] = json!("different PCM"),
+            |value| value["properties"]["api.alsa.pcm.stream"] = json!("monitor"),
+            |value| value["properties"]["device.api"] = Value::Null,
+            |value| value["properties"]["device.class"] = json!("monitor"),
+            |value| value["active_port"] = json!("analog-output-headphones"),
+            |value| value["ports"][0]["availability"] = json!("not available"),
+        ];
+        for mutate in mutations {
+            for source_fault in [true, false] {
+                let mut source = endpoint(true);
+                let mut sink = endpoint(false);
+                mutate(if source_fault { &mut source } else { &mut sink });
+                let parse = |value| serde_json::from_value::<NativePulseEndpoint>(value);
+                let result = parse(source)
+                    .ok()
+                    .zip(parse(sink).ok())
+                    .and_then(|(source, sink)| {
+                        map_native_pulse_pair(
+                            NativePulseServer {
+                                server_name: "actual-server".into(),
+                                server_cookie: "e647:e3e7".into(),
+                                default_source_name: None,
+                                default_sink_name: None,
+                            },
+                            vec![source],
+                            vec![sink],
+                        )
+                        .ok()
+                    });
+                assert!(result.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn native_monitor_alias_duplicate_id_and_missing_cookie_are_rejected() {
+        let mut monitor = endpoint(true);
+        monitor["name"] = json!(format!("{NATIVE_SINK}.monitor"));
+        monitor["properties"]["device.class"] = json!("monitor");
+        monitor["properties"]["api.alsa.pcm.stream"] = json!("playback");
+        assert!(map(monitor, endpoint(false), "e647:e3e7").is_err());
+        let source: NativePulseEndpoint = serde_json::from_value(endpoint(true)).unwrap();
+        let mut alias = endpoint(true);
+        alias["name"] = json!("alsa_input.alias");
+        assert!(
+            map_native_pulse_pair(
+                NativePulseServer {
+                    server_name: "server".into(),
+                    server_cookie: "e647:e3e7".into(),
+                    default_source_name: None,
+                    default_sink_name: None,
+                },
+                vec![source, serde_json::from_value(alias).unwrap()],
+                vec![serde_json::from_value(endpoint(false)).unwrap()]
+            )
+            .is_err()
+        );
+        for cookie in ["", "0000:0000", "not-a-cookie", "e647", "e647:00000"] {
+            assert!(map(endpoint(true), endpoint(false), cookie).is_err());
+        }
+        assert!(
+            serde_json::from_value::<NativePulseServer>(json!({"server_name":"server"})).is_err()
+        );
+    }
+
+    #[test]
+    fn native_configuration_has_no_implicit_host_server_or_fixture_fallback() {
+        assert!(load_native_positive_fixture(None, None).unwrap().is_none());
+        assert!(load_native_positive_fixture(None, Some("hash")).is_err());
+        assert!(
+            load_native_positive_fixture(Some(std::path::Path::new("missing-fixture")), None)
+                .is_err()
+        );
+        assert!(native_facts_server(None).is_err());
+        for server in [
+            "tcp:localhost",
+            "localhost",
+            "unix:relative",
+            "unix:/run/user/1000/../native",
+        ] {
+            assert!(native_facts_server(Some(std::ffi::OsStr::new(server))).is_err());
+        }
+        assert!(
+            native_facts_server(Some(std::ffi::OsStr::new(
+                "unix:/run/user/1000/pulse/native"
+            )))
+            .is_ok()
+        );
+        let mut devices = map(endpoint(true), endpoint(false), "e647:e3e7").unwrap().0;
+        devices.output_mode = OutputMode::Headphones;
+        let state = translator_daemon::DeviceState::from(devices);
+        assert!(state.acoustic.full_duplex_allowed);
+        assert_eq!(state.acoustic.aec_capability, AecCapability::Unavailable);
+    }
+
+    #[test]
+    fn native_inventory_ignores_unrelated_unported_nodes_without_enriching_properties() {
+        let sources = serde_json::from_value(json!([
+            endpoint(true),
+            {"index":19,"name":"translator_remote_in.monitor","active_port":null,"properties":{"device.class":"monitor"}},
+            {"index":20,"name":"alsa_input.usb-preserved","active_port":null,"ports":[],"properties":{"device.api":"alsa"}}
+        ])).unwrap();
+        let server = serde_json::from_value(json!({"server_name":"actual-server","server_cookie":"e647:e3e7","default_source_name":"alsa_input.usb-preserved","default_sink_name":"alsa_output.usb-preserved"})).unwrap();
+        let (devices, _) = map_native_pulse_pair(
+            server,
+            sources,
+            vec![serde_json::from_value(endpoint(false)).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(devices.source.selected.unwrap().name, NATIVE_SOURCE);
+        assert_eq!(
+            devices.source.current_default.as_deref(),
+            Some("alsa_input.usb-preserved")
+        );
+    }
+
+    #[derive(Default)]
+    struct ReadOnlyRunner {
+        calls: Mutex<Vec<(String, Vec<String>, std::time::Instant)>>,
+    }
+    impl CommandRunner for ReadOnlyRunner {
+        fn run_until(
+            &self,
+            program: &str,
+            args: &[String],
+            deadline: std::time::Instant,
+        ) -> Result<CommandResult, CommandRunError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((program.into(), args.to_vec(), deadline));
+            Ok(CommandResult::success(b"{}".to_vec()))
+        }
+    }
+
+    #[test]
+    fn native_read_only_target_and_locale_are_explicit_and_deadline_preserved() {
+        let runner = ReadOnlyRunner::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let _: Value = read_native_pulse_json(
+            &runner,
+            "unix:/run/user/1000/pulse/native",
+            &["--format=json", "info"],
+            deadline,
+        )
+        .unwrap();
+        assert!(
+            read_native_pulse_json::<Value>(
+                &runner,
+                "unix:/run/user/1000/pulse/native",
+                &["set-default-sink", NATIVE_SINK],
+                deadline
+            )
+            .is_err()
+        );
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "env");
+        assert_eq!(
+            calls[0].1,
+            [
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "pactl",
+                "--server=unix:/run/user/1000/pulse/native",
+                "--format=json",
+                "info"
+            ]
+        );
+        assert_eq!(calls[0].2, deadline);
+    }
+
+    #[test]
+    fn native_omits_only_owned_physical_speaker_route_not_headphone_pulse_custody() {
+        let devices = map(endpoint(true), endpoint(false), "e647:e3e7").unwrap().0;
+        let snapshot = RuntimeSnapshot {
+            devices: Some(devices.clone().into()),
+            ..RuntimeStore::default().snapshot()
+        };
+        assert!(
+            original_loopback_requests(&snapshot)
+                .iter()
+                .any(|request| request.media_name == SPEAKER_ORIGINAL_LOOPBACK)
+        );
+        assert!(
+            !pulse_requests_with_native_speaker(&snapshot)
+                .iter()
+                .any(|request| request.media_name == SPEAKER_ORIGINAL_LOOPBACK)
+        );
+        let mut headphones = devices;
+        headphones.output_mode = OutputMode::Headphones;
+        let snapshot = RuntimeSnapshot {
+            devices: Some(headphones.into()),
+            ..snapshot
+        };
+        assert_eq!(
+            pulse_requests_with_native_speaker(&snapshot),
+            original_loopback_requests(&snapshot)
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct InventoryRunner {
+        calls: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl CommandRunner for InventoryRunner {
+        fn run_until(
+            &self,
+            program: &str,
+            args: &[String],
+            _deadline: std::time::Instant,
+        ) -> Result<CommandResult, CommandRunError> {
+            assert_eq!(program, "env");
+            assert_eq!(args[3], "--server=unix:/test/read-only-facts");
+            self.calls.lock().unwrap().push(args.to_vec());
+            let response = match args[4..]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                ["--format=json", "info"] => {
+                    json!({"server_name":"actual-server","server_cookie":"e647:e3e7","default_source_name":"alsa_input.usb-preserved","default_sink_name":"alsa_output.usb-preserved"})
+                }
+                ["--format=json", "list", "sources"] => json!([endpoint(true)]),
+                ["--format=json", "list", "sinks"] => json!([endpoint(false)]),
+                _ => panic!("projection attempted a non-inventory command"),
+            };
+            Ok(CommandResult::success(
+                serde_json::to_vec(&response).unwrap(),
+            ))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct HeadphoneInventoryRunner {
+        native: InventoryRunner,
+        changed: Arc<AtomicBool>,
+    }
+
+    impl CommandRunner for HeadphoneInventoryRunner {
+        fn run_until(
+            &self,
+            program: &str,
+            args: &[String],
+            deadline: std::time::Instant,
+        ) -> Result<CommandResult, CommandRunError> {
+            if program != "pactl" {
+                return self.native.run_until(program, args, deadline);
+            }
+            let device = |source: bool| {
+                json!({
+                    "index": if source { 42 } else if self.changed.load(Ordering::Acquire) { 141 } else { 41 },
+                    "name": if source { "alsa_input.usb-headset" } else { "alsa_output.usb-headset" },
+                    "monitor_source": if source { "" } else { "alsa_output.usb-headset.monitor" },
+                    "active_port": "analog",
+                    "ports": [{"name":"analog", "type":"Analog", "availability":"available"}],
+                    "properties": {"device.api":"alsa", "device.class":"sound", "media.class":if source { "Audio/Source" } else { "Audio/Sink" }},
+                })
+            };
+            let response = match args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                ["--format=json", "list", "sources"] => {
+                    serde_json::to_vec(&json!([device(true)])).unwrap()
+                }
+                ["--format=json", "list", "sinks"] => {
+                    serde_json::to_vec(&json!([device(false)])).unwrap()
+                }
+                ["get-default-source"] => b"alsa_input.usb-headset\n".to_vec(),
+                ["get-default-sink"] => b"alsa_output.usb-headset\n".to_vec(),
+                _ => panic!("confirmation attempted non-inventory IO"),
+            };
+            Ok(CommandResult::success(response))
+        }
+    }
+
+    #[test]
+    fn native_projection_delegates_current_confirmation_and_revocation_to_watcher() {
+        let runner = HeadphoneInventoryRunner::default();
+        let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
+        let mut devices = PulseDeviceWatcher::new(runner.clone(), AecCapability::Unavailable);
+        let current = devices.reconcile(DeviceOverride::default()).unwrap();
+        let confirmation = translator_audio::HeadphoneConfirmation {
+            source: current.source.selected.unwrap(),
+            sink: current.sink.selected.unwrap(),
+        };
+        let routes = Arc::new(PulseManualRoutes {
+            resources: LifecycleProtected::new(PulseResources {
+                routing: PulseRoutingWatcher::new(runner.clone(), RoutingProfile::Production),
+                devices,
+                original_loopbacks: PulseOriginalLoopbacks::new(runner.clone()),
+                graph: None,
+            }),
+            operation_gate: gate.clone(),
+        });
+        let projection = AecProjectedRoutes {
+            routes: routes.clone(),
+            coordinator: Arc::new(AecCalibrationCoordinator::new()),
+            environment: Arc::new(PulseNativeAecEnvironment {
+                runner: runner.clone(),
+                facts_server: "unix:/test/read-only-facts".into(),
+                mix: Arc::new(AudioMixApplication::new(runner.clone())),
+                store: store.clone(),
+            }),
+        };
+        let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let calibration = gate.acquire_calibration(uuid::Uuid::new_v4()).unwrap();
+        assert_eq!(
+            projection
+                .confirm_headphones(Some(confirmation.clone()), deadline(), &store)
+                .unwrap_err()
+                .code,
+            "audio_operation_busy"
+        );
+        assert!(store.snapshot().devices.is_none());
+        drop(calibration);
+        projection
+            .confirm_headphones(Some(confirmation), deadline(), &store)
+            .unwrap();
+        projection.project(&store);
+        let observed = projection.observed_devices_until(deadline()).unwrap();
+        assert_eq!(observed.output_mode, OutputMode::UserConfirmedHeadphones);
+        assert_eq!(
+            observed.sink.selected.unwrap().active_port_type.as_deref(),
+            Some("Analog")
+        );
+        assert_eq!(
+            store.snapshot().devices.unwrap().acoustic.mode,
+            OutputMode::UserConfirmedHeadphones
+        );
+        assert!(!store.snapshot().translation_running);
+        assert!(
+            runner.native.calls.lock().unwrap().is_empty(),
+            "confirmed headphones must not become the built-in native AEC pair"
+        );
+
+        runner.changed.store(true, Ordering::Release);
+        assert_ne!(
+            projection
+                .observed_devices_until(deadline())
+                .unwrap()
+                .output_mode,
+            OutputMode::UserConfirmedHeadphones
+        );
+        runner.changed.store(false, Ordering::Release);
+        assert_ne!(
+            projection
+                .observed_devices_until(deadline())
+                .unwrap()
+                .output_mode,
+            OutputMode::UserConfirmedHeadphones,
+            "old pair must not revive confirmation"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_watcher_projects_read_only_pair_during_exclusive_calibration() {
+        let runner = InventoryRunner::default();
+        let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
+        let _lease = gate.acquire_calibration(uuid::Uuid::new_v4()).unwrap();
+        let projection = Arc::new(AecProjectedRoutes {
+            routes: Arc::new(PulseManualRoutes {
+                resources: LifecycleProtected::new(PulseResources {
+                    routing: PulseRoutingWatcher::new(runner.clone(), RoutingProfile::Production),
+                    devices: PulseDeviceWatcher::new(runner.clone(), AecCapability::Unavailable),
+                    original_loopbacks: PulseOriginalLoopbacks::new(runner.clone()),
+                    graph: None,
+                }),
+                operation_gate: gate.clone(),
+            }),
+            coordinator: Arc::new(AecCalibrationCoordinator::new()),
+            environment: Arc::new(PulseNativeAecEnvironment {
+                runner: runner.clone(),
+                facts_server: "unix:/test/read-only-facts".into(),
+                mix: Arc::new(AudioMixApplication::new(runner.clone())),
+                store: store.clone(),
+            }),
+        });
+        assert!(RuntimeMaintenance::refresh(projection.as_ref(), &store).is_err());
+        let task = tokio::spawn(watcher_loop(None, store.clone(), Some(projection.clone())));
+        let projected = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if store.snapshot().devices.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        task.abort();
+        let _ = task.await;
+        projected.unwrap();
+        let snapshot = store.snapshot();
+        let devices = snapshot.devices.as_ref().unwrap();
+        assert_eq!(
+            devices.source.selected.as_ref().unwrap().name,
+            NATIVE_SOURCE
+        );
+        assert_eq!(devices.acoustic.aec_capability, AecCapability::Unavailable);
+        assert!(!devices.acoustic.full_duplex_allowed);
+        assert!(matches!(
+            gate.state(),
+            AudioOperationState::Calibration { .. }
+        ));
+        assert!(projection.verify_bypass_custody(&snapshot, false).is_err());
+        assert_eq!(runner.calls.lock().unwrap().len(), 4);
+    }
+}
+
 impl<R: CommandRunner + Send> RuntimeMaintenance for PulseManualRoutes<R> {
+    fn confirm_headphones(
+        &self,
+        confirmation: Option<translator_audio::HeadphoneConfirmation>,
+        deadline: std::time::Instant,
+        store: &RuntimeStore,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        let _lease = self.operation_gate.acquire_manual().map_err(|_| {
+            translator_daemon::ControlFailure {
+                status: axum::http::StatusCode::CONFLICT,
+                code: "audio_operation_busy",
+            }
+        })?;
+        if self.resources.is_stopping() {
+            return Err(native_route_failure());
+        }
+        let mut resources =
+            self.resources
+                .inner
+                .try_lock()
+                .map_err(|_| translator_daemon::ControlFailure {
+                    status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    code: "audio_facts_busy",
+                })?;
+        if self.resources.is_stopping() {
+            return Err(native_route_failure());
+        }
+        let facts = resources
+            .devices
+            .confirm_headphones_until(confirmation, deadline)
+            .map_err(|error| translator_daemon::ControlFailure {
+                status: if error.code()
+                    == translator_audio::DeviceWatcherErrorCode::InvalidPhysicalDevice
+                {
+                    axum::http::StatusCode::CONFLICT
+                } else {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                },
+                code: "headphone_confirmation_failed",
+            })?;
+        store.set_devices(facts.into());
+        Ok(())
+    }
+
     fn refresh(&self, store: &RuntimeStore) -> Result<(), translator_daemon::ControlFailure> {
         if !matches!(
             self.operation_gate.state(),
@@ -372,6 +1499,15 @@ fn inspect_runtime_facts(
             }
             translator_audio::DeviceWatcherErrorCode::DeadlineExpired => FactsError::Expired,
         })?;
+    inspect_runtime_graph_facts(devices, graph, routing, deadline)
+}
+
+fn inspect_runtime_graph_facts(
+    devices: translator_audio::DeviceFacts,
+    graph: &impl AudioGraph,
+    routing: &impl RoutingWatcher,
+    deadline: std::time::Instant,
+) -> Result<RuntimeFacts, FactsError> {
     if std::time::Instant::now() >= deadline {
         return Err(FactsError::Expired);
     }
@@ -588,7 +1724,30 @@ where
         snapshot: &RuntimeSnapshot,
         allow_new_mic: bool,
     ) -> Result<(), OriginalLoopbackError> {
-        let requests = original_loopback_requests(snapshot);
+        self.ensure_requests(
+            snapshot,
+            allow_new_mic,
+            original_loopback_requests(snapshot),
+        )
+    }
+
+    fn ensure_with_native_speaker(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<(), OriginalLoopbackError> {
+        self.ensure_requests(
+            snapshot,
+            false,
+            pulse_requests_with_native_speaker(snapshot),
+        )
+    }
+
+    fn ensure_requests(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        allow_new_mic: bool,
+        requests: Vec<OriginalLoopbackRequest>,
+    ) -> Result<(), OriginalLoopbackError> {
         let sink_inputs: Vec<RawPulseStream> =
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
         let source_outputs: Vec<RawPulseStream> =
@@ -676,13 +1835,37 @@ where
         snapshot: &RuntimeSnapshot,
         permit_mic_original: bool,
     ) -> Result<(), OriginalLoopbackError> {
-        let mut requests = original_loopback_requests(snapshot);
+        self.verify_requests(
+            snapshot,
+            permit_mic_original,
+            original_loopback_requests(snapshot),
+        )
+    }
+
+    fn verify_with_native_speaker(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit_mic_original: bool,
+    ) -> Result<(), OriginalLoopbackError> {
+        self.verify_requests(
+            snapshot,
+            permit_mic_original,
+            pulse_requests_with_native_speaker(snapshot),
+        )
+    }
+
+    fn verify_requests(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit_mic_original: bool,
+        mut requests: Vec<OriginalLoopbackRequest>,
+    ) -> Result<(), OriginalLoopbackError> {
         if permit_mic_original {
             if direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
                 && snapshot
                     .devices
                     .as_ref()
-                    .is_some_and(|devices| devices.acoustic.mode == OutputMode::Headphones)
+                    .is_some_and(|devices| devices.acoustic.mode.is_headphones())
                 && !requests
                     .iter()
                     .any(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
@@ -817,7 +2000,7 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
     }
 
     if direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
-        && devices.acoustic.mode == OutputMode::Headphones
+        && devices.acoustic.mode.is_headphones()
         && snapshot.audio_mix.microphone_original_percent > 0
         && let Some(source) = devices.source.selected.as_ref()
     {
@@ -828,6 +2011,15 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
         });
     }
 
+    requests
+}
+
+fn pulse_requests_with_native_speaker(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbackRequest> {
+    let mut requests = original_loopback_requests(snapshot);
+    if native_pair_selected(snapshot) {
+        // The retained native worker owns this DAC, including Stop bypass.
+        requests.retain(|request| request.media_name != SPEAKER_ORIGINAL_LOOPBACK);
+    }
     requests
 }
 
@@ -1138,20 +2330,90 @@ async fn async_main() -> ExitCode {
     let audio_mix_application = Arc::new(AudioMixApplication::new(SystemCommandRunner));
     let audio_mix: Arc<dyn AudioMixController> = audio_mix_application.clone();
     let duplex_config = build_duplex_config(lease.token_path());
+    let mut aec_calibration = None;
+    let mut aec_authority = None;
+    let mut aec_projection = None;
+    let mut facts: Arc<dyn RuntimeFactsSource> = manual_routes.clone();
+    let mut maintenance: Arc<dyn RuntimeMaintenance> = manual_routes.clone();
+    let mut api_routes: Arc<dyn ManualRouteController> = manual_routes.clone();
+    let positive_path =
+        std::env::var_os("TRANSLATOR_AEC_POSITIVE_PCM").map(std::path::PathBuf::from);
+    let positive_hash = std::env::var_os("TRANSLATOR_AEC_POSITIVE_SHA256");
+    let facts_server = std::env::var_os("TRANSLATOR_AEC_FACTS_SERVER");
+    let fixture = load_native_positive_fixture(
+        positive_path.as_deref(),
+        positive_hash.as_deref().and_then(std::ffi::OsStr::to_str),
+    )
+    .and_then(|fixture| match fixture {
+        Some(fixture) => {
+            native_facts_server(facts_server.as_deref()).map(|server| Some((fixture, server)))
+        }
+        None => Ok(None),
+    });
+    let native_runner = match (duplex_config.as_ref(), fixture) {
+        (Some(config), Ok(Some((fixture, facts_server)))) => {
+            let coordinator = Arc::new(AecCalibrationCoordinator::new());
+            let environment = Arc::new(PulseNativeAecEnvironment {
+                runner: SystemCommandRunner,
+                facts_server,
+                mix: audio_mix.clone(),
+                store: store.clone(),
+            });
+            let engine = Arc::new(NativeAecCalibrationEngine::new(
+                config.clone(),
+                store.clone(),
+                environment.clone(),
+                audio_mix_application.clone(),
+                Arc::new(RuntimeLatencyObserver::new(store.clone())),
+                fixture,
+            ));
+            let controller = AecCalibrationController::new(
+                coordinator.clone(),
+                operation_gate.clone(),
+                engine.clone(),
+            );
+            let projected = Arc::new(AecProjectedRoutes {
+                routes: manual_routes.clone(),
+                coordinator: coordinator.clone(),
+                environment,
+            });
+            projected.project(&store);
+            facts = projected.clone();
+            maintenance = projected.clone();
+            aec_projection = Some(projected.clone());
+            api_routes = projected;
+            aec_authority = Some(
+                AecRuntimeAuthority::new(coordinator, engine.clone())
+                    .with_controller(controller.clone()),
+            );
+            aec_calibration = Some(Arc::new(controller));
+            Some(engine as Arc<dyn translator_daemon::DuplexRunner>)
+        }
+        (_, Err(error)) => {
+            tracing::warn!(event = "aec_calibration_unavailable", code = error.code);
+            None
+        }
+        _ => None,
+    };
     let translation = duplex_config.clone().map(|config| {
-        ControlApplication::spawn(
-            store.clone(),
+        let runner = native_runner.unwrap_or_else(|| {
             Arc::new(
                 ProcessDuplexRunner::with_observer(
                     config,
                     Arc::new(RuntimeLatencyObserver::new(store.clone())),
                 )
-                .with_playback_mix_authority(audio_mix_application.clone()),
-            ),
+                .with_playback_mix_authority(audio_mix_application.clone())
+                .with_start_facts(facts.clone()),
+            )
+        });
+        ControlApplication::spawn_with_aec_authority(
+            store.clone(),
+            runner,
             operation_gate.clone(),
-            manual_routes.clone(),
-            manual_routes.clone(),
+            facts.clone(),
+            maintenance,
             Some(audio_mix.clone()),
+            aec_authority,
         )
     });
     let round_trip = duplex_config.and_then(|config| {
@@ -1159,7 +2421,7 @@ async fn async_main() -> ExitCode {
             store.clone(),
             Arc::new(RoundTripProcessRunner::new(config)),
             operation_gate.clone(),
-            manual_routes.clone(),
+            facts,
         ) {
             Ok(controller) => Some(Arc::new(controller)),
             Err(_) => {
@@ -1176,9 +2438,9 @@ async fn async_main() -> ExitCode {
         token,
         ApiLimits::default(),
         ApiControllers {
-            manual_routes: Some(manual_routes.clone()),
+            manual_routes: Some(api_routes),
             translation: translation.clone(),
-            aec_calibration: None,
+            aec_calibration: aec_calibration.clone(),
             round_trip: round_trip
                 .as_ref()
                 .map(|controller| controller.clone() as Arc<dyn RoundTripController>),
@@ -1197,7 +2459,11 @@ async fn async_main() -> ExitCode {
         provider_schema_bytes = translator_ipc::PROVIDER_PROTO.len(),
         "translator daemon control plane is ready"
     );
-    let watcher_task = tokio::spawn(watcher_loop(translation.clone(), store.clone()));
+    let watcher_task = tokio::spawn(watcher_loop(
+        translation.clone(),
+        store.clone(),
+        aec_projection,
+    ));
     let debug_capture_watchdog = tokio::spawn(store.clone().run_debug_capture_watchdog());
     let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
     let server_task = tokio::spawn(async move {
@@ -1208,7 +2474,7 @@ async fn async_main() -> ExitCode {
     });
 
     shutdown_signal().await;
-    let (result, round_trip_result) = drain_control_owners(
+    let (result, round_trip_result, translation_result, retained_drain) = drain_control_owners(
         &operation_gate,
         (shutdown_sender, server_task),
         [watcher_task, debug_capture_watchdog],
@@ -1217,12 +2483,35 @@ async fn async_main() -> ExitCode {
         &store,
     )
     .await;
+    let aec_failed = match aec_calibration.as_ref() {
+        Some(controller) => controller.shutdown().await.is_err(),
+        None => false,
+    };
+    if aec_failed {
+        tracing::error!(
+            event = "daemon_shutdown_failed",
+            code = "aec_cleanup_unconfirmed"
+        );
+    }
     if round_trip_result.is_err() {
         tracing::error!(
             event = "daemon_shutdown_failed",
             code = "round_trip_owner_failed"
         );
-        return fail_stop((round_trip, manual_routes, lease)).await;
+    }
+    if let Err(error) = translation_result {
+        tracing::error!(event = "daemon_shutdown_failed", code = error.code);
+    }
+    if aec_failed || round_trip_result.is_err() || translation_result.is_err() {
+        return fail_stop((
+            translation,
+            aec_calibration,
+            round_trip,
+            manual_routes,
+            lease,
+            retained_drain,
+        ))
+        .await;
     }
     if let Err(error) = manual_routes.restore() {
         tracing::error!(event = "route_restore_failed", code = ?error.code);
@@ -1238,6 +2527,14 @@ async fn async_main() -> ExitCode {
     }
 }
 
+type RoundTripDrainer = tokio::task::JoinHandle<Result<(), RoundTripOwnerShutdownError>>;
+type ControlDrainResults = (
+    std::io::Result<()>,
+    Result<(), RoundTripOwnerShutdownError>,
+    Result<(), ControlFailure>,
+    Option<RoundTripDrainer>,
+);
+
 async fn drain_control_owners(
     gate: &AudioOperationGate,
     http: (
@@ -1248,7 +2545,7 @@ async fn drain_control_owners(
     round_trip: Option<&Arc<RoundTripRuntimeHandle>>,
     translation: Option<&ControlApplication>,
     store: &RuntimeStore,
-) -> (std::io::Result<()>, Result<(), RoundTripOwnerShutdownError>) {
+) -> ControlDrainResults {
     gate.begin_stopping();
     let (shutdown, mut server) = http;
     let _ = shutdown.send(());
@@ -1271,16 +2568,23 @@ async fn drain_control_owners(
                 ))
             }
         };
-    let round_trip_result = match round_trip {
+    // These are sequential per-owner budgets, not a single overall shutdown deadline.
+    let (round_trip_result, retained_drain) = match round_trip {
         Some(controller) => drain_round_trip(controller).await,
+        None => (Ok(()), None),
+    };
+    let translation_result = match translation {
+        Some(controller) => drain_translation(controller).await,
         None => Ok(()),
     };
-    if let Some(controller) = translation {
-        drain_translation(controller).await;
-    }
     let _ = store.set_debug_capture_enabled(false);
     store.shutdown_events();
-    (server_result, round_trip_result)
+    (
+        server_result,
+        round_trip_result,
+        translation_result,
+        retained_drain,
+    )
 }
 
 async fn fail_stop<T>(owners: T) -> ExitCode {
@@ -1288,24 +2592,51 @@ async fn fail_stop<T>(owners: T) -> ExitCode {
     std::future::pending().await
 }
 
-async fn drain_translation(controller: &ControlApplication) {
+async fn drain_translation(controller: &ControlApplication) -> Result<(), ControlFailure> {
+    let deadline = tokio::time::Instant::now() + translator_daemon::RUNTIME_CLEANUP_BUDGET;
     loop {
-        match controller.shutdown().await {
-            Ok(()) => return,
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ControlFailure {
+                status: axum::http::StatusCode::CONFLICT,
+                code: "translation_cleanup_pending",
+            });
+        }
+        match controller.shutdown_until(deadline).await {
+            Ok(()) if tokio::time::Instant::now() < deadline => return Ok(()),
+            Ok(()) => continue,
             Err(error) => tracing::error!(event = "translation_shutdown_failed", code = error.code),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(1)),
+        )
+        .await;
     }
 }
 
 async fn drain_round_trip(
     controller: &Arc<RoundTripRuntimeHandle>,
-) -> Result<(), RoundTripOwnerShutdownError> {
-    drain_round_trip_attempts(|| {
-        let owner = Arc::clone(controller);
-        join_round_trip_shutdown(move || owner.shutdown())
-    })
-    .await
+) -> (
+    Result<(), RoundTripOwnerShutdownError>,
+    Option<RoundTripDrainer>,
+) {
+    let deadline = tokio::time::Instant::now() + translator_daemon::RUNTIME_CLEANUP_BUDGET;
+    let owner = Arc::clone(controller);
+    let mut drainer = tokio::spawn(async move {
+        drain_round_trip_attempts_until(deadline, || {
+            let owner = Arc::clone(&owner);
+            join_round_trip_shutdown(move || owner.shutdown_until(deadline.into_std()))
+        })
+        .await
+    });
+    match tokio::time::timeout_at(deadline, &mut drainer).await {
+        Ok(Ok(result)) if tokio::time::Instant::now() < deadline => (result, None),
+        Ok(Ok(_)) => (Err(RoundTripOwnerShutdownError::CleanupPending), None),
+        Ok(Err(_)) => (Err(RoundTripOwnerShutdownError::OwnerFailed), None),
+        Err(_) => (
+            Err(RoundTripOwnerShutdownError::CleanupPending),
+            Some(drainer),
+        ),
+    }
 }
 
 async fn join_round_trip_shutdown(
@@ -1316,14 +2647,34 @@ async fn join_round_trip_shutdown(
         .map_err(|_| RoundTripOwnerShutdownError::OwnerFailed)?
 }
 
+#[cfg(test)]
 async fn drain_round_trip_attempts<F, R>(mut attempt: F) -> Result<(), RoundTripOwnerShutdownError>
 where
     F: FnMut() -> R,
     R: std::future::Future<Output = Result<(), RoundTripOwnerShutdownError>>,
 {
+    drain_round_trip_attempts_until(
+        tokio::time::Instant::now() + translator_daemon::RUNTIME_CLEANUP_BUDGET,
+        &mut attempt,
+    )
+    .await
+}
+
+async fn drain_round_trip_attempts_until<F, R>(
+    deadline: tokio::time::Instant,
+    mut attempt: F,
+) -> Result<(), RoundTripOwnerShutdownError>
+where
+    F: FnMut() -> R,
+    R: std::future::Future<Output = Result<(), RoundTripOwnerShutdownError>>,
+{
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RoundTripOwnerShutdownError::CleanupPending);
+        }
         match attempt().await {
-            Ok(()) => return Ok(()),
+            Ok(()) if tokio::time::Instant::now() < deadline => return Ok(()),
+            Ok(()) => return Err(RoundTripOwnerShutdownError::CleanupPending),
             Err(RoundTripOwnerShutdownError::OwnerFailed) => {
                 return Err(RoundTripOwnerShutdownError::OwnerFailed);
             }
@@ -1334,7 +2685,10 @@ where
                 );
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(1)),
+        )
+        .await;
     }
 }
 
@@ -1387,7 +2741,11 @@ async fn shutdown_signal() {
     }
 }
 
-async fn watcher_loop(controller: Option<Arc<ControlApplication>>, store: RuntimeStore) {
+async fn watcher_loop<R: CommandRunner + Send + Sync + 'static>(
+    controller: Option<Arc<ControlApplication>>,
+    store: RuntimeStore,
+    aec_projection: Option<Arc<AecProjectedRoutes<R>>>,
+) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_latency_epoch = 0;
@@ -1397,6 +2755,16 @@ async fn watcher_loop(controller: Option<Arc<ControlApplication>>, store: Runtim
             && let Err(error) = controller.execute(ControlCommand::ReconcileAudio).await
         {
             tracing::warn!(event = "audio_reconciliation_failed", code = error.code);
+        }
+        if let Some(projection) = aec_projection.as_ref() {
+            let projection = projection.clone();
+            let projection_store = store.clone();
+            if tokio::task::spawn_blocking(move || projection.project(&projection_store))
+                .await
+                .is_err()
+            {
+                store.clear_devices("aec_pair_unavailable");
+            }
         }
         let now_ms = store.monotonic_ms();
         let epoch_end = (now_ms / 60_000) * 60_000;
@@ -1834,8 +3202,8 @@ mod tests {
         SystemCommandRunner,
     };
     use translator_daemon::{
-        AcousticSafety, AdmittedDuplex, AudioMixState, AudioOperationState, DeviceState,
-        RuntimeSnapshot,
+        AcousticSafety, AdmittedDuplex, AudioMixState, AudioOperationGate, AudioOperationState,
+        ControlApplication, ControlCommand, DeviceState, RuntimeSnapshot, RuntimeStore,
     };
     use uuid::Uuid;
 
@@ -3168,6 +4536,9 @@ mod tests {
         unknown: AtomicBool,
         failed: tokio::sync::Notify,
         attempts: Mutex<Vec<Instant>>,
+        stop_deadlines: Mutex<Vec<tokio::time::Instant>>,
+        stop_calls: AtomicUsize,
+        mix_modes: Mutex<Vec<translator_daemon::TranslationMixMode>>,
     }
 
     #[derive(Clone)]
@@ -3206,8 +4577,10 @@ mod tests {
     impl translator_daemon::ActiveDuplexRuntime for DrainRuntime {
         fn stop(
             &mut self,
-            _: tokio::time::Instant,
+            deadline: tokio::time::Instant,
         ) -> Result<(), translator_daemon::DuplexRuntimeError> {
+            self.0.stop_calls.fetch_add(1, Ordering::SeqCst);
+            self.0.stop_deadlines.lock().unwrap().push(deadline);
             if self.0.unknown.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -3265,8 +4638,9 @@ mod tests {
         }
         fn reconcile_committed(
             &self,
-            _: translator_daemon::TranslationMixMode,
+            mode: translator_daemon::TranslationMixMode,
         ) -> Result<(), translator_daemon::ControlFailure> {
+            self.0.mix_modes.lock().unwrap().push(mode);
             if self.0.unknown.load(Ordering::SeqCst) {
                 Err(translator_daemon::ControlFailure {
                     status: axum::http::StatusCode::CONFLICT,
@@ -3278,8 +4652,9 @@ mod tests {
         }
         fn recover_committed(
             &self,
-            _: translator_daemon::TranslationMixMode,
+            mode: translator_daemon::TranslationMixMode,
         ) -> Result<(), translator_daemon::ControlFailure> {
+            self.0.mix_modes.lock().unwrap().push(mode);
             self.attempt(&self.0.recovery_failures)?;
             self.0.unknown.store(false, Ordering::SeqCst);
             Ok(())
@@ -3311,7 +4686,7 @@ mod tests {
         let owner = control.clone();
         let observer = route_observed.clone();
         let mut drain = tokio::spawn(async move {
-            super::drain_translation(&owner).await;
+            super::drain_translation(&owner).await.unwrap();
             observer.store(true, Ordering::SeqCst);
         });
         tokio::time::timeout(Duration::from_secs(2), state.failed.notified())
@@ -3363,6 +4738,15 @@ mod tests {
                 .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_secs(1)),
             "completed failures must be separated by a full second before retry"
         );
+        assert!(
+            state
+                .stop_deadlines
+                .lock()
+                .unwrap()
+                .windows(2)
+                .all(|pair| pair[0] == pair[1]),
+            "accepted runtime stop retries must use the same original absolute deadline"
+        );
     }
 
     #[tokio::test]
@@ -3378,6 +4762,398 @@ mod tests {
     #[tokio::test]
     async fn failed_mix_recovery_uses_the_same_owned_shutdown_retry() {
         assert_drain_retries(0, 1).await;
+    }
+
+    struct ShutdownMaintenance {
+        runtime: DrainRuntime,
+        gate: AudioOperationGate,
+        forbidden: Arc<AtomicUsize>,
+    }
+
+    impl ShutdownMaintenance {
+        fn check_bypass(&self) -> Result<(), translator_daemon::ControlFailure> {
+            if self.gate.state() == AudioOperationState::Stopping {
+                self.forbidden.fetch_add(1, Ordering::SeqCst);
+                return Err(translator_daemon::ControlFailure {
+                    status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    code: "original_loopback_custody_unknown",
+                });
+            }
+            Ok(())
+        }
+    }
+
+    impl translator_daemon::RuntimeMaintenance for ShutdownMaintenance {
+        fn refresh(&self, _: &RuntimeStore) -> Result<(), translator_daemon::ControlFailure> {
+            self.check_bypass()
+        }
+
+        fn refresh_bypass_facts(
+            &self,
+            store: &RuntimeStore,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            self.check_bypass()?;
+            translator_daemon::RuntimeMaintenance::refresh_bypass_facts(&self.runtime, store)
+        }
+
+        fn verify_bypass_custody(
+            &self,
+            _: &RuntimeSnapshot,
+            _: bool,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            self.check_bypass()
+        }
+
+        fn prepare_start(
+            &self,
+            _: &RuntimeSnapshot,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            Ok(())
+        }
+
+        fn prepare_bypass(
+            &self,
+            _: &RuntimeSnapshot,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            self.check_bypass()
+        }
+    }
+
+    async fn assert_composed_shutdown_with_mix(running: bool, bypass_pending: bool) {
+        let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
+        let state = Arc::new(DrainState::default());
+        let runtime = Arc::new(DrainRuntime(state.clone()));
+        let forbidden = Arc::new(AtomicUsize::new(0));
+        let control = ControlApplication::spawn(
+            store.clone(),
+            runtime.clone(),
+            gate.clone(),
+            Arc::new(TestFacts),
+            Arc::new(ShutdownMaintenance {
+                runtime: (*runtime).clone(),
+                gate: gate.clone(),
+                forbidden: forbidden.clone(),
+            }),
+            Some(runtime),
+        );
+        if running {
+            control.execute(ControlCommand::Start).await.unwrap();
+        }
+        if bypass_pending {
+            state.unknown.store(true, Ordering::SeqCst);
+            control
+                .execute(ControlCommand::ReconcileAudio)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                store.snapshot().runtime_status,
+                translator_daemon::RuntimeStatus::CleanupPending
+            );
+            state.unknown.store(false, Ordering::SeqCst);
+        }
+        state.mix_modes.lock().unwrap().clear();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let observed_gate = gate.clone();
+        let server = tokio::spawn(async move {
+            stopped.await.unwrap();
+            assert_eq!(observed_gate.state(), AudioOperationState::Stopping);
+            Ok(())
+        });
+        let background = [0; 2].map(|_| tokio::spawn(std::future::pending::<()>()));
+        let driver_store = store.clone();
+        let driver_gate = gate.clone();
+        let mut driver = tokio::spawn(async move {
+            super::drain_control_owners(
+                &driver_gate,
+                (stop, server),
+                background,
+                None,
+                Some(&control),
+                &driver_store,
+            )
+            .await
+        });
+        let completed = match tokio::time::timeout(Duration::from_millis(500), &mut driver).await {
+            Ok(result) => {
+                let result = result.unwrap();
+                assert!(result.0.is_ok());
+                assert!(result.1.is_ok());
+                assert!(result.2.is_ok());
+                assert!(result.3.is_none());
+                true
+            }
+            Err(_) => {
+                driver.abort();
+                let _ = driver.await;
+                false
+            }
+        };
+        assert!(
+            completed,
+            "actual composed shutdown with a mix owner must not require reopened Production authority"
+        );
+        assert_eq!(gate.state(), AudioOperationState::Stopping);
+        assert_eq!(
+            forbidden.load(Ordering::SeqCst),
+            0,
+            "shutdown must not refresh or prepare bypass facts"
+        );
+        assert_eq!(
+            store.snapshot().runtime_status,
+            translator_daemon::RuntimeStatus::Stopped
+        );
+        assert_eq!(
+            state.stop_calls.load(Ordering::SeqCst),
+            usize::from(running)
+        );
+        assert_eq!(
+            state.mix_modes.lock().unwrap().as_slice(),
+            &[translator_daemon::TranslationMixMode::Quarantine {
+                mic_original_expected: false
+            }],
+            "the actual mix owner must quarantine, never restore audible bypass"
+        );
+    }
+
+    #[tokio::test]
+    async fn composed_shutdown_stopped_mix_never_reopens_production() {
+        assert_composed_shutdown_with_mix(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn composed_shutdown_running_mix_does_not_restore_bypass() {
+        assert_composed_shutdown_with_mix(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn composed_shutdown_bypass_pending_mix_releases_owned_custody() {
+        assert_composed_shutdown_with_mix(false, true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permanent_round_trip_shutdown_is_bounded_by_original_budget() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = attempts.clone();
+        let mut driver = tokio::spawn(async move {
+            super::drain_round_trip_attempts(|| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err(super::RoundTripOwnerShutdownError::CleanupPending))
+            })
+            .await
+        });
+        let result = match tokio::time::timeout(
+            translator_daemon::RUNTIME_CLEANUP_BUDGET + Duration::from_millis(1),
+            &mut driver,
+        )
+        .await
+        {
+            Ok(result) => Some(result.unwrap()),
+            Err(_) => {
+                driver.abort();
+                let _ = driver.await;
+                None
+            }
+        };
+        assert_eq!(
+            result,
+            Some(Err(super::RoundTripOwnerShutdownError::CleanupPending)),
+            "permanent pending cleanup must end its retries without resetting the budget"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 8);
+    }
+
+    #[tokio::test]
+    async fn permanent_translation_shutdown_keeps_custody_and_original_deadline() {
+        let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
+        let state = Arc::new(DrainState::default());
+        let runtime = Arc::new(DrainRuntime(state.clone()));
+        let control = ControlApplication::spawn(
+            store.clone(),
+            runtime.clone(),
+            gate.clone(),
+            Arc::new(TestFacts),
+            runtime.clone(),
+            Some(runtime),
+        );
+        control.execute(ControlCommand::Start).await.unwrap();
+        state.stop_failures.store(usize::MAX, Ordering::SeqCst);
+        gate.begin_stopping();
+        let result = tokio::time::timeout(
+            translator_daemon::RUNTIME_CLEANUP_BUDGET + Duration::from_millis(500),
+            super::drain_translation(&control),
+        )
+        .await;
+        let held = store.snapshot().runtime_status;
+        let deadlines = state.stop_deadlines.lock().unwrap().clone();
+        let rejected = control.execute(ControlCommand::Start).await.is_err();
+        // Release the actual fixture owner; this cannot upgrade the original timeout result.
+        state.stop_failures.store(0, Ordering::SeqCst);
+        control.shutdown().await.unwrap();
+        assert_eq!(
+            result.unwrap().unwrap_err().code,
+            "translation_cleanup_pending"
+        );
+        assert_eq!(held, translator_daemon::RuntimeStatus::CleanupPending);
+        assert_eq!(gate.state(), AudioOperationState::Stopping);
+        assert!(rejected);
+        assert_eq!(deadlines.len(), 8);
+        assert!(deadlines.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    struct HeldRoundTripDrop {
+        entered: Arc<tokio::sync::Notify>,
+        released: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        completed: Arc<AtomicBool>,
+    }
+
+    impl Drop for HeldRoundTripDrop {
+        fn drop(&mut self) {
+            self.entered.notify_one();
+            let released = self.released.0.lock().unwrap();
+            let (released, _) = self
+                .released
+                .1
+                .wait_timeout_while(released, Duration::from_secs(15), |released| !*released)
+                .unwrap();
+            self.completed.store(*released, Ordering::SeqCst);
+        }
+    }
+
+    impl translator_daemon::RoundTripRunner for HeldRoundTripDrop {
+        fn start(
+            &self,
+            _: AdmittedDuplex,
+            _: Uuid,
+            _: translator_daemon::RoundTripProgress,
+            _: Instant,
+        ) -> Result<
+            Box<dyn translator_daemon::ActiveRoundTripRuntime>,
+            translator_daemon::RoundTripRuntimeError,
+        > {
+            panic!("the shutdown fixture must not start audio");
+        }
+    }
+
+    #[tokio::test]
+    async fn inflight_round_trip_shutdown_timeout_still_drains_translation_and_debug() {
+        let store = RuntimeStore::default();
+        let capture = tempfile::tempdir().unwrap();
+        store.configure_debug_capture(
+            super::DebugCaptureStore::open(capture.path(), super::DebugCaptureLimits::default())
+                .unwrap(),
+        );
+        store.set_debug_capture_enabled(true).unwrap();
+        let gate = AudioOperationGate::new();
+        let state = Arc::new(DrainState::default());
+        let runtime = Arc::new(DrainRuntime(state.clone()));
+        let control = ControlApplication::spawn(
+            store.clone(),
+            runtime.clone(),
+            gate.clone(),
+            Arc::new(TestFacts),
+            runtime.clone(),
+            Some(runtime),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let released = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let completed = Arc::new(AtomicBool::new(false));
+        let owner = Arc::new(
+            super::RoundTripRuntimeHandle::try_new(
+                store.clone(),
+                Arc::new(HeldRoundTripDrop {
+                    entered: entered.clone(),
+                    released: released.clone(),
+                    completed: completed.clone(),
+                }),
+                gate.clone(),
+                Arc::new(TestFacts),
+            )
+            .unwrap(),
+        );
+        // An already accepted legacy join holds this exact owner's actor lock.
+        // The composed call must retain its blocked drainer, not detach it at timeout.
+        let legacy_owner = owner.clone();
+        let legacy = tokio::task::spawn_blocking(move || legacy_owner.shutdown());
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            stopped.await.unwrap();
+            Ok(())
+        });
+        let background = [0; 2].map(|_| tokio::spawn(std::future::pending::<()>()));
+        let driver_store = store.clone();
+        let driver_owner = owner.clone();
+        let mut driver = tokio::spawn(async move {
+            super::drain_control_owners(
+                &gate,
+                (stop, server),
+                background,
+                Some(&driver_owner),
+                Some(&control),
+                &driver_store,
+            )
+            .await
+        });
+        let result = tokio::time::timeout(
+            translator_daemon::RUNTIME_CLEANUP_BUDGET + Duration::from_millis(500),
+            &mut driver,
+        )
+        .await;
+        let custody_held_at_timeout = !completed.load(Ordering::SeqCst);
+        let mix_attempted_at_timeout = !state.mix_modes.lock().unwrap().is_empty();
+        let debug_closed_at_timeout = !store.snapshot().debug_capture_enabled;
+        let mut finished = match result {
+            Ok(result) => Some(result.unwrap()),
+            Err(_) => {
+                driver.abort();
+                let _ = driver.await;
+                None
+            }
+        };
+        let retained_at_timeout = finished
+            .as_ref()
+            .and_then(|result| result.3.as_ref())
+            .is_some_and(|handle| !handle.is_finished());
+        *released.0.lock().unwrap() = true;
+        released.1.notify_all();
+        legacy.await.unwrap().unwrap();
+        if let Some(handle) = finished.as_mut().and_then(|result| result.3.take()) {
+            assert_eq!(
+                handle.await.unwrap(),
+                Err(super::RoundTripOwnerShutdownError::CleanupPending)
+            );
+        }
+        tokio::task::spawn_blocking(move || owner.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            finished.is_some(),
+            "pending accepted round-trip work must not starve independent drains forever"
+        );
+        assert!(
+            custody_held_at_timeout,
+            "the accepted native owner join must still be held at the timeout boundary"
+        );
+        assert!(
+            mix_attempted_at_timeout,
+            "the real translation mix owner must be drained after round-trip timeout"
+        );
+        assert!(debug_closed_at_timeout);
+        assert!(
+            retained_at_timeout,
+            "the exact unfinished drainer handle must remain in the returned custody packet"
+        );
+        let finished = finished.unwrap();
+        assert_eq!(
+            finished.1,
+            Err(super::RoundTripOwnerShutdownError::CleanupPending)
+        );
+        assert!(finished.2.is_ok());
     }
 
     struct RoundTripDrain(Arc<Mutex<Vec<Instant>>>);
@@ -3428,7 +5204,7 @@ mod tests {
         let completed = match tokio::time::timeout(Duration::from_millis(500), &mut driver).await {
             Ok(result) => {
                 assert_eq!(
-                    result.unwrap(),
+                    result.unwrap().0,
                     Err(super::RoundTripOwnerShutdownError::OwnerFailed)
                 );
                 true
@@ -3600,7 +5376,7 @@ mod tests {
             let command_after_shutdown = control.execute(super::ControlCommand::Start).await;
             (results, command_after_shutdown)
         });
-        let ((server_result, owner_result), command_after_shutdown) =
+        let ((server_result, owner_result, translation_result, retained), command_after_shutdown) =
             match tokio::time::timeout(Duration::from_secs(3), &mut driver).await {
                 Ok(result) => result.unwrap(),
                 Err(_) => {
@@ -3610,6 +5386,8 @@ mod tests {
                 }
             };
         assert!(server_result.is_ok());
+        assert!(translation_result.is_ok());
+        assert!(retained.is_none());
         assert_eq!(
             owner_result,
             Err(super::RoundTripOwnerShutdownError::OwnerFailed)
@@ -3719,7 +5497,9 @@ mod tests {
         let observed = Arc::clone(&cleaned);
         let driver_owner = Arc::clone(&owner);
         let mut driver = tokio::spawn(async move {
-            super::drain_round_trip(&driver_owner).await.unwrap();
+            let (result, retained) = super::drain_round_trip(&driver_owner).await;
+            result.unwrap();
+            assert!(retained.is_none());
             observed.store(true, Ordering::SeqCst);
         });
         let early_return = tokio::time::timeout(Duration::from_millis(100), &mut driver)

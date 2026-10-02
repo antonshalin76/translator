@@ -1,4 +1,4 @@
-//! Lifetime owner for a non-production, isolated AEC backend attempt.
+//! Lifetime owner for isolated AEC transport and retained native sessions.
 
 use std::{
     fs::File,
@@ -31,7 +31,11 @@ use tokio::{
     sync::{Mutex, watch},
     time::Instant,
 };
-use translator_audio::{AecBackendLink, AecBackendWindow, AecBackendWire};
+use translator_audio::{
+    AecBackendLink, AecBackendWindow, AecBackendWire, AecGraphIdentity, NativeAecEvent,
+    NativeAecHandle, NativeAecLaunchAuthority, NativeAecSource, NativeCaptureReceiver,
+    NativeMeasurementReceiver, spawn_retained_native_aec,
+};
 #[cfg(not(test))]
 use uuid::Uuid;
 
@@ -71,7 +75,42 @@ pub enum AecBackendSessionError {
 
 /// Native transport samples from an isolated synthetic graph, not an AEC proof.
 pub struct AecBackendTransportResult {
+    #[allow(dead_code)] // Exercised by the isolated diagnostic guardian harness.
     pub windows: Vec<AecBackendWindow>,
+}
+
+/// Only data/control endpoints leave the process guardian. The source stays owned.
+pub(crate) struct RetainedNativeAecAttempt {
+    pub guard: AecBackendAttempt,
+    pub handle: NativeAecHandle,
+    pub measurement: NativeMeasurementReceiver,
+    pub capture: NativeCaptureReceiver,
+}
+
+struct NativeEndpoints {
+    handle: NativeAecHandle,
+    measurement: NativeMeasurementReceiver,
+    capture: NativeCaptureReceiver,
+}
+
+struct StartedBackend {
+    group: u32,
+    native: Option<NativeEndpoints>,
+}
+
+enum BackendLaunch {
+    Transport(Box<Command>),
+    Native { lifecycle_write: Arc<File> },
+}
+
+struct PendingStart(Option<watch::Sender<bool>>);
+
+impl Drop for PendingStart {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.0 {
+            cancel.send_replace(true);
+        }
+    }
 }
 
 struct OwnerState {
@@ -281,6 +320,8 @@ pub struct AecBackendSessionOwner {
     collector_panic_gate: Option<Arc<AtomicBool>>,
     #[cfg(test)]
     startup_gate: Option<Arc<AtomicBool>>,
+    #[cfg(test)]
+    handoff_panic: bool,
 }
 
 impl Default for AecBackendSessionOwner {
@@ -307,6 +348,8 @@ impl AecBackendSessionOwner {
             collector_panic_gate: None,
             #[cfg(test)]
             startup_gate: None,
+            #[cfg(test)]
+            handoff_panic: false,
         }
     }
 
@@ -325,6 +368,7 @@ impl AecBackendSessionOwner {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn with_cleanup_signal_gate(gate: Arc<AtomicBool>) -> Self {
         let mut owner = Self::new();
         owner.cleanup_signal_gate = Some(gate);
@@ -336,12 +380,14 @@ impl AecBackendSessionOwner {
     }
 
     /// Transport progress only. It can never admit a calibration proof.
+    #[allow(dead_code)]
     pub fn verified_frames(&self) -> u64 {
         self.verified_frames.load(Ordering::Acquire)
     }
 
     /// Closes the owner to new attempts and joins its one cleanup task.
     /// A pending return retains the task for a later shutdown call.
+    #[allow(dead_code)]
     pub async fn shutdown(&self) -> AecBackendSessionStatus {
         let deadline = Instant::now() + TOTAL_CLEANUP;
         let Ok(mut control) = tokio::time::timeout_at(deadline, self.control.lock()).await else {
@@ -414,6 +460,7 @@ impl AecBackendSessionOwner {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn start_with_test_scope(
         &self,
         command: Command,
@@ -436,6 +483,7 @@ impl AecBackendSessionOwner {
     }
 
     /// Owns the runner's temporary user scope as well as its process group.
+    #[allow(dead_code)]
     pub async fn start_isolated_runner(&self) -> Result<AecBackendAttempt, AecBackendSessionError> {
         // The authority FD is exposed only to this fixed, checked-in launcher.
         let mut command = isolated_runner_command();
@@ -478,11 +526,51 @@ impl AecBackendSessionOwner {
         self.start_inner(command, Some(scope)).await
     }
 
+    pub(crate) async fn start_retained_native(
+        &self,
+    ) -> Result<RetainedNativeAecAttempt, AecBackendSessionError> {
+        let mut scope = OwnedScope::new()?;
+        let (read_fd, write_fd) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)
+            .map_err(|_| AecBackendSessionError::SpawnFailed)?;
+        scope.lifecycle_read = Some(Arc::new(File::from(read_fd)));
+        if scope.exists() {
+            return Err(AecBackendSessionError::Busy);
+        }
+        let (guard, endpoints) = self
+            .start_launch(
+                BackendLaunch::Native {
+                    lifecycle_write: Arc::new(File::from(write_fd)),
+                },
+                Some(scope),
+            )
+            .await?;
+        let Some(endpoints) = endpoints else {
+            // Dropping the existing guard cancels its one retained cleanup owner.
+            return Err(AecBackendSessionError::SpawnFailed);
+        };
+        Ok(RetainedNativeAecAttempt {
+            guard,
+            handle: endpoints.handle,
+            measurement: endpoints.measurement,
+            capture: endpoints.capture,
+        })
+    }
+
     async fn start_inner(
         &self,
-        mut command: Command,
+        command: Command,
         scope: Option<OwnedScope>,
     ) -> Result<AecBackendAttempt, AecBackendSessionError> {
+        self.start_launch(BackendLaunch::Transport(Box::new(command)), scope)
+            .await
+            .map(|(attempt, _)| attempt)
+    }
+
+    async fn start_launch(
+        &self,
+        mut launch: BackendLaunch,
+        scope: Option<OwnedScope>,
+    ) -> Result<(AecBackendAttempt, Option<NativeEndpoints>), AecBackendSessionError> {
         let mut control = self.control.lock().await;
         if control.closing {
             return Err(AecBackendSessionError::Busy);
@@ -510,18 +598,19 @@ impl AecBackendSessionOwner {
                 return Err(AecBackendSessionError::Busy);
             }
         }
-        command
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped());
-        // A private session prevents an unrelated sibling from joining this
-        // PGID after the final member scan and before leader reaping.
-        unsafe {
-            command.as_std_mut().pre_exec(|| {
-                rustix::process::setsid()
-                    .map(|_| ())
-                    .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))
-            });
+        if let BackendLaunch::Transport(command) = &mut launch {
+            command
+                .kill_on_drop(true)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped());
+            // The fixed native factory establishes the same private-session contract.
+            unsafe {
+                command.as_std_mut().pre_exec(|| {
+                    rustix::process::setsid()
+                        .map(|_| ())
+                        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))
+                });
+            }
         }
         self.verified_frames.store(0, Ordering::Release);
         state.status = AecBackendSessionStatus::Running;
@@ -543,6 +632,8 @@ impl AecBackendSessionOwner {
         let guardian_scope = scope.clone();
         #[cfg(test)]
         let startup_gate = self.startup_gate.clone();
+        #[cfg(test)]
+        let handoff_panic = self.handoff_panic;
         let task = thread::Builder::new()
             .name("translator-aec-custody".into())
             .spawn(move || {
@@ -564,8 +655,31 @@ impl AecBackendSessionOwner {
                         thread::sleep(POLL_INTERVAL);
                     }
                 }
-                let mut child = match runtime.block_on(async { command.spawn() }) {
-                    Ok(child) => child,
+                let spawned = runtime.block_on(async {
+                    match launch {
+                        BackendLaunch::Transport(mut command) => command
+                            .spawn()
+                            .map(|child| (child, None))
+                            .map_err(|_| AecBackendSessionError::SpawnFailed),
+                        BackendLaunch::Native { lifecycle_write } => {
+                            let owned = guardian_scope
+                                .as_ref()
+                                .ok_or(AecBackendSessionError::SpawnFailed)?;
+                            let result = spawn_retained_native_aec(NativeAecLaunchAuthority {
+                                scope_unit: owned.unit.clone(),
+                                session_id: owned.expected_session,
+                                lifecycle_fd: lifecycle_write.as_raw_fd(),
+                            })
+                            .await
+                            .map(|(child, source)| (child, Some(source)))
+                            .map_err(|_| AecBackendSessionError::SpawnFailed);
+                            drop(lifecycle_write);
+                            result
+                        }
+                    }
+                });
+                let (mut child, native) = match spawned {
+                    Ok(spawned) => spawned,
                     Err(_) => {
                         runtime.block_on(async {
                             guardian_shared.state.lock().await.status =
@@ -575,8 +689,8 @@ impl AecBackendSessionOwner {
                         return;
                     }
                 };
-                drop(command);
                 let Some(group) = child.id() else {
+                    drop(native);
                     runtime.block_on(async {
                         guardian_shared.state.lock().await.status =
                             AecBackendSessionStatus::CleanupPending;
@@ -595,14 +709,28 @@ impl AecBackendSessionOwner {
                     });
                     return;
                 };
-                let _ = started_tx.send(Ok(group));
                 let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    if handoff_panic {
+                        panic!("injected pre-handoff failure");
+                    }
+                    let native_start = if native.is_some() {
+                        Some(started_tx)
+                    } else {
+                        let _ = started_tx.send(Ok(StartedBackend {
+                            group,
+                            native: None,
+                        }));
+                        None
+                    };
                     runtime.block_on(run_attempt(
                         &mut child,
                         group,
                         guardian_scope.clone(),
                         cancel_rx,
                         guardian_shared.clone(),
+                        native,
+                        native_start,
                     ));
                 }));
                 if outcome.is_err() {
@@ -634,21 +762,25 @@ impl AecBackendSessionOwner {
         control.terminal = Some(terminal_rx.clone());
         control.task = Some(task);
         drop(control);
-        let group = match started_rx.await {
-            Ok(Ok(group)) => group,
+        let mut pending = PendingStart(Some(cancel_tx.clone()));
+        let started = match started_rx.await {
+            Ok(Ok(started)) => started,
             Ok(Err(error)) => return Err(error),
             Err(_) => {
-                self.state.lock().await.status = AecBackendSessionStatus::CleanupPending;
+                // The guardian may already have verified cleanup. A late API
+                // observer must not replace its authoritative lifecycle state.
                 return Err(AecBackendSessionError::SpawnFailed);
             }
         };
-        Ok(AecBackendAttempt {
+        let attempt = AecBackendAttempt {
             cancel_tx,
             terminal_rx,
             result,
             scope,
-            group,
-        })
+            group: started.group,
+        };
+        pending.0 = None;
+        Ok((attempt, started.native))
     }
 }
 
@@ -669,18 +801,23 @@ fn isolated_runner_command() -> Command {
 pub struct AecBackendAttempt {
     cancel_tx: watch::Sender<bool>,
     terminal_rx: watch::Receiver<Option<AecBackendSessionStatus>>,
+    #[allow(dead_code)]
     result: Arc<Mutex<Option<AecBackendTransportResult>>>,
+    #[allow(dead_code)] // Diagnostic scope readback; native custody stays guardian-owned.
     scope: Option<OwnedScope>,
+    #[allow(dead_code)]
     group: u32,
 }
 
 impl AecBackendAttempt {
+    #[allow(dead_code)]
     pub fn owned_scope(&self) -> Option<(&str, &std::path::Path)> {
         self.scope
             .as_ref()
             .map(|scope| (scope.unit.as_str(), scope.cgroup.as_path()))
     }
 
+    #[allow(dead_code)]
     pub fn owned_group(&self) -> u32 {
         self.group
     }
@@ -690,12 +827,14 @@ impl AecBackendAttempt {
         self.terminal().await
     }
 
+    #[allow(dead_code)]
     pub async fn wait(&self) -> AecBackendSessionStatus {
         self.terminal().await
     }
 
     /// Available only after clean EOF, successful child exit and verified cleanup.
     /// The samples remain non-admissible synthetic transport evidence.
+    #[allow(dead_code)]
     pub async fn take_nonadmissible_result(&self) -> Option<AecBackendTransportResult> {
         if *self.terminal_rx.borrow() != Some(AecBackendSessionStatus::Completed) {
             return None;
@@ -728,6 +867,10 @@ async fn run_attempt(
     scope: Option<OwnedScope>,
     mut cancel_rx: watch::Receiver<bool>,
     shared: AttemptShared,
+    mut native: Option<NativeAecSource>,
+    mut native_start: Option<
+        tokio::sync::oneshot::Sender<Result<StartedBackend, AecBackendSessionError>>,
+    >,
 ) {
     let started = Instant::now();
     let mut progress = started;
@@ -743,103 +886,119 @@ async fn run_attempt(
         panic!("injected collector failure");
     }
     let mut buffer = [0_u8; 64 * 1024];
-    let outcome = loop {
-        if scope
-            .as_ref()
-            .is_some_and(|owned| owned.bind_if_present().is_err())
-        {
-            break AecBackendSessionStatus::Invalidated;
-        }
-        if *cancel_rx.borrow_and_update() {
-            break AecBackendSessionStatus::Cancelled;
-        }
-        let Some(reader) = stdout.as_mut() else {
-            break AecBackendSessionStatus::SourceFailed;
-        };
-        tokio::select! {
-            changed = cancel_rx.changed() => {
-                if changed.is_err() || *cancel_rx.borrow_and_update() {
-                    break AecBackendSessionStatus::Cancelled;
-                }
+    let outcome = if let Some(source) = native.as_mut() {
+        collect_native(
+            source,
+            group,
+            scope.as_ref(),
+            &mut cancel_rx,
+            &shared,
+            &mut native_start,
+        )
+        .await
+    } else {
+        loop {
+            if scope
+                .as_ref()
+                .is_some_and(|owned| owned.bind_if_present().is_err())
+            {
+                break AecBackendSessionStatus::Invalidated;
             }
-            read = reader.read(&mut buffer) => {
-                match read {
-                    Ok(0) => {
-                        if wire.accepted_frames() == 0 {
-                            break AecBackendSessionStatus::SourceFailed;
-                        }
-                        if wire.finish().is_err() {
-                            break AecBackendSessionStatus::Invalidated;
-                        }
-                        if wire.accepted_frames() != TARGET_FRAMES
-                            || windows.len() != TARGET_WINDOWS
-                        {
-                            break AecBackendSessionStatus::SourceFailed;
-                        }
-                        // Observe exit without reaping the leader: its PID must remain
-                        // reserved until all descendants receive the final group signal.
-                        let exited = loop {
-                            match peek_child_exit(group) {
-                                Ok(Some(true)) => break AecBackendSessionStatus::Completed,
-                                Ok(Some(false)) | Err(()) => break AecBackendSessionStatus::SourceFailed,
-                                Ok(None) => {}
-                            }
-                            tokio::select! {
-                                changed = cancel_rx.changed() => {
-                                    if changed.is_err() || *cancel_rx.borrow_and_update() {
-                                        break AecBackendSessionStatus::Cancelled;
-                                    }
-                                }
-                                _ = tokio::time::sleep(POLL_INTERVAL) => {}
-                                _ = tokio::time::sleep_until(progress + NO_PROGRESS_BUDGET) => {
-                                    break AecBackendSessionStatus::NoProgress;
-                                }
-                                _ = tokio::time::sleep_until(started + RUN_BUDGET) => {
-                                    break AecBackendSessionStatus::TimedOut;
-                                }
-                            }
-                        };
-                        break exited;
+            if *cancel_rx.borrow_and_update() {
+                break AecBackendSessionStatus::Cancelled;
+            }
+            let Some(reader) = stdout.as_mut() else {
+                break AecBackendSessionStatus::SourceFailed;
+            };
+            tokio::select! {
+                changed = cancel_rx.changed() => {
+                    if changed.is_err() || *cancel_rx.borrow_and_update() {
+                        break AecBackendSessionStatus::Cancelled;
                     }
-                    Err(_) => break AecBackendSessionStatus::SourceFailed,
-                    Ok(count) => {
-                        let before = wire.accepted_frames();
-                        let decoded = match wire.push_bytes(&buffer[..count]) {
-                            Ok(decoded) => decoded,
-                            Err(_) => break AecBackendSessionStatus::Invalidated,
-                        };
-                        if scope.as_ref().is_some_and(|owned| {
-                            wire.identity().is_some_and(|identity| {
-                                identity.session != owned.expected_session
-                                    || identity.generation != owned.expected_session
-                            }) || wire.links().is_some_and(|links| !private_link_shape(links))
-                        }) {
-                            break AecBackendSessionStatus::Invalidated;
-                        }
-                        windows.extend(decoded);
-                        if wire.accepted_frames() > TARGET_FRAMES
-                            || windows.len() > TARGET_WINDOWS
-                        {
-                            break AecBackendSessionStatus::Invalidated;
-                        }
-                        if wire.accepted_frames() > before {
-                            if scope.as_ref().is_some_and(|owned| owned.bind().is_err()) {
+                }
+                read = reader.read(&mut buffer) => {
+                    match read {
+                        Ok(0) => {
+                            if wire.accepted_frames() == 0 {
+                                break AecBackendSessionStatus::SourceFailed;
+                            }
+                            if wire.finish().is_err() {
                                 break AecBackendSessionStatus::Invalidated;
                             }
-                            shared.verified_frames.store(wire.accepted_frames(), Ordering::Release);
-                            progress = Instant::now();
+                            if wire.accepted_frames() != TARGET_FRAMES
+                                || windows.len() != TARGET_WINDOWS
+                            {
+                                break AecBackendSessionStatus::SourceFailed;
+                            }
+                            // Observe exit without reaping the leader: its PID must remain
+                            // reserved until all descendants receive the final group signal.
+                            let exited = loop {
+                                match peek_child_exit(group) {
+                                    Ok(Some(true)) => break AecBackendSessionStatus::Completed,
+                                    Ok(Some(false)) | Err(()) => break AecBackendSessionStatus::SourceFailed,
+                                    Ok(None) => {}
+                                }
+                                tokio::select! {
+                                    changed = cancel_rx.changed() => {
+                                        if changed.is_err() || *cancel_rx.borrow_and_update() {
+                                            break AecBackendSessionStatus::Cancelled;
+                                        }
+                                    }
+                                    _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                                    _ = tokio::time::sleep_until(progress + NO_PROGRESS_BUDGET) => {
+                                        break AecBackendSessionStatus::NoProgress;
+                                    }
+                                    _ = tokio::time::sleep_until(started + RUN_BUDGET) => {
+                                        break AecBackendSessionStatus::TimedOut;
+                                    }
+                                }
+                            };
+                            break exited;
+                        }
+                        Err(_) => break AecBackendSessionStatus::SourceFailed,
+                        Ok(count) => {
+                            let before = wire.accepted_frames();
+                            let decoded = match wire.push_bytes(&buffer[..count]) {
+                                Ok(decoded) => decoded,
+                                Err(_) => break AecBackendSessionStatus::Invalidated,
+                            };
+                            if scope.as_ref().is_some_and(|owned| {
+                                wire.identity().is_some_and(|identity| {
+                                    identity.session != owned.expected_session
+                                        || identity.generation != owned.expected_session
+                                }) || wire.links().is_some_and(|links| !private_link_shape(links))
+                            }) {
+                                break AecBackendSessionStatus::Invalidated;
+                            }
+                            windows.extend(decoded);
+                            if wire.accepted_frames() > TARGET_FRAMES
+                                || windows.len() > TARGET_WINDOWS
+                            {
+                                break AecBackendSessionStatus::Invalidated;
+                            }
+                            if wire.accepted_frames() > before {
+                                if scope.as_ref().is_some_and(|owned| owned.bind().is_err()) {
+                                    break AecBackendSessionStatus::Invalidated;
+                                }
+                                shared.verified_frames.store(wire.accepted_frames(), Ordering::Release);
+                                progress = Instant::now();
+                            }
                         }
                     }
                 }
-            }
-            _ = tokio::time::sleep_until(progress + NO_PROGRESS_BUDGET) => {
-                break AecBackendSessionStatus::NoProgress;
-            }
-            _ = tokio::time::sleep_until(started + RUN_BUDGET) => {
-                break AecBackendSessionStatus::TimedOut;
+                _ = tokio::time::sleep_until(progress + NO_PROGRESS_BUDGET) => {
+                    break AecBackendSessionStatus::NoProgress;
+                }
+                _ = tokio::time::sleep_until(started + RUN_BUDGET) => {
+                    break AecBackendSessionStatus::TimedOut;
+                }
             }
         }
     };
+
+    if let Some(started) = native_start.take() {
+        let _ = started.send(Err(AecBackendSessionError::SpawnFailed));
+    }
 
     shared.state.lock().await.status = AecBackendSessionStatus::CleanupPending;
     if let Some(scope) = scope.as_ref() {
@@ -847,6 +1006,9 @@ async fn run_attempt(
     }
     // Dropping a reader cannot leave a blocking read holding the process owner.
     drop(stdout);
+    // Native source drop closes command stdin for cooperative STOP; only this
+    // guardian can signal, reap or release the actual child and scope.
+    drop(native);
     if let Some(exit_status) =
         cleanup_group(child, group, scope.as_ref(), &shared.cleanup_signal_gate).await
     {
@@ -870,6 +1032,93 @@ async fn run_attempt(
         .terminal_tx
         .send_replace(Some(AecBackendSessionStatus::CleanupPending));
     retain_cleanup(child, group, scope.as_ref(), &shared).await;
+}
+
+async fn collect_native(
+    source: &mut NativeAecSource,
+    group: u32,
+    scope: Option<&OwnedScope>,
+    cancel_rx: &mut watch::Receiver<bool>,
+    shared: &AttemptShared,
+    started: &mut Option<
+        tokio::sync::oneshot::Sender<Result<StartedBackend, AecBackendSessionError>>,
+    >,
+) -> AecBackendSessionStatus {
+    let Some(scope) = scope else {
+        return AecBackendSessionStatus::Invalidated;
+    };
+    let mut progress = Instant::now();
+    let mut ready = false;
+    let mut adc_frames = 0;
+    loop {
+        if *cancel_rx.borrow_and_update() {
+            return AecBackendSessionStatus::Cancelled;
+        }
+        if scope.bind_if_present().is_err()
+            || (ready
+                && (scope.bind().is_err()
+                    || !scope.manager_terminal()
+                    || scope.manager_state.load(Ordering::Acquire) != MANAGER_ADMITTED))
+        {
+            return AecBackendSessionStatus::Invalidated;
+        }
+        let deadline = progress + NO_PROGRESS_BUDGET;
+        tokio::select! {
+            biased;
+            changed = cancel_rx.changed() => {
+                if changed.is_err() || *cancel_rx.borrow_and_update() {
+                    return AecBackendSessionStatus::Cancelled;
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return AecBackendSessionStatus::NoProgress;
+            }
+            event = source.next_event(deadline) => {
+                match event {
+                    Ok(NativeAecEvent::Ready(identity)) => {
+                        let session_is_private = group_pid(group).is_some_and(|pid| {
+                            rustix::process::getsid(Some(pid)).is_ok_and(|sid| sid == pid)
+                                && rustix::process::getpgid(Some(pid)).is_ok_and(|pgid| pgid == pid)
+                        });
+                        if ready
+                            || !identity.graph.is_valid()
+                            || !matches!(identity.graph, AecGraphIdentity::Native { session_id, generation, .. }
+                                if session_id == scope.expected_session && generation != 0)
+                            || !session_is_private
+                            || !scope.manager_terminal()
+                            || scope.manager_state.load(Ordering::Acquire) != MANAGER_ADMITTED
+                            || scope.bind().is_err()
+                        {
+                            return AecBackendSessionStatus::Invalidated;
+                        }
+                        ready = true;
+                    }
+                    Ok(NativeAecEvent::Progress { adc_frames: observed }) => {
+                        if !ready || observed <= adc_frames {
+                            return AecBackendSessionStatus::Invalidated;
+                        }
+                        adc_frames = observed;
+                        shared.verified_frames.store(observed, Ordering::Release);
+                        progress = Instant::now();
+                        if let Some(sender) = started.take() {
+                            let endpoints = match (source.take_measurement(), source.take_capture()) {
+                                (Ok(measurement), Ok(capture)) => NativeEndpoints {
+                                    handle: source.handle(), measurement, capture,
+                                },
+                                _ => return AecBackendSessionStatus::Invalidated,
+                            };
+                            if sender.send(Ok(StartedBackend { group, native: Some(endpoints) })).is_err() {
+                                return AecBackendSessionStatus::Cancelled;
+                            }
+                        }
+                    }
+                    Ok(NativeAecEvent::Poisoned) => return AecBackendSessionStatus::Invalidated,
+                    Err(translator_audio::NativeAecError::Deadline) => return AecBackendSessionStatus::NoProgress,
+                    Err(_) => return AecBackendSessionStatus::SourceFailed,
+                }
+            }
+        }
+    }
 }
 
 async fn retain_cleanup(
@@ -1523,6 +1772,91 @@ mod scope_tests {
         assert_eq!(attempt.wait().await, AecBackendSessionStatus::Cancelled);
         assert_eq!(owner.shutdown().await, AecBackendSessionStatus::Cancelled);
         assert_eq!(group_exists(group), Ok(false));
+    }
+
+    #[tokio::test]
+    async fn abandoned_startup_requests_cancel_without_losing_custody() {
+        struct ReleaseGate(Arc<AtomicBool>);
+        impl Drop for ReleaseGate {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+
+        let gate = Arc::new(AtomicBool::new(true));
+        let _release_on_failure = ReleaseGate(Arc::clone(&gate));
+        let owner = AecBackendSessionOwner::with_startup_gate(Arc::clone(&gate));
+        let start_owner = owner.clone();
+        let start = tokio::spawn(async move {
+            let mut command = Command::new("/usr/bin/sleep");
+            command.arg("30");
+            start_owner.start(command).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while owner.control.lock().await.task.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup did not reach guardian");
+        start.abort();
+        assert!(
+            start
+                .await
+                .err()
+                .expect("startup was not aborted")
+                .is_cancelled()
+        );
+        gate.store(false, Ordering::Release);
+        let reclaimed = tokio::time::timeout(Duration::from_secs(3), async {
+            while owner.status().await != AecBackendSessionStatus::Idle {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await;
+        let terminal = owner.shutdown().await;
+        assert!(
+            reclaimed.is_ok(),
+            "abandoned startup left its source running"
+        );
+        assert_eq!(terminal, AecBackendSessionStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn late_failed_handoff_cannot_overwrite_guardian_cleanup() {
+        struct ReleaseGate(Arc<AtomicBool>);
+        impl Drop for ReleaseGate {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+
+        let gate = Arc::new(AtomicBool::new(true));
+        let _release_on_failure = ReleaseGate(Arc::clone(&gate));
+        let mut owner = AecBackendSessionOwner::with_startup_gate(Arc::clone(&gate));
+        owner.handoff_panic = true;
+        let mut command = Command::new("/usr/bin/sleep");
+        command.arg("30");
+        let mut start = Box::pin(owner.start(command));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(start.as_mut().poll(&mut context).is_pending());
+        gate.store(false, Ordering::Release);
+        let reclaimed = tokio::time::timeout(Duration::from_secs(3), async {
+            while owner.status().await != AecBackendSessionStatus::Idle {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await;
+        let failed = matches!(start.await, Err(AecBackendSessionError::SpawnFailed));
+        let after_handoff = owner.status().await;
+        let terminal = owner.shutdown().await;
+        assert!(
+            reclaimed.is_ok(),
+            "guardian did not clean up pre-handoff panic"
+        );
+        assert!(failed, "panicked startup unexpectedly handed off a source");
+        assert_eq!(after_handoff, AecBackendSessionStatus::Idle);
+        assert_eq!(terminal, AecBackendSessionStatus::Idle);
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ enum DaemonCommand {
     Status,
     StartTranslation,
     StopTranslation,
+    ConfirmHeadphones,
     PatchDebugText,
     PatchDebugCapture,
     PatchDirection,
@@ -114,6 +115,20 @@ impl UiError {
 }
 
 fn main() {
+    let context = tauri::generate_context!();
+    if env::args().any(|argument| argument == "--check-bundled-ui") {
+        if tauri::is_dev()
+            || context
+                .assets()
+                .get(&"index.html".into())
+                .is_none_or(|asset| asset.is_empty())
+        {
+            eprintln!("bundled UI assets are unavailable");
+            std::process::exit(78);
+        }
+        println!("bundled-ui-ok");
+        return;
+    }
     tauri::Builder::default()
         .setup(setup_tray)
         .on_window_event(|window, event| {
@@ -133,6 +148,7 @@ fn main() {
             translator_set_direction,
             translator_set_provider,
             translator_set_audio_mix,
+            translator_confirm_headphones,
             translator_set_latency_mode,
             translator_set_voice_profile,
             translator_select_route,
@@ -143,7 +159,7 @@ fn main() {
             translator_start_aec_calibration,
             translator_cancel_aec_calibration,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run translator UI");
 }
 
@@ -160,6 +176,18 @@ fn translator_start(app: AppHandle) -> Result<Value, UiError> {
 #[tauri::command]
 fn translator_stop(app: AppHandle) -> Result<Value, UiError> {
     daemon_request_from_webview(&app, DaemonCommand::StopTranslation, None)
+}
+
+#[tauri::command]
+fn translator_confirm_headphones(
+    app: AppHandle,
+    confirmation: Option<Value>,
+) -> Result<Value, UiError> {
+    daemon_request_from_webview(
+        &app,
+        DaemonCommand::ConfirmHeadphones,
+        Some(confirmation.unwrap_or(Value::Null)),
+    )
 }
 
 #[tauri::command]
@@ -967,6 +995,7 @@ fn daemon_endpoint(command: DaemonCommand) -> (HttpMethod, &'static str) {
         DaemonCommand::Status => (HttpMethod::Get, "/v1/status"),
         DaemonCommand::StartTranslation => (HttpMethod::Post, "/v1/translation/start"),
         DaemonCommand::StopTranslation => (HttpMethod::Post, "/v1/translation/stop"),
+        DaemonCommand::ConfirmHeadphones => (HttpMethod::Post, "/v1/devices/headphones"),
         DaemonCommand::PatchDebugText => (HttpMethod::Patch, "/v1/debug-text"),
         DaemonCommand::PatchDebugCapture => (HttpMethod::Patch, "/v1/debug-capture"),
         DaemonCommand::PatchDirection => (HttpMethod::Patch, "/v1/directions"),
@@ -1227,6 +1256,10 @@ mod tests {
 
     #[test]
     fn webview_commands_refresh_tray_when_their_state_is_visible_in_the_menu() {
+        assert_eq!(
+            daemon_endpoint(DaemonCommand::ConfirmHeadphones),
+            (HttpMethod::Post, "/v1/devices/headphones"),
+        );
         for command in [
             DaemonCommand::StartTranslation,
             DaemonCommand::StopTranslation,

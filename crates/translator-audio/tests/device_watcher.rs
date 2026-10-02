@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use translator_audio::{
     AecCapability, CommandResult, CommandRunError, CommandRunner, DeviceHealth, DeviceOverride,
-    DeviceWatcher, DeviceWatcherError, DeviceWatcherErrorCode, OutputMode, PhysicalDevice,
-    PulseDeviceWatcher, SinkGraphValidator,
+    DeviceWatcher, DeviceWatcherError, DeviceWatcherErrorCode, HeadphoneConfirmation, OutputMode,
+    PhysicalDevice, PulseDeviceWatcher, SinkGraphValidator,
 };
 
 #[derive(Clone)]
@@ -219,6 +219,170 @@ impl CommandRunner for FreshFactsRunner {
         };
         Ok(CommandResult::success(result.into_bytes()))
     }
+}
+
+fn generic_headphone_runner() -> FreshFactsRunner {
+    let runner = FreshFactsRunner::new();
+    {
+        let mut snapshot = runner.snapshot.lock().unwrap();
+        snapshot.sinks[0]["active_port"] = "analog-output".into();
+        snapshot.sinks[0]["ports"][0]["name"] = "analog-output".into();
+        snapshot.sinks[0]["ports"][0]["type"] = "Analog".into();
+    }
+    runner
+}
+
+fn confirm_current_headphones(
+    watcher: &mut PulseDeviceWatcher<FreshFactsRunner>,
+) -> translator_audio::DeviceFacts {
+    let observed = watcher.reconcile(DeviceOverride::default()).unwrap();
+    watcher
+        .confirm_headphones_until(
+            Some(HeadphoneConfirmation {
+                source: observed.source.selected.unwrap(),
+                sink: observed.sink.selected.unwrap(),
+            }),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+}
+
+#[test]
+fn user_headphones_bind_current_pair_without_fabricating_port_facts() {
+    let runner = generic_headphone_runner();
+    let mut watcher = PulseDeviceWatcher::new(runner, AecCapability::Unavailable);
+    let before = watcher.reconcile(DeviceOverride::default()).unwrap();
+    assert_eq!(before.output_mode, OutputMode::UnknownUnsafe);
+    let confirmed = confirm_current_headphones(&mut watcher);
+    assert_eq!(confirmed.output_mode, OutputMode::UserConfirmedHeadphones);
+    assert_eq!(confirmed.source, before.source);
+    assert_eq!(confirmed.sink, before.sink);
+    assert_eq!(confirmed.aec_capability, AecCapability::Unavailable);
+    assert_eq!(
+        watcher.read_facts().unwrap().output_mode,
+        confirmed.output_mode
+    );
+    let revoked = watcher
+        .confirm_headphones_until(None, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(revoked.output_mode, OutputMode::UnknownUnsafe);
+    assert_eq!(revoked.source, before.source);
+    assert_eq!(revoked.sink, before.sink);
+}
+
+#[test]
+fn user_headphones_reject_stale_pair_and_known_speaker() {
+    for mismatch in ["source_id", "sink_id", "port", "speaker"] {
+        let runner = generic_headphone_runner();
+        let mut watcher = PulseDeviceWatcher::new(runner.clone(), AecCapability::Unavailable);
+        let observed = watcher.reconcile(DeviceOverride::default()).unwrap();
+        let mut expected = HeadphoneConfirmation {
+            source: observed.source.selected.unwrap(),
+            sink: observed.sink.selected.unwrap(),
+        };
+        match mismatch {
+            "source_id" => expected.source.id += 1,
+            "sink_id" => expected.sink.id += 1,
+            "port" => expected.sink.active_port = Some("other-port".into()),
+            "speaker" => {
+                runner.snapshot.lock().unwrap().sinks[0]["ports"][0]["type"] = "Speaker".into();
+                expected.sink.active_port_type = Some("Speaker".into());
+            }
+            _ => unreachable!(),
+        }
+        let error = watcher
+            .confirm_headphones_until(Some(expected), Instant::now() + Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            DeviceWatcherErrorCode::InvalidPhysicalDevice,
+            "{mismatch}"
+        );
+        assert_ne!(
+            watcher.read_facts().unwrap().output_mode,
+            OutputMode::UserConfirmedHeadphones
+        );
+    }
+}
+
+#[test]
+fn user_headphones_readonly_observation_permanently_revokes_changed_pair() {
+    for change in [
+        "source_id",
+        "sink_id",
+        "source_port",
+        "sink_port",
+        "unavailable",
+    ] {
+        let runner = generic_headphone_runner();
+        let mut watcher = PulseDeviceWatcher::new(runner.clone(), AecCapability::Unavailable);
+        confirm_current_headphones(&mut watcher);
+        let original = runner.snapshot.lock().unwrap().clone();
+        {
+            let mut snapshot = runner.snapshot.lock().unwrap();
+            match change {
+                "source_id" => snapshot.sources[0]["index"] = 142.into(),
+                "sink_id" => snapshot.sinks[0]["index"] = 141.into(),
+                "source_port" => snapshot.sources[0]["active_port"] = "other-mic".into(),
+                "sink_port" => snapshot.sinks[0]["active_port"] = "other-output".into(),
+                "unavailable" => {
+                    snapshot.sinks[0]["ports"][0]["availability"] = "not available".into()
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert_ne!(
+            watcher.read_facts().unwrap().output_mode,
+            OutputMode::UserConfirmedHeadphones,
+            "{change}"
+        );
+        *runner.snapshot.lock().unwrap() = original;
+        assert_eq!(
+            watcher.read_facts().unwrap().output_mode,
+            OutputMode::UnknownUnsafe,
+            "binding must not revive: {change}"
+        );
+    }
+}
+
+#[test]
+fn user_headphones_discovery_and_deadline_failures_revoke_binding() {
+    for failure in ["discovery", "deadline"] {
+        let runner = generic_headphone_runner();
+        let mut watcher = PulseDeviceWatcher::new(runner.clone(), AecCapability::Unavailable);
+        confirm_current_headphones(&mut watcher);
+        let original = runner.snapshot.lock().unwrap().clone();
+        if failure == "discovery" {
+            runner.snapshot.lock().unwrap().sinks[0]["monitor_source"] = 17.into();
+        }
+        let deadline = if failure == "deadline" {
+            Instant::now()
+        } else {
+            Instant::now() + Duration::from_secs(1)
+        };
+        assert!(watcher.read_facts_until(deadline).is_err());
+        *runner.snapshot.lock().unwrap() = original;
+        assert_eq!(
+            watcher.read_facts().unwrap().output_mode,
+            OutputMode::UnknownUnsafe,
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn user_headphones_restart_never_restores_confirmation() {
+    let runner = generic_headphone_runner();
+    let mut watcher = PulseDeviceWatcher::new(runner.clone(), AecCapability::Unavailable);
+    confirm_current_headphones(&mut watcher);
+    let mut restarted = PulseDeviceWatcher::new(runner, AecCapability::Unavailable);
+    assert_eq!(
+        restarted
+            .reconcile(DeviceOverride::default())
+            .unwrap()
+            .output_mode,
+        OutputMode::UnknownUnsafe
+    );
 }
 
 #[derive(Clone)]

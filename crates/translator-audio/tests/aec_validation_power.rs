@@ -16,6 +16,7 @@ fn acquisition(id: &str, power: f64) -> AecPowerAcquisition {
 
 fn observation() -> AecObservationEvidence {
     AecObservationEvidence {
+        native_timing: None,
         observer_generation: "observer-1".to_owned(),
         calibration_attempt_id: "attempt-1".to_owned(),
         challenge_id: "challenge-1".to_owned(),
@@ -76,9 +77,11 @@ fn measurement_binding() -> AecMeasurementBinding {
         sink_muted: false,
         source_geometry: "desk-left-45cm".into(),
         sink_geometry: "desk-front-80cm".into(),
-        aec_module_id: 73,
-        aec_source_id: 81,
-        aec_sink_id: 82,
+        graph: translator_audio::AecGraphIdentity::PulseModule {
+            module_id: 73,
+            source_id: 81,
+            sink_id: 82,
+        },
         aec_generation: "aec-generation-1".into(),
         aec_config_id: "webrtc-48k-mono-v1".into(),
         vad_config_id: "vad-v1".into(),

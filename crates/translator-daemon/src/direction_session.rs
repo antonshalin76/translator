@@ -171,6 +171,10 @@ impl DirectionSession {
         self.contract.stream_id
     }
 
+    pub(crate) fn is_drained(&self) -> bool {
+        self.collecting_utterance.is_none() && self.active_utterances.is_empty()
+    }
+
     pub const fn provider_contract(&self) -> &ProviderSessionContract {
         &self.contract
     }

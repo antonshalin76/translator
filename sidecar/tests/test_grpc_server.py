@@ -312,6 +312,27 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
+@pytest.fixture(params=(0o022, 0o077), ids=("umask022", "umask077"))
+def filesystem_umask(request: pytest.FixtureRequest) -> Iterator[int]:
+    previous = os.umask(request.param)
+    try:
+        yield request.param
+    finally:
+        os.umask(previous)
+
+
+async def _assert_startup_rejected(
+    server: ProviderGrpcServer, error: type[BaseException], *, match: str | None = None
+) -> None:
+    try:
+        with pytest.raises(error, match=match):
+            await server.start()
+    finally:
+        await server.stop()
+        assert server._server is None
+        assert server._parent_fd is None
+
+
 def open_request(
     session_id: UUID,
     direction: int = provider_pb2.AUDIO_DIRECTION_MICROPHONE,
@@ -598,23 +619,38 @@ def test_invalid_stream_auth_is_rejected_before_request_iteration(
 
 
 def test_uds_parent_and_existing_inode_checks_fail_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filesystem_umask: int
 ) -> None:
     insecure_parent = tmp_path / "insecure"
     insecure_parent.mkdir(mode=0o755)
+    insecure_parent.chmod(0o755)
+    assert stat.S_IMODE(insecure_parent.stat().st_mode) == 0o755
     insecure = SidecarServerConfig(
         socket_path=insecure_parent / "provider.sock",
         token=TOKEN,
         generation_id=uuid4(),
         now_ns=lambda: 0,
     )
-    with pytest.raises(PermissionError, match="0700"):
-        run(ProviderGrpcServer(insecure).start())
+    native_factory = grpc.aio.server
+    native_calls = 0
+
+    def construct_native(**kwargs):
+        nonlocal native_calls
+        native_calls += 1
+        return native_factory(**kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(grpc.aio, "server", construct_native)
+        run(
+            _assert_startup_rejected(
+                ProviderGrpcServer(insecure), PermissionError, match="0700"
+            )
+        )
+    assert native_calls == 0
 
     config = secure_config(tmp_path)
     config.socket_path.write_text("foreign")
-    with pytest.raises(FileExistsError):
-        run(ProviderGrpcServer(config).start())
+    run(_assert_startup_rejected(ProviderGrpcServer(config), FileExistsError))
     assert config.socket_path.read_text() == "foreign"
 
     symlink_parent_target = tmp_path / "real-parent"
@@ -627,8 +663,11 @@ def test_uds_parent_and_existing_inode_checks_fail_closed(
         generation_id=uuid4(),
         now_ns=lambda: 0,
     )
-    with pytest.raises(PermissionError, match="real directory"):
-        run(ProviderGrpcServer(linked_config).start())
+    run(
+        _assert_startup_rejected(
+            ProviderGrpcServer(linked_config), PermissionError, match="real directory"
+        )
+    )
 
     real_ancestor = tmp_path / "real-ancestor"
     real_ancestor.mkdir(mode=0o700)
@@ -642,8 +681,11 @@ def test_uds_parent_and_existing_inode_checks_fail_closed(
         generation_id=uuid4(),
         now_ns=lambda: 0,
     )
-    with pytest.raises(PermissionError, match="real directory"):
-        run(ProviderGrpcServer(ancestor_config).start())
+    run(
+        _assert_startup_rejected(
+            ProviderGrpcServer(ancestor_config), PermissionError, match="real directory"
+        )
+    )
 
     real_parent = tmp_path / "socket-symlink-parent"
     real_parent.mkdir(mode=0o700)
@@ -656,8 +698,7 @@ def test_uds_parent_and_existing_inode_checks_fail_closed(
         generation_id=uuid4(),
         now_ns=lambda: 0,
     )
-    with pytest.raises(FileExistsError):
-        run(ProviderGrpcServer(symlink_config).start())
+    run(_assert_startup_rejected(ProviderGrpcServer(symlink_config), FileExistsError))
     assert socket_symlink.is_symlink()
 
     parent_file = tmp_path / "not-a-directory"
@@ -668,19 +709,35 @@ def test_uds_parent_and_existing_inode_checks_fail_closed(
         generation_id=uuid4(),
         now_ns=lambda: 0,
     )
-    with pytest.raises(NotADirectoryError):
-        run(ProviderGrpcServer(file_parent_config).start())
+    run(
+        _assert_startup_rejected(
+            ProviderGrpcServer(file_parent_config), NotADirectoryError
+        )
+    )
 
     owner_config = secure_config(tmp_path / "owner")
     monkeypatch.setattr(
         os, "getuid", lambda: owner_config.socket_path.parent.stat().st_uid + 1
     )
-    with pytest.raises(PermissionError, match="owner"):
-        run(ProviderGrpcServer(owner_config).start())
+    run(
+        _assert_startup_rejected(
+            ProviderGrpcServer(owner_config), PermissionError, match="owner"
+        )
+    )
+
+
+def test_rejected_start_fixture_cleans_unexpected_native_success(
+    tmp_path: Path, filesystem_umask: int
+) -> None:
+    server = ProviderGrpcServer(secure_config(tmp_path))
+    with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
+        run(_assert_startup_rejected(server, PermissionError))
+    assert server._server is None
+    assert server._parent_fd is None
 
 
 def test_server_binds_private_socket_and_rejects_invalid_config(
-    tmp_path: Path,
+    tmp_path: Path, filesystem_umask: int
 ) -> None:
     async def scenario() -> None:
         config = secure_config(tmp_path)
@@ -713,6 +770,7 @@ def test_startup_failure_rolls_back_native_server_and_parent_fd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
+    filesystem_umask: int,
 ) -> None:
     instances = []
     native_factory = grpc.aio.server

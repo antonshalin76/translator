@@ -124,6 +124,44 @@ impl AudioOperationLease {
         self.expected_state
     }
 
+    pub(crate) fn handoff_production(&mut self) -> Result<(), AudioOperationAdmissionError> {
+        if !matches!(self.expected_state, AudioOperationState::Calibration { .. }) {
+            return Err(AudioOperationAdmissionError::Busy {
+                state: self.expected_state,
+            });
+        }
+        self.handoff(AudioOperationState::Production)
+    }
+
+    pub(crate) fn return_calibration(
+        &mut self,
+        attempt_id: Uuid,
+    ) -> Result<(), AudioOperationAdmissionError> {
+        if self.expected_state != AudioOperationState::Production {
+            return Err(AudioOperationAdmissionError::Busy {
+                state: self.expected_state,
+            });
+        }
+        self.handoff(AudioOperationState::Calibration { attempt_id })
+    }
+
+    fn handoff(
+        &mut self,
+        requested: AudioOperationState,
+    ) -> Result<(), AudioOperationAdmissionError> {
+        let mut inner = lock_recovering(&self.inner);
+        if inner.state == AudioOperationState::Stopping {
+            return Err(AudioOperationAdmissionError::Stopping);
+        }
+        if !self.active || inner.generation != self.generation || inner.state != self.expected_state
+        {
+            return Err(AudioOperationAdmissionError::Busy { state: inner.state });
+        }
+        inner.state = requested;
+        self.expected_state = requested;
+        Ok(())
+    }
+
     pub fn relabel_calibration(
         &mut self,
         attempt_id: Uuid,

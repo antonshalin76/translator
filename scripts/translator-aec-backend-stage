@@ -27,7 +27,10 @@ BACKEND = ROOT / "target/debug/translator-aec-backend"
 FIXTURE = ROOT / "target/debug/translator-aec-fixture"
 WITNESS = ROOT / "target/debug/translator-aec-witness"
 PLUGIN = Path("/usr/lib/x86_64-linux-gnu/spa-0.2/aec/libspa-aec-webrtc.so")
-LIBRARIES = (Path("/usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0"),)
+LIBRARIES = tuple(Path("/usr/lib/x86_64-linux-gnu") / name for name in (
+    "libpipewire-0.3.so.0", "libasound.so.2", "libspeexdsp.so.1",
+    "libcrypto.so.3", "libseccomp.so.2",
+))
 GI_MODULE = Path("/usr/lib/python3/dist-packages/gi")
 GI_FILES = tuple(
     sorted(path for path in GI_MODULE.rglob("*") if path.suffix in (".py", ".so"))
@@ -70,12 +73,27 @@ SOURCES = (
     Path(__file__),
     ROOT / "crates/translator-aec-backend/build.rs",
     ROOT / "crates/translator-aec-backend/src/native.c",
+    ROOT / "crates/translator-aec-backend/src/main.rs",
+    ROOT / "crates/translator-aec-backend/src/physical.c",
+    ROOT / "crates/translator-aec-backend/src/control_policy.c",
     ROOT / "crates/translator-aec-backend/src/callback_history.h",
     ROOT / "crates/translator-aec-backend/src/fixture.c",
     ROOT / "crates/translator-aec-backend/src/witness.c",
     ROOT / "crates/translator-audio/src/aec_backend.rs",
+    ROOT / "crates/translator-audio/src/aec_native_source.rs",
+    ROOT / "crates/translator-audio/src/aec_measurement.rs",
+    ROOT / "crates/translator-audio/src/aec_validation.rs",
     ROOT / "crates/translator-audio/tests/aec_backend_wire.rs",
     ROOT / "crates/translator-daemon/src/aec_backend_session.rs",
+    ROOT / "crates/translator-daemon/src/aec_native_engine.rs",
+    ROOT / "crates/translator-daemon/src/aec_runtime_observer.rs",
+    ROOT / "crates/translator-daemon/src/aec_validation.rs",
+    ROOT / "crates/translator-daemon/src/aec_validation_control.rs",
+    ROOT / "crates/translator-daemon/src/aec_admission.rs",
+    ROOT / "crates/translator-daemon/src/acoustic_admission.rs",
+    ROOT / "crates/translator-daemon/src/audio_operation_gate.rs",
+    ROOT / "crates/translator-daemon/src/translation_runtime.rs",
+    ROOT / "crates/translator-daemon/src/main.rs",
     ROOT / "crates/translator-daemon/tests/aec_backend_session.rs",
     ROOT / "Cargo.lock",
 )

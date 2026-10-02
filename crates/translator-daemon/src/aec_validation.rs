@@ -54,9 +54,7 @@ pub struct AecProofBinding {
     pub sink_muted: bool,
     pub source_geometry: String,
     pub sink_geometry: String,
-    pub aec_module_id: u32,
-    pub aec_source_id: u32,
-    pub aec_sink_id: u32,
+    pub graph: translator_audio::AecGraphIdentity,
     pub aec_generation: String,
     pub aec_config_id: String,
     pub vad_config_id: String,
@@ -84,9 +82,7 @@ impl AecProofBinding {
         .all(|value| !value.trim().is_empty())
             && !self.source_channel_gains.is_empty()
             && !self.sink_channel_gains.is_empty()
-            && self.aec_module_id != 0
-            && self.aec_source_id != 0
-            && self.aec_sink_id != 0
+            && self.graph.is_valid()
     }
 
     pub(crate) fn measurement_binding(&self) -> AecMeasurementBinding {
@@ -104,9 +100,7 @@ impl AecProofBinding {
             sink_muted: self.sink_muted,
             source_geometry: self.source_geometry.clone(),
             sink_geometry: self.sink_geometry.clone(),
-            aec_module_id: self.aec_module_id,
-            aec_source_id: self.aec_source_id,
-            aec_sink_id: self.aec_sink_id,
+            graph: self.graph.clone(),
             aec_generation: self.aec_generation.clone(),
             aec_config_id: self.aec_config_id.clone(),
             vad_config_id: self.vad_config_id.clone(),
@@ -576,7 +570,15 @@ impl AecCalibrationCoordinator {
     }
 
     pub fn status(&self) -> AecProofStatus {
-        self.lock().status.clone()
+        let mut state = self.lock();
+        if state
+            .proof
+            .as_ref()
+            .is_some_and(|proof| self.clock.now_ns() >= proof.expires_at_ns)
+        {
+            self.revoke_locked(&mut state);
+        }
+        state.status.clone()
     }
 
     pub fn capability(&self) -> AecCapability {
@@ -657,9 +659,11 @@ mod tests {
             sink_muted: false,
             source_geometry: "desk-left-45cm".into(),
             sink_geometry: "desk-front-80cm".into(),
-            aec_module_id: 73,
-            aec_source_id: 81,
-            aec_sink_id: 82,
+            graph: translator_audio::AecGraphIdentity::PulseModule {
+                module_id: 73,
+                source_id: 81,
+                sink_id: 82,
+            },
             aec_generation: "aec-generation-1".into(),
             aec_config_id: "webrtc-48k-mono-v1".into(),
             vad_config_id: "vad-v1".into(),
@@ -707,6 +711,7 @@ mod tests {
                 })
                 .collect(),
             observation: AecObservationEvidence {
+                native_timing: None,
                 observer_generation: "observer-1".into(),
                 calibration_attempt_id: challenge.attempt_id.to_string(),
                 challenge_id: challenge.challenge_id.to_string(),
@@ -811,6 +816,18 @@ mod tests {
     }
 
     #[test]
+    fn status_projection_revokes_expired_proof_without_a_start_request() {
+        let (coordinator, _, clock) = published();
+        let mut revocations = coordinator.subscribe_revocations();
+        clock.set(10_000_000_000 + AEC_OBSERVATION_DURATION_NS + AEC_PROOF_LIFETIME_NS);
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert!(revocations.has_changed().unwrap());
+        revocations.borrow_and_update();
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert!(!revocations.has_changed().unwrap());
+    }
+
+    #[test]
     fn proof_ttl_is_valid_one_tick_before_expiry() {
         let (coordinator, binding, clock) = published();
         clock.set(10_000_000_000 + AEC_OBSERVATION_DURATION_NS + AEC_PROOF_LIFETIME_NS - 1);
@@ -864,9 +881,27 @@ mod tests {
             |value| value.sink_muted = !value.sink_muted,
             |value| value.source_geometry.push_str("-changed"),
             |value| value.sink_geometry.push_str("-changed"),
-            |value| value.aec_module_id += 1,
-            |value| value.aec_source_id += 1,
-            |value| value.aec_sink_id += 1,
+            |value| {
+                if let translator_audio::AecGraphIdentity::PulseModule { module_id, .. } =
+                    &mut value.graph
+                {
+                    *module_id += 1;
+                }
+            },
+            |value| {
+                if let translator_audio::AecGraphIdentity::PulseModule { source_id, .. } =
+                    &mut value.graph
+                {
+                    *source_id += 1;
+                }
+            },
+            |value| {
+                if let translator_audio::AecGraphIdentity::PulseModule { sink_id, .. } =
+                    &mut value.graph
+                {
+                    *sink_id += 1;
+                }
+            },
             |value| value.aec_generation.push_str("-changed"),
             |value| value.aec_config_id.push_str("-changed"),
             |value| value.vad_config_id.push_str("-changed"),
@@ -916,9 +951,27 @@ mod tests {
             |value| value.sink_muted = !value.sink_muted,
             |value| value.source_geometry.push_str("-changed"),
             |value| value.sink_geometry.push_str("-changed"),
-            |value| value.aec_module_id += 1,
-            |value| value.aec_source_id += 1,
-            |value| value.aec_sink_id += 1,
+            |value| {
+                if let translator_audio::AecGraphIdentity::PulseModule { module_id, .. } =
+                    &mut value.graph
+                {
+                    *module_id += 1;
+                }
+            },
+            |value| {
+                if let translator_audio::AecGraphIdentity::PulseModule { source_id, .. } =
+                    &mut value.graph
+                {
+                    *source_id += 1;
+                }
+            },
+            |value| {
+                if let translator_audio::AecGraphIdentity::PulseModule { sink_id, .. } =
+                    &mut value.graph
+                {
+                    *sink_id += 1;
+                }
+            },
             |value| value.aec_generation.push_str("-changed"),
             |value| value.aec_config_id.push_str("-changed"),
             |value| value.vad_config_id.push_str("-changed"),

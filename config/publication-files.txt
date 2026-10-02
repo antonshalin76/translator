@@ -32,10 +32,12 @@ crates/translator-aec-backend/Cargo.toml
 crates/translator-aec-backend/README.md
 crates/translator-aec-backend/build.rs
 crates/translator-aec-backend/src/callback_history.h
+crates/translator-aec-backend/src/control_policy.c
 crates/translator-aec-backend/src/fixture.c
 crates/translator-aec-backend/src/fixture.rs
 crates/translator-aec-backend/src/main.rs
 crates/translator-aec-backend/src/native.c
+crates/translator-aec-backend/src/physical.c
 crates/translator-aec-backend/src/witness.c
 crates/translator-aec-backend/src/witness.rs
 crates/translator-aec-backend/tests/callback_history_wire.c
@@ -48,6 +50,7 @@ crates/translator-audio/Cargo.toml
 crates/translator-audio/src/aec.rs
 crates/translator-audio/src/aec_backend.rs
 crates/translator-audio/src/aec_measurement.rs
+crates/translator-audio/src/aec_native_source.rs
 crates/translator-audio/src/aec_validation.rs
 crates/translator-audio/src/command.rs
 crates/translator-audio/src/devices.rs
@@ -81,6 +84,7 @@ crates/translator-daemon/Cargo.toml
 crates/translator-daemon/src/acoustic_admission.rs
 crates/translator-daemon/src/aec_admission.rs
 crates/translator-daemon/src/aec_backend_session.rs
+crates/translator-daemon/src/aec_native_engine.rs
 crates/translator-daemon/src/aec_runtime_observer.rs
 crates/translator-daemon/src/aec_validation.rs
 crates/translator-daemon/src/aec_validation_control.rs
@@ -158,6 +162,7 @@ docs/stabilization/mt-natural-pilot-20260924.md
 docs/stabilization/mt-sentence-completeness-20260924.md
 docs/stabilization/output-model-screen-20260924.md
 docs/stabilization/piper-bounded-20260927.md
+docs/stabilization/preview-install.md
 docs/stabilization/product-audio-paired-20260927.md
 docs/stabilization/product-closure-one-pass-20260927.md
 docs/stabilization/stage-a-evidence.md
@@ -187,7 +192,9 @@ scripts/translator-aec-backend-stage
 scripts/translator-asr-quality-debug
 scripts/translator-browser-live-stream-smoke
 scripts/translator-desktop
+scripts/translator-native-ui-check
 scripts/translator-podcast-quality-debug
+scripts/translator-preview-package
 scripts/translator-publication-check
 scripts/translator-publication-check.bash
 scripts/translator-sca
@@ -210,6 +217,7 @@ scripts/translator_cloud_chain_audio.py
 scripts/translator_cloud_diagnostic.py
 scripts/translator_cloud_judge_recovery.py
 scripts/translator_cloud_tts_pilot.py
+scripts/translator_duplex_overlap_check.py
 scripts/translator_mdc_asr_run.py
 scripts/translator_mdc_asr_score.py
 scripts/translator_mdc_corpus.py
@@ -303,11 +311,13 @@ sidecar/translator_sidecar/provider_registry.py
 sidecar/translator_sidecar/secure_ipc.py
 sidecar/uv.lock
 sonar-project.properties
+systemd/translator-preview.service
 systemd/translator.service
 tests/audio-fixtures/README.md
 tests/contract-fixtures/open_session.json
 tests/external-prerequisites.toml
 tests/requirements-automatic-audio-eval.txt
+tests/requirements-native-ui-eval.txt
 tests/test-manifest.json
 tests/test_aec_backend_check.py
 tests/test_aec_backend_isolation.py
@@ -317,8 +327,11 @@ tests/test_aec_callback_history.py
 tests/test_aec_native_custodian.py
 tests/test_aec_public_boundary.py
 tests/test_ci_contract.py
+tests/test_duplex_overlap_check.py
 tests/test_manifest_execution_gate.py
 tests/test_portable_bundle.py
+tests/test_preview_package.py
+tests/test_preview_service.py
 tests/test_publication_gate.py
 tests/test_schema_gate.py
 tests/test_supply_chain_gate.py

@@ -11,11 +11,30 @@ fn main() {
     let library = fs::canonicalize(PathBuf::from(spa_dir).join("aec/libspa-aec-webrtc.so"))
         .expect("installed WebRTC SPA AEC plugin is required");
     let library = library.to_str().expect("plugin path must be UTF-8");
-    cc::Build::new()
+    let alsa = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("alsa")
+        .expect("ALSA development headers are required");
+    let openssl = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("libcrypto")
+        .expect("OpenSSL development headers are required");
+    let speex = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("speexdsp")
+        .expect("SpeexDSP development headers are required");
+    assert_eq!(speex.version, "1.2.1", "unreviewed SpeexDSP ABI");
+    let mut native = cc::Build::new();
+    native
         .file("src/native.c")
+        .file("src/physical.c")
+        .file("src/control_policy.c")
         .file("src/fixture.c")
         .file("src/witness.c")
         .includes(pipewire.include_paths)
+        .includes(alsa.include_paths)
+        .includes(openssl.include_paths)
+        .includes(speex.include_paths)
         .flag("-std=c11")
         .flag("-Wall")
         .flag("-Wextra")
@@ -31,6 +50,11 @@ fn main() {
     println!("cargo:rustc-link-lib=dl");
     println!("cargo:rustc-link-lib=pthread");
     println!("cargo:rustc-link-lib=m");
+    println!("cargo:rustc-link-lib=asound");
+    println!("cargo:rustc-link-lib=crypto");
+    println!("cargo:rustc-link-lib=speexdsp");
+    println!("cargo:rerun-if-changed=src/physical.c");
+    println!("cargo:rerun-if-changed=src/control_policy.c");
     println!("cargo:rerun-if-changed=src/native.c");
     println!("cargo:rerun-if-changed=src/callback_history.h");
     println!("cargo:rerun-if-changed=src/fixture.c");

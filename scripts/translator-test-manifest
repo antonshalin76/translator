@@ -187,6 +187,8 @@ RUFF_TARGETS = [
     "scripts/translator-task11-openai-preflight",
     "scripts/translator-task11-openai-synthetic-smoke",
     "scripts/translator-task12-zoom-diagnostic",
+    "scripts/translator-native-ui-check",
+    "scripts/translator_duplex_overlap_check.py",
     "scripts/translator-publication-check",
     "scripts/translator-test-manifest",
     "scripts/translator-validate",
@@ -2849,6 +2851,37 @@ def _print_outcome_receipt(receipt: dict[str, Any]) -> None:
     )
 
 
+def _print_failure_diagnostic(
+    framework: str,
+    expected_nodes: list[dict[str, str]],
+    observed: dict[str, dict[str, str]],
+    manifest_digest: str,
+) -> None:
+    expected_status = {
+        node["id"]: "skipped" if node["status"] == "external_skip" else "passed"
+        for node in expected_nodes
+    }
+    failed_nodes = [
+        {"id": node_id, "status": outcome["status"]}
+        for node_id, outcome in sorted(observed.items())
+        if node_id in expected_status and outcome["status"] != expected_status[node_id]
+    ][:10]
+    if failed_nodes:
+        print(
+            FAILURE_DIAGNOSTIC_PREFIX
+            + json.dumps(
+                {
+                    "framework": framework,
+                    "manifest_sha256": manifest_digest,
+                    "nodes": failed_nodes,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
+
 def _bound_manifest_snapshot() -> tuple[dict[str, Any], bytes, str, bytes]:
     stored, payload, digest = _load_stored_manifest_snapshot()
     allowlist, allowlist_payload = _load_allowlist_snapshot()
@@ -2921,11 +2954,13 @@ def _run_pytest_outcomes() -> None:
         issues.append("deselected tests")
     if recorder.duplicate_phases:
         issues.append("duplicate phase reports")
+    observed = recorder.outcomes()
+    _print_failure_diagnostic("pytest", expected_nodes, observed, manifest_digest)
     verified_rows = _verify_execution_outcomes(
         "pytest",
         expected_nodes,
         recorder.collected,
-        recorder.outcomes(),
+        observed,
         issues=issues,
     )
     if int(exit_code) != 0:
@@ -3025,26 +3060,9 @@ def _run_unittest_outcomes() -> None:
     )
     if result.outcomes() != journal_outcomes:
         journal_issues.append("unittest mutable result diverged from journal")
-    expected_status = {
-        node["id"]: "skipped" if node["status"] == "external_skip" else "passed"
-        for node in expected_nodes
-    }
-    failed_nodes = [
-        {"id": node_id, "status": outcome["status"]}
-        for node_id, outcome in sorted(journal_outcomes.items())
-        if node_id in expected_status and outcome["status"] != expected_status[node_id]
-    ][:10]
-    if failed_nodes:
-        diagnostic = {
-            "framework": "unittest",
-            "manifest_sha256": manifest_digest,
-            "nodes": failed_nodes,
-        }
-        print(
-            FAILURE_DIAGNOSTIC_PREFIX
-            + json.dumps(diagnostic, sort_keys=True, separators=(",", ":")),
-            flush=True,
-        )
+    _print_failure_diagnostic(
+        "unittest", expected_nodes, journal_outcomes, manifest_digest
+    )
     verified_rows = _verify_execution_outcomes(
         "unittest",
         expected_nodes,
@@ -3910,24 +3928,47 @@ def _run_gate_process(
         )
 
 
+def _completed_child_error(
+    reason: str, completed: subprocess.CompletedProcess[Any]
+) -> ManifestError:
+    fields = [f"child_exit={completed.returncode}"]
+    for name, stream in (("stdout", completed.stdout), ("stderr", completed.stderr)):
+        payload = stream.encode("utf-8") if isinstance(stream, str) else stream
+        fields.extend(
+            (
+                f"{name}_bytes={len(payload)}",
+                f"{name}_sha256={hashlib.sha256(payload).hexdigest()}",
+            )
+        )
+    return ManifestError(f"{reason} ({'; '.join(fields)})")
+
+
 def _run_receipted_gate(
     command: dict[str, Any], environment: dict[str, str]
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     try:
-        completed = _run_gate_process(
+        captured = _run_gate_process(
             command,
             environment,
             capture_output=True,
-            encoding="utf-8",
-            errors="strict",
         )
     except subprocess.TimeoutExpired:
         raise ManifestError("receipt-bearing validation gate timed out") from None
-    except UnicodeDecodeError as error:
-        raise ManifestError(
-            "receipt-bearing validation gate emitted invalid UTF-8"
-        ) from error
-    _verify_child_runtime_diagnostics(completed.stdout, completed.stderr)
+    try:
+        completed = subprocess.CompletedProcess(
+            captured.args,
+            captured.returncode,
+            captured.stdout.decode("utf-8", errors="strict"),
+            captured.stderr.decode("utf-8", errors="strict"),
+        )
+    except UnicodeDecodeError:
+        raise _completed_child_error(
+            "receipt-bearing validation gate emitted invalid UTF-8", captured
+        ) from None
+    try:
+        _verify_child_runtime_diagnostics(completed.stdout, completed.stderr)
+    except ManifestError as error:
+        raise _completed_child_error(str(error), captured) from None
     if completed.returncode != 0 and completed.stdout.startswith(
         FAILURE_DIAGNOSTIC_PREFIX
     ):
@@ -3943,12 +3984,16 @@ def _run_receipted_gate(
                     "\n"
                 )
             ]
-        raise ManifestError("receipt-bearing validation gate emitted unexpected output")
+        raise _completed_child_error(
+            "receipt-bearing validation gate emitted unexpected output", captured
+        )
     if completed.stderr or any(
         not line.startswith(OUTCOME_RECEIPT_PREFIX)
         for line in completed.stdout.splitlines(keepends=True)
     ):
-        raise ManifestError("receipt-bearing validation gate emitted unexpected output")
+        raise _completed_child_error(
+            "receipt-bearing validation gate emitted unexpected output", captured
+        )
     payloads = [
         line.removeprefix(OUTCOME_RECEIPT_PREFIX).removesuffix("\n")
         for line in completed.stdout.splitlines(keepends=True)
@@ -4022,25 +4067,31 @@ def _execute_plan() -> None:
         _verify_repository_snapshot(repository_snapshot)
         _verify_manifest_snapshot_unchanged(manifest_payload)
         _verify_allowlist_snapshot_unchanged(allowlist_payload)
-        if returncode != 0:
-            if framework is not None and receipt_payloads:
-                failed_nodes = _verified_failure_diagnostic(
-                    receipt_payloads[0], framework, stored, manifest_digest
-                )
+        try:
+            if returncode != 0:
+                if framework is not None and receipt_payloads:
+                    failed_nodes = _verified_failure_diagnostic(
+                        receipt_payloads[0], framework, stored, manifest_digest
+                    )
+                    raise ManifestError(
+                        f"validation gate failed: {command['id']} "
+                        f"(exit {returncode}; nodes: {failed_nodes})"
+                    )
                 raise ManifestError(
-                    f"validation gate failed: {command['id']} "
-                    f"(exit {returncode}; nodes: {failed_nodes})"
+                    f"validation gate failed: {command['id']} (exit {returncode})"
                 )
-            raise ManifestError(
-                f"validation gate failed: {command['id']} (exit {returncode})"
-            )
+            if framework is not None:
+                _verify_outcome_receipt_payloads(
+                    framework,
+                    receipt_payloads,
+                    stored,
+                    manifest_digest,
+                )
+        except ManifestError as error:
+            if framework is None:
+                raise
+            raise _completed_child_error(str(error), completed) from None
         if framework is not None:
-            _verify_outcome_receipt_payloads(
-                framework,
-                receipt_payloads,
-                stored,
-                manifest_digest,
-            )
             print(OUTCOME_RECEIPT_PREFIX + receipt_payloads[0], flush=True)
         if publication_output is not None:
             _verify_publication_receipt(*publication_output, repository_snapshot)

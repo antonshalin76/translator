@@ -10,6 +10,7 @@ import re
 import runpy
 import select
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -29,6 +30,78 @@ def _session_contract() -> dict[str, object]:
 
 
 class AecBackendCheckTests(unittest.TestCase):
+    def test_physical_mode_exposes_only_the_three_exact_owned_nodes(self) -> None:
+        runner = runpy.run_path(str(CHECK), run_name="aec_runner_contract")
+        function = runner["physical_argv"]
+        with mock.patch.object(
+            function.__globals__["os"],
+            "stat",
+            return_value=mock.Mock(st_mode=stat.S_IFCHR | 0o600),
+        ):
+            command = function(Path("/private/stage"), "000000000000002a")
+        self.assertEqual(command.count("--dev-bind"), 3)
+        for path in ("/dev/snd/controlC0", "/dev/snd/pcmC0D0c", "/dev/snd/pcmC0D0p"):
+            self.assertEqual(command.count(path), 2)
+            self.assertEqual(command[command.index(path) - 1], "--dev-bind")
+        self.assertIn("--unshare-all", command)
+        self.assertIn("--cap-drop", command)
+        self.assertEqual(
+            command[-3:], ["/stage/backend", "--physical", "000000000000002a"]
+        )
+        for forbidden in (
+            "/run/user/1000",
+            "/sys",
+            "/etc",
+            "--share-net",
+            "PULSE_SERVER",
+            "PIPEWIRE_REMOTE",
+        ):
+            self.assertNotIn(forbidden, command)
+        self.assertNotIn(
+            "--dev-bind",
+            runner["isolated_argv"](Path("/private/stage"), ["/usr/bin/true"]),
+        )
+
+    def test_physical_selector_validation_does_not_open_devices(self) -> None:
+        runner = runpy.run_path(str(CHECK), run_name="aec_runner_contract")
+        for session in (
+            "-",
+            "0000000000000000",
+            "fffffffffffffffF",
+            "../not-a-session",
+        ):
+            with (
+                self.subTest(session=session),
+                self.assertRaises(runner["UnsafeInvocation"]),
+            ):
+                runner["physical_argv"](Path("/private/stage"), session)
+        function = runner["physical_argv"]
+        with mock.patch.object(
+            function.__globals__["os"],
+            "stat",
+            return_value=mock.Mock(st_mode=stat.S_IFREG | 0o600),
+        ):
+            with self.assertRaisesRegex(runner["UnsafeInvocation"], "not a device"):
+                function(Path("/private/stage"), "000000000000002a")
+
+    def test_physical_mode_rejects_virtual_controls_before_scope(self) -> None:
+        for flag in ("--fault-mode", "--trial-mode", "--scorer-mutant"):
+            argument = {
+                "--fault-mode": "helper-crash",
+                "--trial-mode": "far-only",
+                "--scorer-mutant": "zero-clean",
+            }[flag]
+            result = subprocess.run(
+                [str(CHECK), "--isolated", "--physical", flag, argument],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("cannot accept virtual trial controls", result.stderr)
+            self.assertNotIn("scope NOT_DONE", result.stderr)
+
     def test_pause_scope_rejects_other_invocations_before_graph(self) -> None:
         runner = runpy.run_path(str(CHECK), run_name="aec_runner_contract")
         validate = runner["validate_pause_request"]

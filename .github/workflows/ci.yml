@@ -32,9 +32,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
             libayatana-appindicator3-dev \
             libgtk-3-dev \
+            libpipewire-0.3-dev \
             librsvg2-dev \
+            libspa-0.2-dev \
+            libspa-0.2-modules \
+            libspeexdsp-dev \
             libssl-dev \
             libwebkit2gtk-4.1-dev \
             patchelf \

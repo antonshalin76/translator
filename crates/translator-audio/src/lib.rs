@@ -3,6 +3,7 @@
 mod aec;
 mod aec_backend;
 mod aec_measurement;
+mod aec_native_source;
 mod aec_validation;
 mod command;
 mod devices;
@@ -19,6 +20,7 @@ mod virtual_peer;
 pub use aec::*;
 pub use aec_backend::*;
 pub use aec_measurement::*;
+pub use aec_native_source::*;
 pub use aec_validation::*;
 pub use command::*;
 pub use devices::*;

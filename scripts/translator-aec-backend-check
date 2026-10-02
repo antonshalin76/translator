@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Run AEC checks inside a private, device-free namespace."""
+"""Run AEC checks in private namespaces; physical mode exposes one owned pair."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pwd
 import re
@@ -2183,7 +2184,7 @@ def retain_ambiguous_scope(
         time.sleep(0.1)
 
 
-def run_scoped(command: list[str], stream: bool, quick: bool) -> int:
+def run_scoped(command: list[str], stream: bool, quick: bool, *, retained_physical: bool = False) -> int:
     runtime = f"/run/user/{os.getuid()}"
     bus = f"{runtime}/bus"
     if not Path(bus).is_socket():
@@ -2267,7 +2268,7 @@ def run_scoped(command: list[str], stream: bool, quick: bool) -> int:
         process = subprocess.Popen(
             ["/usr/bin/python3", "-I", "-c", SCOPE_BOOTSTRAP,
              str(gate_read), *command],
-            env=environment, stdin=subprocess.DEVNULL,
+            env=environment, stdin=sys.stdin.buffer if retained_physical else subprocess.DEVNULL,
             stdout=sys.stdout.buffer if stream else subprocess.PIPE,
             stderr=sys.stderr if stream else subprocess.PIPE,
             pass_fds=(gate_read,), close_fds=True,
@@ -2283,7 +2284,7 @@ def run_scoped(command: list[str], stream: bool, quick: bool) -> int:
         os.write(gate_write, b"G")
         os.close(gate_write)
         gate_write = -1
-        work_budget = 8 if quick else 172
+        work_budget = float("inf") if retained_physical else 8 if quick else 172
         timeout = max(0.01, work_budget - (time.monotonic() - started))
         work_deadline = time.monotonic() + timeout
         while True:
@@ -2707,6 +2708,65 @@ def isolated_argv(stage: Path, program: list[str]) -> list[str]:
     ]
 
 
+def physical_argv(stage: Path, session: str) -> list[str]:
+    """Same isolation boundary, exposing only the exclusively owned PCH pair.
+
+    controlC0 must be a device bind (read-only mount hides the ALSA identity).
+    Native libseccomp forbids mutating control ioctls before any device open.
+    No host Pulse/PipeWire server, sockets, mixer writes, or network are exposed.
+    """
+    if re.fullmatch(r"[0-9a-f]{16}", session) is None or int(session, 16) == 0:
+        raise UnsafeInvocation("retained physical mode requires owner session")
+    command = isolated_argv(stage, ["/stage/backend", "--physical", session])
+    at = command.index("--chdir")
+    nodes = ["/dev/snd/controlC0", "/dev/snd/pcmC0D0c", "/dev/snd/pcmC0D0p"]
+    bindings = ["--dir", "/dev/snd"]
+    for node in nodes:
+        metadata = os.stat(node, follow_symlinks=False)
+        if not stat.S_ISCHR(metadata.st_mode):
+            raise UnsafeInvocation("physical ALSA endpoint is not a device")
+        bindings.extend(["--dev-bind", node, node])
+    command[at:at] = bindings
+    return command
+
+
+def stage_physical_fixture(stage: Path) -> None:
+    """A verified public speech period, never captured user PCM.
+
+    Library-backed resampling precedes declared digital fixture normalization.
+    Microphone samples and shared hardware gains are never altered.
+    """
+    stage_speech_sources(stage)
+    version = subprocess.run(["/usr/bin/ffmpeg", "-version"], capture_output=True,
+                             text=True, timeout=2, check=False,
+                             env={"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu/openblas-pthread"})
+    if version.returncode or not version.stdout.startswith("ffmpeg version 6.1.1-3ubuntu5 "):
+        raise UnsafeInvocation("frozen physical fixture ffmpeg version mismatch")
+    converted = subprocess.run(
+        ["/usr/bin/ffmpeg", "-hide_banner", "-nostdin", "-v", "error",
+         "-threads", "1", "-i", str(stage / "far.wav"),
+         "-af", "aresample=48000:resampler=soxr:precision=28", "-ar", "48000",
+         "-ac", "1", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"],
+        capture_output=True, timeout=10, check=False,
+        env={"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu/openblas-pthread"},
+    )
+    if converted.returncode or not 48000 * 4 <= len(converted.stdout) <= 3 << 20 or len(converted.stdout) % 4:
+        raise UnsafeInvocation("public physical fixture conversion failed")
+    samples = [sample for (sample,) in struct.iter_unpack("<f", converted.stdout)]
+    if any(not math.isfinite(sample) or abs(sample) > 1 for sample in samples):
+        raise UnsafeInvocation("public physical fixture PCM invalid")
+    periods = [samples[at:at + 48000] for at in range(0, len(samples) - 47999, 4800)]
+    selected = max(periods, key=lambda row: sum(sample * sample for sample in row))
+    power = sum(sample * sample for sample in selected) / 48000
+    if power <= 0:
+        raise UnsafeInvocation("public physical speech fixture has no energy")
+    scale = math.sqrt(0.01 / power)
+    normalized = [round(sample * scale * 32768) for sample in selected]
+    if any(not -32767 < sample < 32767 for sample in normalized):
+        raise UnsafeInvocation("declared physical fixture normalization clips")
+    (stage / "far.pcm").write_bytes(struct.pack("<48000h", *normalized))
+
+
 def file_sha256(path: Path) -> str:
     with path.open("rb") as readable:
         return hashlib.file_digest(readable, "sha256").hexdigest()
@@ -2894,6 +2954,7 @@ def main() -> int:
     mode.add_argument("--preflight-only", action="store_true")
     mode.add_argument("--probe", type=Path)
     mode.add_argument("--stream", action="store_true")
+    mode.add_argument("--physical", action="store_true")
     mode.add_argument("--native-backtrace", action="store_true")
     mode.add_argument("--lifecycle-only", action="store_true")
     mode.add_argument("--single-check", action="store_true", help=argparse.SUPPRESS)
@@ -2932,6 +2993,9 @@ def main() -> int:
         if expected_session != "-" and (re.fullmatch(r"[0-9a-f]{16}", expected_session) is None
                                         or int(expected_session, 16) == 0):
             raise UnsafeInvocation("invalid owner-provided AEC session")
+        if args.physical and any((args.trial_mode, args.fault_mode, args.scorer_mutant,
+                                  args.fixture_delay_ms, args.pause_helper_ms)):
+            raise UnsafeInvocation("physical mode cannot accept virtual trial controls")
         validate_pause_request(args.trial_mode, args.trial_frames, args.fault_mode,
                                args.scorer_mutant, args.fixture_delay_ms,
                                args.pause_helper_ms)
@@ -2953,7 +3017,7 @@ def main() -> int:
             args.trial_mode is None or not 0 < args.fixture_delay_ms <= 1000
         ):
             raise UnsafeInvocation("fixture delay requires bounded trial")
-        if not any((args.preflight_only, args.probe is not None, args.stream,
+        if not any((args.preflight_only, args.probe is not None, args.stream, args.physical,
                     args.native_backtrace, args.lifecycle_only,
                     args.trial_mode is not None, args.fault_mode is not None,
                     args.single_check)):
@@ -2964,6 +3028,11 @@ def main() -> int:
                                        args.lifecycle_case)
         with tempfile.TemporaryDirectory(prefix="translator-aec-") as temporary:
             stage = Path(temporary)
+            if args.physical:
+                stage_executable(args.backend_bin, stage / "backend")
+                stage_physical_fixture(stage)
+                return run_scoped(physical_argv(stage, expected_session),
+                                  stream=True, quick=False, retained_physical=True)
             if args.probe is not None:
                 stage_probe(args.probe, stage / "probe.py")
                 program = ["/usr/bin/python3", "-I", "/stage/probe.py"]

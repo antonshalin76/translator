@@ -34,6 +34,7 @@ const TOKEN: &str = "42424242424242424242424242424242424242424242424242424242424
 #[derive(Default)]
 struct BlockingCalibrationEngine {
     calls: AtomicUsize,
+    entered: tokio::sync::Notify,
 }
 
 struct C9ApiHeldInspection {
@@ -100,9 +101,11 @@ impl AecCalibrationEngine for BlockingCalibrationEngine {
             sink_muted: false,
             source_geometry: "test-source-geometry".into(),
             sink_geometry: "test-sink-geometry".into(),
-            aec_module_id: 1,
-            aec_source_id: 2,
-            aec_sink_id: 3,
+            graph: translator_audio::AecGraphIdentity::PulseModule {
+                module_id: 1,
+                source_id: 2,
+                sink_id: 3,
+            },
             aec_generation: "test-generation".into(),
             aec_config_id: "test-aec-config".into(),
             vad_config_id: "test-vad-config".into(),
@@ -112,6 +115,7 @@ impl AecCalibrationEngine for BlockingCalibrationEngine {
 
     fn calibrate(&self, request: AecCalibrationRequest) -> AecCalibrationFuture {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
         Box::pin(async move {
             request.cancellation.cancelled().await;
             Err(AecCalibrationEngineError {
@@ -2083,6 +2087,183 @@ async fn translation_mutations_fail_closed_without_provider_controller() {
 }
 
 #[tokio::test]
+async fn headphone_confirmation_requires_authentication_and_control_owner() {
+    let path = "/v1/devices/headphones";
+    let unauthorized = app()
+        .oneshot(request(Method::POST, path, None, Body::from("null")))
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app()
+        .oneshot(request(Method::POST, path, Some(TOKEN), Body::from("null")))
+        .await
+        .unwrap();
+    assert_problem(
+        authorized,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Service Unavailable",
+        "translation_controller_unavailable",
+    )
+    .await;
+    let invalid = app()
+        .oneshot(request(
+            Method::POST,
+            path,
+            Some(TOKEN),
+            Body::from(r#"{"unexpected":true}"#),
+        ))
+        .await
+        .unwrap();
+    assert_problem(
+        invalid,
+        StatusCode::BAD_REQUEST,
+        "Bad Request",
+        "invalid_json",
+    )
+    .await;
+}
+
+#[derive(Default)]
+struct HeadphoneMaintenance {
+    requests: Mutex<Vec<Option<translator_audio::HeadphoneConfirmation>>>,
+}
+
+impl RuntimeMaintenance for HeadphoneMaintenance {
+    fn refresh(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        NoopFacts.refresh(store)
+    }
+
+    fn prepare_start(&self, snapshot: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+        NoopFacts.prepare_start(snapshot)
+    }
+
+    fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        NoopFacts.refresh_bypass_facts(store)
+    }
+
+    fn verify_bypass_custody(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        permit: bool,
+    ) -> Result<(), ControlFailure> {
+        NoopFacts.verify_bypass_custody(snapshot, permit)
+    }
+
+    fn confirm_headphones(
+        &self,
+        confirmation: Option<translator_audio::HeadphoneConfirmation>,
+        deadline: std::time::Instant,
+        store: &RuntimeStore,
+    ) -> Result<(), ControlFailure> {
+        use translator_daemon::RuntimeFactsSource;
+        let mut facts = NoopFacts.inspect(deadline).unwrap().devices;
+        facts.output_mode = if confirmation.is_some() {
+            translator_audio::OutputMode::UserConfirmedHeadphones
+        } else {
+            translator_audio::OutputMode::UnknownUnsafe
+        };
+        self.requests.lock().unwrap().push(confirmation);
+        store.set_devices(facts.into());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn headphone_confirmation_is_stopped_only_and_never_starts_or_disables_a_direction() {
+    use translator_daemon::RuntimeFactsSource;
+    let store = RuntimeStore::default();
+    let before = serde_json::to_value(store.snapshot().directions).unwrap();
+    let runner = Arc::new(FakeDuplexRunner::default());
+    let maintenance = Arc::new(HeadphoneMaintenance::default());
+    let controller = ControlApplication::spawn(
+        store.clone(),
+        runner.clone(),
+        AudioOperationGate::new(),
+        Arc::new(NoopFacts),
+        maintenance.clone(),
+        None,
+    );
+    let router = build_router_with_controllers(
+        store.clone(),
+        ControlToken::parse(TOKEN).unwrap(),
+        ApiLimits::default(),
+        ApiControllers {
+            translation: Some(controller.clone()),
+            ..ApiControllers::default()
+        },
+    );
+    let facts = NoopFacts
+        .inspect(std::time::Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let confirmation = translator_audio::HeadphoneConfirmation {
+        source: facts.devices.source.selected.unwrap(),
+        sink: facts.devices.sink.selected.unwrap(),
+    };
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/devices/headphones",
+            Some(TOKEN),
+            Body::from(serde_json::to_vec(&confirmation).unwrap()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        maintenance.requests.lock().unwrap().as_slice(),
+        &[Some(confirmation)]
+    );
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 0);
+    assert!(!store.snapshot().translation_running);
+    assert_eq!(
+        serde_json::to_value(store.snapshot().directions).unwrap(),
+        before
+    );
+
+    controller
+        .execute(translator_daemon::ControlCommand::Start)
+        .await
+        .unwrap();
+    let blocked = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/devices/headphones",
+            Some(TOKEN),
+            Body::from("null"),
+        ))
+        .await
+        .unwrap();
+    assert_problem(
+        blocked,
+        StatusCode::CONFLICT,
+        "Conflict",
+        "headphone_confirmation_requires_stopped",
+    )
+    .await;
+    assert_eq!(maintenance.requests.lock().unwrap().len(), 1);
+    assert!(store.snapshot().translation_running);
+    controller
+        .execute(translator_daemon::ControlCommand::Stop)
+        .await
+        .unwrap();
+    let revoked = router
+        .oneshot(request(
+            Method::POST,
+            "/v1/devices/headphones",
+            Some(TOKEN),
+            Body::from("null"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+    assert_eq!(maintenance.requests.lock().unwrap().last(), Some(&None));
+    controller.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn translation_controller_success_owns_running_state_and_stop_clears_debug_text() {
     let store = RuntimeStore::default();
     store.set_debug_text_enabled(true);
@@ -2849,6 +3030,9 @@ async fn aec_calibration_is_explicit_nonblocking_and_duplicate_start_conflicts()
     assert_eq!(started.status(), StatusCode::ACCEPTED);
     let started = json_body(started).await;
     let attempt_id = started["attempt_id"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(1), engine.entered.notified())
+        .await
+        .expect("post-entry cancellation scenario requires calibration entry");
 
     let duplicate = router
         .clone()

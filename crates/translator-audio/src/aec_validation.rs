@@ -44,6 +44,45 @@ pub struct AecDeviceMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AecGraphIdentity {
+    PulseModule {
+        module_id: u32,
+        source_id: u32,
+        sink_id: u32,
+    },
+    Native {
+        session_id: u64,
+        generation: u64,
+        physical_device_id: String,
+        dsp_config_id: String,
+    },
+}
+
+impl AecGraphIdentity {
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::PulseModule {
+                module_id,
+                source_id,
+                sink_id,
+            } => *module_id != 0 && *source_id != 0 && *sink_id != 0,
+            Self::Native {
+                session_id,
+                generation,
+                physical_device_id,
+                dsp_config_id,
+            } => {
+                *session_id != 0
+                    && *generation != 0
+                    && physical_device_id.starts_with("alsa-hw:")
+                    && !dsp_config_id.trim().is_empty()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AecMeasurementBinding {
     pub audio_server_id: String,
     pub source_hardware_id: String,
@@ -58,9 +97,7 @@ pub struct AecMeasurementBinding {
     pub sink_muted: bool,
     pub source_geometry: String,
     pub sink_geometry: String,
-    pub aec_module_id: u32,
-    pub aec_source_id: u32,
-    pub aec_sink_id: u32,
+    pub graph: AecGraphIdentity,
     pub aec_generation: String,
     pub aec_config_id: String,
     pub vad_config_id: String,
@@ -195,7 +232,38 @@ pub struct AecPositiveControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AecNativeObservationTiming {
+    pub graph: AecGraphIdentity,
+    pub adc_start: u64,
+    pub adc_end: u64,
+    pub capture_buffer_frames: u32,
+    pub maximum_read_bracket_ns: u64,
+    pub source_gaps: u64,
+    pub source_duplicates: u64,
+    pub source_reordered: u64,
+}
+
+impl AecNativeObservationTiming {
+    /// Negotiated buffering plus the actually observed read/status bracket.
+    /// This does not claim a shared ADC/DAC clock or a hardware onset time.
+    pub fn host_uncertainty_ns(&self) -> Option<u64> {
+        if !(1920..=48000).contains(&self.capture_buffer_frames)
+            || self.maximum_read_bracket_ns == 0
+        {
+            return None;
+        }
+        (self.capture_buffer_frames as u64)
+            .checked_mul(1_000_000_000)?
+            .checked_add(47_999)?
+            .checked_div(48_000)?
+            .checked_add(self.maximum_read_bracket_ns)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AecObservationEvidence {
+    #[serde(default)]
+    pub native_timing: Option<AecNativeObservationTiming>,
     pub observer_generation: String,
     pub calibration_attempt_id: String,
     pub challenge_id: String,
@@ -232,14 +300,43 @@ pub struct AecObservationEvidence {
 
 impl AecObservationEvidence {
     fn deltas(&self) -> Result<(u64, u64), AecValidationError> {
+        let duration = self
+            .ended_monotonic_ns
+            .checked_sub(self.started_monotonic_ns)
+            .ok_or(AecValidationError::InvalidValidationInput)?;
+        let uncertainty = if let Some(native) = &self.native_timing {
+            if !matches!(native.graph, AecGraphIdentity::Native { .. })
+                || !native.graph.is_valid()
+                || native.adc_end.checked_sub(native.adc_start)
+                    != Some(AEC_OBSERVATION_FRAME_COUNT * 960)
+                || native.source_gaps != 0
+                || native.source_duplicates != 0
+                || native.source_reordered != 0
+            {
+                return invalid();
+            }
+            let bound = native
+                .host_uncertainty_ns()
+                .ok_or(AecValidationError::InvalidValidationInput)?;
+            if native.maximum_read_bracket_ns > bound.saturating_sub(native.maximum_read_bracket_ns)
+                || duration.abs_diff(AEC_OBSERVATION_DURATION_NS) > bound
+            {
+                return invalid();
+            }
+            bound
+        } else {
+            if duration != AEC_OBSERVATION_DURATION_NS {
+                return invalid();
+            }
+            0
+        };
+        let arrival_bound = AEC_OBSERVATION_FRAME_DURATION_NS
+            .checked_add(uncertainty)
+            .ok_or(AecValidationError::InvalidValidationInput)?;
         if self.observer_generation.trim().is_empty()
             || self.calibration_attempt_id.trim().is_empty()
             || self.challenge_id.trim().is_empty()
             || self.interval_id.trim().is_empty()
-            || self
-                .ended_monotonic_ns
-                .checked_sub(self.started_monotonic_ns)
-                != Some(AEC_OBSERVATION_DURATION_NS)
             || self.expected_frames != AEC_OBSERVATION_FRAME_COUNT
             || self.processed_frames != AEC_OBSERVATION_FRAME_COUNT
             || self.stream_generation.trim().is_empty()
@@ -256,13 +353,13 @@ impl AecObservationEvidence {
             || self
                 .first_capture_monotonic_ns
                 .saturating_sub(self.started_monotonic_ns)
-                > AEC_OBSERVATION_FRAME_DURATION_NS
+                > arrival_bound
             || self.last_capture_monotonic_ns > self.ended_monotonic_ns
             || self
                 .ended_monotonic_ns
                 .saturating_sub(self.last_capture_monotonic_ns)
-                > AEC_OBSERVATION_FRAME_DURATION_NS
-            || self.maximum_frame_gap_ns > AEC_OBSERVATION_FRAME_DURATION_NS
+                > arrival_bound
+            || self.maximum_frame_gap_ns > arrival_bound
             || self.frame_gaps != 0
             || self.duplicate_frames != 0
             || self.out_of_order_frames != 0
@@ -338,6 +435,11 @@ pub struct AecValidationRecord {
 pub fn evaluate_aec(input: AecValidationInput) -> Result<AecValidationRecord, AecValidationError> {
     validate_metadata(&input.metadata)?;
     validate_binding(&input.binding)?;
+    match (&input.binding.graph, &input.observation.native_timing) {
+        (AecGraphIdentity::Native { .. }, Some(timing)) if timing.graph == input.binding.graph => {}
+        (AecGraphIdentity::PulseModule { .. }, None) => {}
+        _ => return invalid(),
+    }
     let raw_baseline = input.raw_baseline.summary()?;
     let clean_baseline = input.clean_baseline.summary()?;
     let resolution = input.resolution.summary()?;
@@ -418,9 +520,7 @@ fn validate_binding(binding: &AecMeasurementBinding) -> Result<(), AecValidation
     .any(|value| value.trim().is_empty())
         || binding.source_channel_gains.is_empty()
         || binding.sink_channel_gains.is_empty()
-        || binding.aec_module_id == 0
-        || binding.aec_source_id == 0
-        || binding.aec_sink_id == 0
+        || !binding.graph.is_valid()
     {
         return invalid();
     }

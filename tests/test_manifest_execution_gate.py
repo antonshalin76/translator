@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import ctypes
 import functools
+import hashlib
 import importlib.machinery
 import importlib.util
 import inspect
@@ -953,6 +954,203 @@ class ManifestExecutionGateTests(unittest.TestCase):
                 self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
                 self.assertNotIn(canary, stdout)
                 self.assertNotIn(canary, stderr)
+
+    @isolated_process_test
+    def test_parent_retains_completed_child_identity_without_private_output(
+        self,
+    ) -> None:
+        private_path = "/".join(("", "home", "operator", "private"))
+        private = f"PRIVATE_CANARY {private_path} sk-synthetic-secret\n"
+        receipt = MANIFEST_RUNNER._expected_outcome_receipt(
+            "pytest", {"collections": {"pytest": {"nodes": []}}}, "d" * 64
+        )
+        canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        prefix = MANIFEST_RUNNER.OUTCOME_RECEIPT_PREFIX
+        failure_prefix = MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX
+        cases = (
+            (7, private, private),
+            (-signal.SIGTERM, "", ""),
+            (0, prefix + canonical + "\n" + private, private),
+            (0, "", ""),
+            (0, prefix + "{}\n", ""),
+            (0, (prefix + canonical + "\n") * 2, ""),
+            (0, prefix + " " + canonical + " \n", ""),
+            (1, failure_prefix + "{}\n" + private, private),
+            (0, prefix + canonical + "\n", "RuntimeWarning: " + private),
+        )
+        for exit_code, child_stdout, child_stderr in cases:
+            with self.subTest(
+                exit_code=exit_code, streams=(len(child_stdout), len(child_stderr))
+            ):
+                child_source = (
+                    "import sys\n"
+                    f"sys.stdout.write({child_stdout!r})\n"
+                    f"sys.stderr.write({child_stderr!r})\n"
+                )
+                child_source += (
+                    f"raise SystemExit({exit_code})\n"
+                    if exit_code >= 0
+                    else "import os, signal; os.kill(os.getpid(), signal.SIGTERM)\n"
+                )
+                error, stdout, stderr = self.execute_single_receipted_child(
+                    child_source
+                )
+                self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
+                published = str(error) + stdout + stderr
+                self.assertIn(f"child_exit={exit_code}", str(error))
+                for name, stream in (
+                    ("stdout", child_stdout),
+                    ("stderr", child_stderr),
+                ):
+                    payload = stream.encode("utf-8")
+                    self.assertIn(f"{name}_bytes={len(payload)}", str(error))
+                    self.assertIn(
+                        f"{name}_sha256={hashlib.sha256(payload).hexdigest()}",
+                        str(error),
+                    )
+                for canary in (
+                    "PRIVATE_CANARY",
+                    private_path,
+                    "sk-synthetic-secret",
+                ):
+                    self.assertNotIn(canary, published)
+
+    @isolated_process_test
+    def test_parent_success_output_remains_exact_canonical_receipt(self) -> None:
+        receipt = MANIFEST_RUNNER._expected_outcome_receipt(
+            "pytest", {"collections": {"pytest": {"nodes": []}}}, "d" * 64
+        )
+        payload = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        line = MANIFEST_RUNNER.OUTCOME_RECEIPT_PREFIX + payload + "\n"
+        error, stdout, stderr = self.execute_single_receipted_child(
+            f"print({line[:-1]!r})"
+        )
+        self.assertIsNone(error)
+        self.assertEqual(stdout, "validation gate: sidecar-test\n" + line)
+        self.assertEqual(stderr, "")
+
+    def test_shared_failure_projection_is_bound_sorted_and_limited(self) -> None:
+        failures = [f"test_known_{index:02}" for index in range(14)]
+        nodes = [
+            {"id": node_id, "status": "deterministic", "reason": ""}
+            for node_id in failures
+        ]
+        nodes.extend(
+            [
+                {"id": "test_passed", "status": "deterministic", "reason": ""},
+                {
+                    "id": "test_skip",
+                    "status": "external_skip",
+                    "reason": "missing_external_prerequisite:physical_audio",
+                },
+            ]
+        )
+        outcomes = {
+            node_id: {"status": "failed", "reason": "PRIVATE_ASSERTION_CANARY"}
+            for node_id in reversed(failures)
+        }
+        outcomes.update(
+            {
+                "UNBOUND_CANARY": {
+                    "status": "error",
+                    "reason": "PRIVATE_ASSERTION_CANARY",
+                },
+                "test_passed": {"status": "passed", "reason": ""},
+                "test_skip": {
+                    "status": "skipped",
+                    "reason": "missing_external_prerequisite:physical_audio",
+                },
+            }
+        )
+        for framework in ("pytest", "unittest"):
+            output = io.StringIO()
+            with self.subTest(framework=framework), contextlib.redirect_stdout(output):
+                MANIFEST_RUNNER._print_failure_diagnostic(
+                    framework, nodes, outcomes, "a" * 64
+                )
+            payload = (
+                output.getvalue()
+                .removeprefix(MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX)
+                .removesuffix("\n")
+            )
+            self.assertEqual(
+                json.loads(payload)["nodes"],
+                [{"id": node_id, "status": "failed"} for node_id in failures[:10]],
+            )
+            self.assertEqual(output.getvalue().count("\n"), 1)
+            self.assertEqual(
+                MANIFEST_RUNNER._verified_failure_diagnostic(
+                    payload,
+                    framework,
+                    {"collections": {framework: {"nodes": nodes}}},
+                    "a" * 64,
+                ),
+                ", ".join(f"{node_id}=failed" for node_id in failures[:10]),
+            )
+            self.assertNotIn("CANARY", output.getvalue())
+
+    @isolated_process_test
+    def test_completed_invalid_utf8_retains_exact_bytes_and_exit(self) -> None:
+        payload = b"private\xff\r\n"
+        command = {
+            "argv": [
+                sys.executable,
+                "-c",
+                f"import sys; sys.stdout.buffer.write({payload!r}); sys.exit(9)",
+            ],
+            "cwd": ".",
+            "timeout_seconds": 30,
+        }
+        environment = MANIFEST_RUNNER._validation_environment(source=dict(os.environ))
+        with self.assertRaisesRegex(
+            MANIFEST_RUNNER.ManifestError, "invalid UTF-8"
+        ) as raised:
+            MANIFEST_RUNNER._run_receipted_gate(command, environment)
+        message = str(raised.exception)
+        self.assertIn("child_exit=9", message)
+        self.assertIn(f"stdout_bytes={len(payload)}", message)
+        self.assertIn(f"stdout_sha256={hashlib.sha256(payload).hexdigest()}", message)
+        self.assertNotIn("private", message)
+
+    @isolated_process_test
+    def test_failing_pytest_emits_only_manifest_bound_diagnostic(self) -> None:
+        canary = "PRIVATE_PYTEST_FAILURE_CANARY"
+        with tempfile.TemporaryDirectory(
+            prefix=".manifest-pytest-failure-", dir=ROOT / "tests"
+        ) as temporary:
+            test_root = Path(temporary)
+            sidecar = test_root / "sidecar"
+            sidecar.mkdir()
+            test_path = sidecar / "test_failure_diagnostic.py"
+            test_path.write_text(
+                f"def test_failure():\n    assert False, {canary!r}\n",
+                encoding="utf-8",
+            )
+            node_id = "sidecar/test_failure_diagnostic.py::test_failure"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                error = self.execute_synthetic_pytest_suite(test_root, node_id)
+            self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
+            prefix = MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX
+            self.assertTrue(output.getvalue().startswith(prefix))
+            self.assertEqual(output.getvalue().count("\n"), 1)
+            diagnostic = output.getvalue().removeprefix(prefix).removesuffix("\n")
+            stored = {
+                "collections": {
+                    "pytest": {
+                        "nodes": [
+                            {"id": node_id, "status": "deterministic", "reason": ""}
+                        ]
+                    }
+                }
+            }
+            self.assertEqual(
+                MANIFEST_RUNNER._verified_failure_diagnostic(
+                    diagnostic, "pytest", stored, "a" * 64
+                ),
+                f"{node_id}=failed",
+            )
+            self.assertNotIn(canary, output.getvalue() + str(error))
 
     @isolated_process_test
     def test_parent_reports_only_manifest_bound_failed_test_identity(self) -> None:
@@ -2335,8 +2533,11 @@ class ManifestExecutionGateTests(unittest.TestCase):
                 source=dict(os.environ)
             )
 
-            with self.assertRaisesRegex(MANIFEST_RUNNER.ManifestError, "invalid UTF-8"):
+            with self.assertRaisesRegex(
+                MANIFEST_RUNNER.ManifestError, "left background processes running"
+            ) as raised:
                 MANIFEST_RUNNER._run_receipted_gate(command, environment)
+            self.assertNotIn("child_exit=", str(raised.exception))
 
             child_pids = [
                 int(value) for value in pid_path.read_text(encoding="utf-8").split()
@@ -2516,12 +2717,17 @@ class ManifestExecutionGateTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            error = self.execute_synthetic_pytest_suite(
-                synthetic_root,
-                "sidecar/test_unittest_generator.py::CompatibilityTests::test_hidden",
-            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                error = self.execute_synthetic_pytest_suite(
+                    synthetic_root,
+                    "sidecar/test_unittest_generator.py::CompatibilityTests::test_hidden",
+                )
 
             self.assertIsInstance(error, MANIFEST_RUNNER.ManifestError)
+            self.assertTrue(
+                output.getvalue().startswith(MANIFEST_RUNNER.FAILURE_DIAGNOSTIC_PREFIX)
+            )
             self.assertFalse(marker.exists())
 
         cases = {

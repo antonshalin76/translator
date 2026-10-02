@@ -1,4 +1,5 @@
 #[path = "../src/aec_backend_session.rs"]
+#[allow(dead_code)] // Physical native APIs are not launched by CPU custody tests.
 mod session;
 
 use std::{

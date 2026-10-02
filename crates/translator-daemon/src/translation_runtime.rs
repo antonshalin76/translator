@@ -20,13 +20,14 @@ use tokio::{
     time::Instant,
 };
 use translator_audio::{
-    BoundedPcmQueue, CaptureEvent, PcmFrame, PulsePcmCapture, PulsePcmCommand, PulsePcmPlayback,
-    PulsePlaybackRegistration, SpeechSegmenter, VoiceDetector, WebRtcVoiceDetector,
+    BoundedPcmQueue, CaptureEvent, NativeAecHandle, NativeCaptureOrigin, NativeCaptureReceiver,
+    PcmFrame, PulsePcmCapture, PulsePcmCommand, PulsePcmPlayback, PulsePlaybackRegistration,
+    SpeechSegmenter, VoiceDetector, WebRtcVoiceDetector,
 };
 use translator_core::{AudioDirection, TranslationMode};
 use translator_ipc::{
     ProviderClientError, ProviderStreamClient,
-    provider::{CloseRequestReason, ProviderRequest, ProviderState, provider_event},
+    provider::{CloseRequestReason, ProviderEvent, ProviderRequest, ProviderState, provider_event},
     wait_provider_ready,
 };
 use uuid::Uuid;
@@ -39,7 +40,7 @@ use crate::{
 };
 
 const PROVIDER_READY_TIMEOUT: Duration = Duration::from_secs(120);
-const START_ACK_TIMEOUT: Duration = Duration::from_secs(130);
+pub const RUNTIME_START_BUDGET: Duration = Duration::from_secs(130);
 const DIRECTION_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DIRECTION_CLEANUP_BUDGET: Duration = Duration::from_secs(4);
 pub const RUNTIME_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
@@ -128,6 +129,9 @@ impl std::error::Error for DuplexStartFailure {
 }
 
 pub trait ActiveDuplexRuntime: Send {
+    fn retained_native_bypass(&self) -> bool {
+        false
+    }
     fn reconfigure(
         &mut self,
         _admitted: AdmittedDuplex,
@@ -343,6 +347,16 @@ pub trait DuplexRuntimeObserver: Send + Sync {
     fn capture_frame_processed(&self, _direction: AudioDirection, _frame: CompletedCaptureFrame) {}
 
     #[doc(hidden)]
+    fn native_capture_frame_processed(
+        &self,
+        direction: AudioDirection,
+        frame: CompletedCaptureFrame,
+        _timing: NativeCaptureTiming,
+    ) {
+        self.capture_frame_processed(direction, frame);
+    }
+
+    #[doc(hidden)]
     fn capture_frames_pending(
         &self,
         _direction: AudioDirection,
@@ -401,6 +415,16 @@ pub struct CompletedCaptureFrame {
     pub frame_duration_ms: u16,
     pub samples_per_frame: u64,
     pub runtime_generation: Uuid,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeCaptureTiming {
+    pub graph: translator_audio::AecGraphIdentity,
+    pub adc_start: u64,
+    pub adc_end: u64,
+    pub capture_buffer_frames: u32,
+    pub capture_read_bracket_ns: u64,
+    pub origin: NativeCaptureOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,6 +644,192 @@ pub struct ProcessDuplexRunner {
     config: ProcessDuplexConfig,
     observer: Arc<dyn DuplexRuntimeObserver>,
     playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
+    native: Option<Arc<NativeDuplexIo>>,
+    start_facts: Option<Arc<dyn crate::RuntimeFactsSource>>,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct NativeDirectionProgress {
+    pub runtime_generation: Option<Uuid>,
+    pub drained: bool,
+    pub parked: bool,
+    pub completed: u64,
+    pub failed: bool,
+    pub last_capture_physical: bool,
+    pub bypass_frames: u64,
+}
+
+pub(crate) struct NativeDuplexIo {
+    pub handle: NativeAecHandle,
+    capture: AsyncMutex<NativeCaptureReceiver>,
+    paused: watch::Sender<bool>,
+    progress: Mutex<HashMap<AudioDirection, NativeDirectionProgress>>,
+    injected_positive: std::sync::atomic::AtomicBool,
+    bypass: std::sync::atomic::AtomicBool,
+    reservation: Mutex<Option<Arc<AecStartReservation>>>,
+}
+
+impl NativeDuplexIo {
+    pub(crate) fn new(handle: NativeAecHandle, capture: NativeCaptureReceiver) -> Arc<Self> {
+        let (paused, _) = watch::channel(true);
+        Arc::new(Self {
+            handle,
+            capture: AsyncMutex::new(capture),
+            paused,
+            progress: Mutex::new(HashMap::new()),
+            injected_positive: std::sync::atomic::AtomicBool::new(false),
+            bypass: std::sync::atomic::AtomicBool::new(false),
+            reservation: Mutex::new(None),
+        })
+    }
+
+    pub(crate) fn progress(&self, direction: AudioDirection) -> NativeDirectionProgress {
+        self.progress
+            .lock()
+            .expect("native progress mutex poisoned")
+            .get(&direction)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn allow_positive(&self, allowed: bool) {
+        self.injected_positive
+            .store(allowed, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn attach_reservation(&self, reservation: Arc<AecStartReservation>) {
+        *self
+            .reservation
+            .lock()
+            .expect("native reservation mutex poisoned") = Some(reservation);
+    }
+
+    pub(crate) fn suspend_delivery(&self) {
+        self.bypass
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.paused.send_replace(true);
+    }
+
+    fn validate_pcm_authority(&self) -> Result<(), DuplexRuntimeError> {
+        if let Some(reservation) = self
+            .reservation
+            .lock()
+            .map_err(|_| DuplexRuntimeError::StartFailed)?
+            .as_ref()
+        {
+            reservation
+                .validate_retained_pcm()
+                .map_err(|_| DuplexRuntimeError::StartFailed)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn resume(&self, deadline: Instant) -> Result<(), DuplexRuntimeError> {
+        self.bypass
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.handle
+            .check_fresh(deadline)
+            .map_err(|_| DuplexRuntimeError::StartFailed)?;
+        if self
+            .progress
+            .lock()
+            .map_err(|_| DuplexRuntimeError::StartFailed)?
+            .values()
+            .any(|state| state.failed)
+        {
+            return Err(DuplexRuntimeError::StartFailed);
+        }
+        self.handle
+            .resume_capture(deadline)
+            .await
+            .map_err(|_| DuplexRuntimeError::StartFailed)?;
+        self.paused.send_replace(false);
+        Ok(())
+    }
+
+    pub(crate) async fn pause(&self, deadline: Instant) -> Result<(), DuplexRuntimeError> {
+        self.bypass
+            .store(false, std::sync::atomic::Ordering::Release);
+        loop {
+            let drained = {
+                let progress = self
+                    .progress
+                    .lock()
+                    .map_err(|_| DuplexRuntimeError::StopFailed)?;
+                if progress.values().any(|state| state.failed) {
+                    return Err(DuplexRuntimeError::StopFailed);
+                }
+                !progress.is_empty() && progress.values().all(|state| state.drained)
+            };
+            if drained {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(DuplexRuntimeError::StopFailed);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        self.handle
+            .pause_capture(deadline)
+            .await
+            .map_err(|_| DuplexRuntimeError::StopFailed)?;
+        self.paused.send_replace(true);
+        loop {
+            let parked = self
+                .progress
+                .lock()
+                .map_err(|_| DuplexRuntimeError::StopFailed)?
+                .values()
+                .all(|state| state.parked);
+            if parked {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(DuplexRuntimeError::StopFailed);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        self.capture
+            .lock()
+            .await
+            .discard_paused()
+            .map_err(|_| DuplexRuntimeError::StopFailed)?;
+        self.reservation
+            .lock()
+            .map_err(|_| DuplexRuntimeError::StopFailed)?
+            .take();
+        self.handle
+            .stop_playback(deadline)
+            .await
+            .map_err(|_| DuplexRuntimeError::StopFailed)
+    }
+
+    pub(crate) async fn begin_bypass(&self, deadline: Instant) -> Result<(), DuplexRuntimeError> {
+        self.handle
+            .check_fresh(deadline)
+            .map_err(|_| DuplexRuntimeError::StopFailed)?;
+        let before = self.progress(AudioDirection::Speaker);
+        if before.failed || before.runtime_generation.is_none() || !before.parked {
+            return Err(DuplexRuntimeError::StopFailed);
+        }
+        self.bypass
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Wake the retained worker without enabling microphone capture or VAD.
+        self.paused.send_replace(true);
+        loop {
+            let progress = self.progress(AudioDirection::Speaker);
+            if progress.failed {
+                return Err(DuplexRuntimeError::StopFailed);
+            }
+            if progress.bypass_frames > before.bypass_frames {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(DuplexRuntimeError::StopFailed);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -629,6 +839,9 @@ pub enum PlaybackRegistrationPhase {
 }
 
 pub trait PlaybackMixAuthority: Send + Sync {
+    fn native_playback_percent(&self, _original: bool) -> Result<u8, DuplexRuntimeError> {
+        Err(DuplexRuntimeError::StartFailed)
+    }
     fn admit_registered(
         &self,
         registration: &PulsePlaybackRegistration,
@@ -649,6 +862,8 @@ impl ProcessDuplexRunner {
             config,
             observer: Arc::new(NoopDuplexRuntimeObserver),
             playback_mix_authority: None,
+            native: None,
+            start_facts: None,
         }
     }
 
@@ -660,6 +875,8 @@ impl ProcessDuplexRunner {
             config,
             observer,
             playback_mix_authority: None,
+            native: None,
+            start_facts: None,
         }
     }
 
@@ -668,15 +885,65 @@ impl ProcessDuplexRunner {
         self
     }
 
+    pub fn with_start_facts(mut self, facts: Arc<dyn crate::RuntimeFactsSource>) -> Self {
+        self.start_facts = Some(facts);
+        self
+    }
+
+    pub(crate) fn with_native(mut self, native: Arc<NativeDuplexIo>) -> Self {
+        self.native = Some(native);
+        self
+    }
+
+    pub(crate) fn start_native_calibration(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        completion: Arc<dyn DuplexCompletionObserver>,
+        deadline: Instant,
+    ) -> DuplexStartResult {
+        let launch = DuplexLaunch {
+            microphone: Some(direction_launch(
+                snapshot,
+                AudioDirection::Microphone,
+                "retained-native-clean".into(),
+                translator_audio::MIC_OUT_SINK.into(),
+                "translator-outgoing-capture",
+                "translator-outgoing-playback",
+                None,
+            )),
+            speaker: snapshot
+                .directions
+                .iter()
+                .find(|state| state.direction_id == AudioDirection::Speaker && state.enabled)
+                .map(|_| {
+                    direction_launch(
+                        snapshot,
+                        AudioDirection::Speaker,
+                        format!("{}.monitor", translator_audio::REMOTE_IN_SINK),
+                        "retained-native-playback".into(),
+                        "translator-incoming-capture",
+                        "translator-incoming-playback",
+                        None,
+                    )
+                }),
+        };
+        self.start_launch(launch, Some((0, completion)), deadline, None)
+    }
+
     fn start_launch(
         &self,
         launch: DuplexLaunch,
         completion: Option<(u64, Arc<dyn DuplexCompletionObserver>)>,
         deadline: Instant,
+        activation_check: Option<crate::acoustic_admission::StartAdmissionCheck>,
     ) -> DuplexStartResult {
-        let config = self.config.clone();
         let observer = self.observer.clone();
-        let playback_mix_authority = self.playback_mix_authority.clone();
+        let effects = ProcessDirectionEffects {
+            config: self.config.clone(),
+            playback_mix_authority: self.playback_mix_authority.clone(),
+            native: self.native.clone(),
+            activation_check,
+        };
         let (stop_sender, stop_receiver) = watch::channel(None);
         let (command_sender, command_receiver) = mpsc::channel(1);
         let (ack_sender, ack_receiver) = std_mpsc::sync_channel(1);
@@ -692,13 +959,12 @@ impl ProcessDuplexRunner {
                 let result = match runtime {
                     Ok(runtime) => runtime.block_on(tokio::task::LocalSet::new().run_until(
                         run_process_duplex(
-                            config,
                             launch,
                             stop_receiver,
                             command_receiver,
                             ack_sender,
                             observer,
-                            playback_mix_authority,
+                            effects,
                             async_completion.as_ref(),
                             deadline,
                         ),
@@ -716,7 +982,7 @@ impl ProcessDuplexRunner {
             })
             .map_err(|_| DuplexStartFailure::rejected(DuplexRuntimeError::StartFailed))?;
         let runtime = ProcessActiveDuplex::new(stop_sender, command_sender, done_receiver, thread);
-        let ack_deadline = deadline.min(Instant::now() + START_ACK_TIMEOUT);
+        let ack_deadline = deadline.min(Instant::now() + RUNTIME_START_BUDGET);
         let ack = remaining(ack_deadline).and_then(|remaining| {
             ack_receiver
                 .recv_timeout(remaining)
@@ -728,8 +994,12 @@ impl ProcessDuplexRunner {
 
 impl DuplexRunner for ProcessDuplexRunner {
     fn start(&self, admitted: AdmittedDuplex, deadline: Instant) -> DuplexStartResult {
+        let activation_check = self
+            .start_facts
+            .as_ref()
+            .map(|facts| admitted.activation_check(facts.clone()));
         let launch = DuplexLaunch::from(admitted);
-        self.start_launch(launch, None, deadline)
+        self.start_launch(launch, None, deadline, activation_check)
     }
 
     fn start_supervised(
@@ -739,8 +1009,17 @@ impl DuplexRunner for ProcessDuplexRunner {
         completion: Arc<dyn DuplexCompletionObserver>,
         deadline: Instant,
     ) -> DuplexStartResult {
+        let activation_check = self
+            .start_facts
+            .as_ref()
+            .map(|facts| admitted.activation_check(facts.clone()));
         let launch = DuplexLaunch::from(admitted);
-        self.start_launch(launch, Some((generation, completion)), deadline)
+        self.start_launch(
+            launch,
+            Some((generation, completion)),
+            deadline,
+            activation_check,
+        )
     }
 }
 
@@ -1094,17 +1373,19 @@ struct ProcessAcquisition {
     capture: Option<PulsePcmCapture>,
     playback: Option<PulsePcmPlayback>,
     runtime_generation: Option<Uuid>,
+    native: Option<Arc<NativeDuplexIo>>,
 }
 
 struct PreparedDirection {
     launch: DirectionLaunch,
     session: DirectionSession,
     provider: ProviderStreamClient,
-    capture: PulsePcmCapture,
+    capture: Option<PulsePcmCapture>,
     playback: Option<PulsePcmPlayback>,
     playback_reusable: bool,
     playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
     runtime_generation: Uuid,
+    native: Option<Arc<NativeDuplexIo>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1197,6 +1478,10 @@ enum DirectionOutcome {
 trait DirectionEffects: Clone + 'static {
     type Acquisition: 'static;
     type Prepared: 'static;
+
+    fn validate_start(&self, _deadline: Instant) -> Result<(), DuplexRuntimeError> {
+        Ok(())
+    }
 
     fn begin(&self, launch: DirectionLaunch) -> Self::Acquisition;
     fn session_id(owner: &Self::Acquisition) -> uuid::Uuid;
@@ -1321,45 +1606,36 @@ const FAULT_BACKOFF: [Duration; MAX_RUNTIME_RESTARTS] = [
 
 #[allow(clippy::too_many_arguments)]
 async fn run_process_duplex(
-    config: ProcessDuplexConfig,
     launch: DuplexLaunch,
     stop: watch::Receiver<Option<Instant>>,
     commands: mpsc::Receiver<RuntimeCommand>,
     ack: std_mpsc::SyncSender<StartAck>,
     observer: Arc<dyn DuplexRuntimeObserver>,
-    playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
+    effects: ProcessDirectionEffects,
     completion: Option<&(u64, Arc<dyn DuplexCompletionObserver>)>,
     deadline: Instant,
 ) -> Result<(), DuplexRuntimeError> {
     let lifecycle = completion.map(|(generation, observer)| (*generation, observer.clone()));
-    let coordinator = match DuplexCoordinator::start(
-        config,
-        launch,
-        observer,
-        playback_mix_authority,
-        lifecycle,
-        deadline,
-    )
-    .await
-    {
-        Ok(coordinator) => coordinator,
-        Err(failure) => {
-            let CoordinatorStartFailure { error, cleanup } = failure;
-            let Some(coordinator) = cleanup else {
-                let _ = ack.send(StartAck::Rejected(error));
-                return Err(error);
-            };
-            let _ = ack.send(StartAck::CleanupPending(error));
-            return run_coordinator(
-                coordinator,
-                stop,
-                commands,
-                completion.cloned(),
-                Some(error),
-            )
-            .await;
-        }
-    };
+    let coordinator =
+        match DuplexCoordinator::start(effects, launch, observer, lifecycle, deadline).await {
+            Ok(coordinator) => coordinator,
+            Err(failure) => {
+                let CoordinatorStartFailure { error, cleanup } = failure;
+                let Some(coordinator) = cleanup else {
+                    let _ = ack.send(StartAck::Rejected(error));
+                    return Err(error);
+                };
+                let _ = ack.send(StartAck::CleanupPending(error));
+                return run_coordinator(
+                    coordinator,
+                    stop,
+                    commands,
+                    completion.cloned(),
+                    Some(error),
+                )
+                .await;
+            }
+        };
     let _ = ack.send(StartAck::Ready);
     run_coordinator(coordinator, stop, commands, completion.cloned(), None).await
 }
@@ -1477,13 +1753,13 @@ fn start_terminal_cleanup(
 
 impl DuplexCoordinator<ProcessSidecarRuntime, ProcessDirectionEffects> {
     async fn start(
-        config: ProcessDuplexConfig,
+        effects: ProcessDirectionEffects,
         desired: DuplexLaunch,
         observer: Arc<dyn DuplexRuntimeObserver>,
-        playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
         lifecycle: Option<(u64, Arc<dyn DuplexCompletionObserver>)>,
         deadline: Instant,
     ) -> Result<Self, CoordinatorStartFailure> {
+        let config = effects.config.clone();
         let runtime = ProcessSidecarRuntime::new(
             config.python.clone(),
             config.sidecar_root.clone(),
@@ -1494,10 +1770,6 @@ impl DuplexCoordinator<ProcessSidecarRuntime, ProcessDirectionEffects> {
             error: DuplexRuntimeError::StartFailed,
             cleanup: None,
         })?;
-        let effects = ProcessDirectionEffects {
-            config: config.clone(),
-            playback_mix_authority,
-        };
         let mut coordinator = Self::with_dependencies(
             config,
             desired,
@@ -1566,6 +1838,7 @@ impl<R: crate::SidecarRuntime, E: DirectionEffects> DuplexCoordinator<R, E> {
             .await
             .map_err(|_| DuplexRuntimeError::StartFailed)??;
         deadline_open(deadline, DuplexRuntimeError::StartFailed)?;
+        self.effects.validate_start(deadline)?;
         let batch = self
             .prepare_batch(self.desired.launches(), deadline)
             .await
@@ -2629,6 +2902,8 @@ fn next_fault_delay(
 struct ProcessDirectionEffects {
     config: ProcessDuplexConfig,
     playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
+    native: Option<Arc<NativeDuplexIo>>,
+    activation_check: Option<crate::acoustic_admission::StartAdmissionCheck>,
 }
 
 impl ProcessDirectionEffects {
@@ -2637,6 +2912,8 @@ impl ProcessDirectionEffects {
         Self {
             config,
             playback_mix_authority: None,
+            native: None,
+            activation_check: None,
         }
     }
 
@@ -2739,27 +3016,31 @@ impl ProcessDirectionEffects {
                     FaultScope::Local
                 })?;
         }
-        owner.capture = Some(
-            capture_spawner(&PulsePcmCommand::capture(
-                &owner.launch.capture_device,
-                owner.launch.capture_stream_name,
-            ))
-            .map_err(|_| {
-                direction_start_error(direction, "capture_spawn");
-                FaultScope::Local
-            })?,
-        );
+        if self.native.is_none() || direction != AudioDirection::Microphone {
+            owner.capture = Some(
+                capture_spawner(&PulsePcmCommand::capture(
+                    &owner.launch.capture_device,
+                    owner.launch.capture_stream_name,
+                ))
+                .map_err(|_| {
+                    direction_start_error(direction, "capture_spawn");
+                    FaultScope::Local
+                })?,
+            );
+        }
         deadline_open(open_deadline, FaultScope::Local)?;
-        owner.playback = Some(
-            playback_spawner(&PulsePcmCommand::playback(
-                &owner.launch.playback_device,
-                owner.launch.playback_stream_name,
-            ))
-            .map_err(|_| {
-                direction_start_error(direction, "playback_spawn");
-                FaultScope::Local
-            })?,
-        );
+        if self.native.is_none() || direction != AudioDirection::Speaker {
+            owner.playback = Some(
+                playback_spawner(&PulsePcmCommand::playback(
+                    &owner.launch.playback_device,
+                    owner.launch.playback_stream_name,
+                ))
+                .map_err(|_| {
+                    direction_start_error(direction, "playback_spawn");
+                    FaultScope::Local
+                })?,
+            );
+        }
         tracing::info!(event = "direction_pcm_spawned", direction = ?direction);
         Ok(())
     }
@@ -2770,6 +3051,22 @@ impl DirectionEffects for ProcessDirectionEffects {
     type Acquisition = ProcessAcquisition;
     type Prepared = PreparedDirection;
 
+    fn validate_start(&self, deadline: Instant) -> Result<(), DuplexRuntimeError> {
+        let Some(check) = self.activation_check.as_ref() else {
+            return Ok(());
+        };
+        check
+            .validate(
+                deadline
+                    .min(Instant::now() + DIRECTION_CLEANUP_BUDGET)
+                    .into_std(),
+            )
+            .map_err(|error| {
+                tracing::warn!(event = "start_admission_recheck_failed", code = error.code);
+                DuplexRuntimeError::StartFailed
+            })
+    }
+
     fn begin(&self, launch: DirectionLaunch) -> Self::Acquisition {
         let session = DirectionSession::new(launch.runtime);
         ProcessAcquisition {
@@ -2779,6 +3076,7 @@ impl DirectionEffects for ProcessDirectionEffects {
             capture: None,
             playback: None,
             runtime_generation: None,
+            native: self.native.clone(),
         }
     }
 
@@ -2800,6 +3098,25 @@ impl DirectionEffects for ProcessDirectionEffects {
             PulsePcmPlayback::spawn,
         )
         .await?;
+        if let Some(native) = self.native.as_ref() {
+            native
+                .handle
+                .check_fresh(deadline)
+                .map_err(|_| FaultScope::Local)?;
+            let mut states = native.progress.lock().map_err(|_| FaultScope::Local)?;
+            let state = states.entry(owner.launch.runtime.direction).or_default();
+            if state
+                .runtime_generation
+                .is_some_and(|id| id != generation.generation_id)
+            {
+                state.failed = true;
+                return Err(FaultScope::Shared);
+            }
+            state.runtime_generation = Some(generation.generation_id);
+            if owner.launch.runtime.direction == AudioDirection::Speaker {
+                return Ok(());
+            }
+        }
         let registration = owner
             .playback
             .as_mut()
@@ -2829,18 +3146,22 @@ impl DirectionEffects for ProcessDirectionEffects {
     }
 
     fn finish(&self, mut owner: Self::Acquisition) -> Result<Self::Prepared, Self::Acquisition> {
-        if owner.provider.is_none() || owner.capture.is_none() || owner.playback.is_none() {
+        let native_capture =
+            owner.native.is_some() && owner.launch.runtime.direction == AudioDirection::Microphone;
+        let native_playback =
+            owner.native.is_some() && owner.launch.runtime.direction == AudioDirection::Speaker;
+        if owner.provider.is_none()
+            || (!native_capture && owner.capture.is_none())
+            || (!native_playback && owner.playback.is_none())
+        {
             return Err(owner);
         }
         let provider = owner
             .provider
             .take()
             .expect("provider presence was checked");
-        let capture = owner.capture.take().expect("capture presence was checked");
-        let playback = owner
-            .playback
-            .take()
-            .expect("playback presence was checked");
+        let capture = owner.capture.take();
+        let playback = owner.playback.take();
         let runtime_generation = owner
             .runtime_generation
             .expect("runtime generation is recorded during prepare");
@@ -2849,10 +3170,11 @@ impl DirectionEffects for ProcessDirectionEffects {
             session: owner.session,
             provider,
             capture,
-            playback: Some(playback),
+            playback,
             playback_reusable: true,
             playback_mix_authority: self.playback_mix_authority.clone(),
             runtime_generation,
+            native: owner.native,
         })
     }
 
@@ -2861,9 +3183,10 @@ impl DirectionEffects for ProcessDirectionEffects {
             launch: prepared.launch,
             session: prepared.session,
             provider: Some(prepared.provider),
-            capture: Some(prepared.capture),
+            capture: prepared.capture,
             playback: prepared.playback,
             runtime_generation: Some(prepared.runtime_generation),
+            native: prepared.native,
         }
     }
 
@@ -2875,10 +3198,19 @@ impl DirectionEffects for ProcessDirectionEffects {
         entered: oneshot::Sender<()>,
     ) -> DirectionOutcome {
         let _ = entered.send(());
-        match run_direction_loop(prepared, stop, observer).await {
+        let outcome = match run_direction_loop(prepared, stop, observer).await {
             Ok(outcome) => outcome,
             Err(origin) => DirectionOutcome::Fault(classify_direction_failure(origin)),
+        };
+        if let Some(native) = prepared.native.as_ref()
+            && let Ok(mut states) = native.progress.lock()
+        {
+            states
+                .entry(prepared.launch.runtime.direction)
+                .or_default()
+                .failed = true;
         }
+        outcome
     }
 
     async fn stop_pcm(
@@ -2887,6 +3219,14 @@ impl DirectionEffects for ProcessDirectionEffects {
         deadline: Instant,
     ) -> Result<(), DuplexRuntimeError> {
         let mut clean = true;
+        if let Some(native) = owner.native.as_ref() {
+            clean = native.handle.identity().is_none()
+                || (native.handle.pause_capture(deadline).await.is_ok()
+                    && native.handle.stop_playback(deadline).await.is_ok());
+            if clean {
+                owner.native = None;
+            }
+        }
         if let Some(capture) = owner.capture.as_mut() {
             if Instant::now() < deadline
                 && tokio::time::timeout_at(deadline, capture.stop())
@@ -3059,24 +3399,20 @@ async fn await_provider_send<T>(
     await_hot_io(HotIoKind::ProviderSend, stop, phase_deadline, operation).await
 }
 
-async fn await_playback_write<T>(
+async fn await_playback_write<T, E>(
     reusable: &mut bool,
     stop: &mut watch::Receiver<Option<WorkerStop>>,
     phase_deadline: Option<Instant>,
-    operation: impl Future<Output = T>,
-) -> HotIoResult<T> {
+    operation: impl Future<Output = Result<T, E>>,
+) -> HotIoResult<Result<T, E>> {
     if !*reusable {
         return HotIoResult::NotReusable {
             kind: HotIoKind::PlaybackWrite,
         };
     }
+    *reusable = false;
     let result = await_hot_io(HotIoKind::PlaybackWrite, stop, phase_deadline, operation).await;
-    if matches!(
-        result,
-        HotIoResult::Stopped { .. } | HotIoResult::TimedOut { .. }
-    ) {
-        *reusable = false;
-    }
+    *reusable = matches!(result, HotIoResult::Completed(Ok(_)));
     result
 }
 
@@ -3087,23 +3423,55 @@ fn watchdog_phase_deadline(session: &DirectionSession) -> Option<Instant> {
     sampled.checked_add(Duration::from_nanos(remaining))
 }
 
+struct DirectionPlayback<'a> {
+    launch: &'a DirectionLaunch,
+    playback: &'a mut Option<PulsePcmPlayback>,
+    reusable: &'a mut bool,
+    mix_authority: &'a Option<Arc<dyn PlaybackMixAuthority>>,
+    native: &'a Option<Arc<NativeDuplexIo>>,
+}
+
 async fn stop_playback_for_reset(
-    direction: &mut PreparedDirection,
+    direction: &mut DirectionPlayback<'_>,
     stop: &mut watch::Receiver<Option<WorkerStop>>,
+    phase_deadline: Option<Instant>,
 ) -> Result<Option<WorkerStop>, DirectionFailureOrigin> {
+    if direction.launch.runtime.direction == AudioDirection::Speaker
+        && let Some(native) = direction.native.as_ref()
+    {
+        let deadline = phase_deadline
+            .unwrap_or_else(|| Instant::now() + HOT_IO_LIVENESS_TIMEOUT)
+            .min(Instant::now() + HOT_IO_LIVENESS_TIMEOUT);
+        return match await_hot_io(
+            HotIoKind::PlaybackWrite,
+            stop,
+            Some(deadline),
+            native.handle.stop_playback(deadline),
+        )
+        .await
+        {
+            HotIoResult::Completed(Ok(())) => {
+                *direction.reusable = true;
+                Ok(None)
+            }
+            HotIoResult::Stopped { stop, .. } => Ok(Some(stop)),
+            _ => Err(DirectionFailureOrigin::PcmPlayback),
+        };
+    }
     let Some(playback) = direction.playback.as_mut() else {
         return Ok(None);
     };
-    match await_playback_write(
-        &mut direction.playback_reusable,
+    match await_hot_io(
+        HotIoKind::PlaybackWrite,
         stop,
-        watchdog_phase_deadline(&direction.session),
+        phase_deadline,
         playback.stop(),
     )
     .await
     {
         HotIoResult::Completed(Ok(())) => {
-            direction.playback = None;
+            *direction.playback = None;
+            *direction.reusable = true;
             Ok(None)
         }
         HotIoResult::Stopped { stop, .. } => Ok(Some(stop)),
@@ -3138,18 +3506,20 @@ where
     }
 }
 
-fn provider_send_operation(
-    direction: &PreparedDirection,
+fn provider_send_operation<'a>(
+    runtime_direction: AudioDirection,
+    session: &DirectionSession,
+    provider: &'a ProviderStreamClient,
     request: ProviderRequest,
 ) -> (
     AudioDirection,
     Option<Instant>,
-    impl Future<Output = Result<(), ProviderClientError>> + '_,
+    impl Future<Output = Result<(), ProviderClientError>> + 'a,
 ) {
     (
-        direction.launch.runtime.direction,
-        watchdog_phase_deadline(&direction.session),
-        direction.provider.send(request),
+        runtime_direction,
+        watchdog_phase_deadline(session),
+        provider.send(request),
     )
 }
 
@@ -3277,17 +3647,139 @@ enum PlaybackWrite {
     Stopped(WorkerStop),
 }
 
+enum DirectionLoopEvent {
+    Provider(Result<Option<ProviderEvent>, ProviderClientError>),
+    Capture(Result<(PcmFrame, Option<NativeCaptureTiming>), ()>),
+    Playback(Result<PlaybackWrite, DirectionFailureOrigin>),
+}
+
 async fn write_playback_frame(
-    direction: &mut PreparedDirection,
+    direction: &mut DirectionPlayback<'_>,
     stop: &mut watch::Receiver<Option<WorkerStop>>,
     frame: &PcmFrame,
-    metadata: QueuedPlaybackMetadata,
+    metadata: Option<QueuedPlaybackMetadata>,
+    phase_deadline: Option<Instant>,
     observer: &dyn DuplexRuntimeObserver,
 ) -> Result<PlaybackWrite, DirectionFailureOrigin> {
+    if let Some(native) = direction.native.as_ref() {
+        let bypass = metadata.is_none();
+        if (!bypass && *native.paused.borrow())
+            || (bypass
+                && (!*native.paused.borrow()
+                    || !native.bypass.load(std::sync::atomic::Ordering::Acquire)))
+        {
+            return Err(DirectionFailureOrigin::PcmPlayback);
+        }
+        native
+            .validate_pcm_authority()
+            .map_err(|_| DirectionFailureOrigin::PcmPlayback)?;
+    }
+    if direction.launch.runtime.direction == AudioDirection::Speaker
+        && let Some(native) = direction.native.as_ref()
+    {
+        let deadline = phase_deadline
+            .unwrap_or_else(|| Instant::now() + HOT_IO_LIVENESS_TIMEOUT)
+            .min(Instant::now() + HOT_IO_LIVENESS_TIMEOUT);
+        let percent = direction
+            .mix_authority
+            .as_ref()
+            .ok_or(DirectionFailureOrigin::PcmPlayback)?
+            .native_playback_percent(metadata.is_none())
+            .map_err(|_| DirectionFailureOrigin::PcmPlayback)?;
+        let result = await_playback_write(
+            direction.reusable,
+            stop,
+            Some(deadline),
+            native
+                .handle
+                .write_playback_with_gain(frame.pcm(), percent, deadline),
+        )
+        .await;
+        return match result {
+            HotIoResult::Completed(Ok(())) => {
+                let observed = monotonic_ns();
+                if let Some(metadata) = metadata {
+                    observe_playback_write(
+                        Ok::<(), ()>(()),
+                        direction.launch.runtime.direction,
+                        metadata,
+                        observed,
+                        observer,
+                    )
+                    .map_err(|_| DirectionFailureOrigin::PcmPlayback)?;
+                } else {
+                    let mut states = native
+                        .progress
+                        .lock()
+                        .map_err(|_| DirectionFailureOrigin::InternalTransport)?;
+                    let state = states.entry(AudioDirection::Speaker).or_default();
+                    state.bypass_frames = state.bypass_frames.saturating_add(1);
+                }
+                Ok(PlaybackWrite::Completed(observed))
+            }
+            HotIoResult::Stopped { stop, .. } => Ok(PlaybackWrite::Stopped(stop)),
+            _ => Err(DirectionFailureOrigin::PcmPlayback),
+        };
+    }
+    if direction.playback.is_none() {
+        *direction.playback = Some(
+            PulsePcmPlayback::spawn(&PulsePcmCommand::playback(
+                &direction.launch.playback_device,
+                direction.launch.playback_stream_name,
+            ))
+            .map_err(|_| {
+                direction_runtime_error(
+                    direction.launch.runtime.direction,
+                    "playback_respawn",
+                    DirectionFailureOrigin::PcmPlayback,
+                )
+            })?,
+        );
+        *direction.reusable = true;
+        let admission_deadline = phase_deadline
+            .unwrap_or_else(|| Instant::now() + HOT_IO_LIVENESS_TIMEOUT)
+            .min(Instant::now() + HOT_IO_LIVENESS_TIMEOUT);
+        let admitted = await_hot_io(
+            HotIoKind::PlaybackWrite,
+            stop,
+            Some(admission_deadline),
+            async {
+                let registration = direction
+                    .playback
+                    .as_mut()
+                    .expect("new playback is owned")
+                    .wait_registered_muted(admission_deadline.into_std())
+                    .await
+                    .map_err(|_| DuplexRuntimeError::StartFailed)?;
+                direction
+                    .mix_authority
+                    .as_ref()
+                    .ok_or(DuplexRuntimeError::StartFailed)?
+                    .admit_registered(
+                        &registration,
+                        PlaybackRegistrationPhase::Running,
+                        admission_deadline.into_std(),
+                    )
+            },
+        )
+        .await;
+        match admitted {
+            HotIoResult::Completed(Ok(())) => {}
+            HotIoResult::Stopped { stop, .. } => return Ok(PlaybackWrite::Stopped(stop)),
+            _ => {
+                return Err(direction_runtime_error(
+                    direction.launch.runtime.direction,
+                    "playback_respawn_admission",
+                    DirectionFailureOrigin::PcmPlayback,
+                ));
+            }
+        }
+    }
+    let metadata = metadata.ok_or(DirectionFailureOrigin::PcmPlayback)?;
     let result = await_playback_write(
-        &mut direction.playback_reusable,
+        direction.reusable,
         stop,
-        watchdog_phase_deadline(&direction.session),
+        phase_deadline,
         direction
             .playback
             .as_mut()
@@ -3320,441 +3812,564 @@ async fn run_direction_loop(
     stop: &mut watch::Receiver<Option<WorkerStop>>,
     observer: Arc<dyn DuplexRuntimeObserver>,
 ) -> Result<DirectionOutcome, DirectionFailureOrigin> {
-    let mut segmenter = SpeechSegmenter::new(
-        direction.session.stream_id(),
-        WebRtcVoiceDetector::default(),
-    );
+    let PreparedDirection {
+        launch,
+        session,
+        provider,
+        capture,
+        playback,
+        playback_reusable,
+        playback_mix_authority,
+        runtime_generation,
+        native,
+    } = direction;
+    let runtime_generation = *runtime_generation;
+    let native = native.clone();
+    let mut playback_io = DirectionPlayback {
+        launch,
+        playback,
+        reusable: playback_reusable,
+        mix_authority: playback_mix_authority,
+        native: &native,
+    };
+    let mut segmenter = SpeechSegmenter::new(session.stream_id(), WebRtcVoiceDetector::default());
     let mut capture_sequence = 0;
     let mut capture_queue = BoundedPcmQueue::default();
     let mut playback_queue = BoundedPcmQueue::default();
-    let mut playback_metadata = VecDeque::new();
+    let mut playback_metadata = VecDeque::<Option<QueuedPlaybackMetadata>>::new();
     let mut playback_audible_until_ns = 0;
     let mut watchdog = tokio::time::interval(WATCHDOG_INTERVAL);
     watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut paused = native.as_ref().map(|native| native.paused.subscribe());
+    let mut mode_change_requested = false;
     loop {
-        tokio::select! {
-            biased;
-            reason = wait_for_direction_stop(stop) => {
+        let playback_frame = playback_queue.pop();
+        let playback_context = if playback_frame.is_some() {
+            playback_metadata.pop_front().ok_or_else(|| {
+                direction_runtime_error(
+                    launch.runtime.direction,
+                    "playback_metadata_missing",
+                    DirectionFailureOrigin::Queue,
+                )
+            })?
+        } else {
+            None
+        };
+        let admitted = Instant::now();
+        let playback_deadline = Some(
+            watchdog_phase_deadline(session)
+                .unwrap_or(admitted + HOT_IO_LIVENESS_TIMEOUT)
+                .min(admitted + HOT_IO_LIVENESS_TIMEOUT),
+        );
+        let mut playback_finished = playback_frame.is_none();
+        let mut playback_stop = stop.clone();
+        let mut reset_playback = false;
+        let mut reset_request = None;
+        let loop_result: Result<Option<DirectionOutcome>, DirectionFailureOrigin> = {
+            let operation = async {
+                match playback_frame.as_ref() {
+                    Some(frame) => {
+                        write_playback_frame(
+                            &mut playback_io,
+                            &mut playback_stop,
+                            frame,
+                            playback_context,
+                            playback_deadline,
+                            observer.as_ref(),
+                        )
+                        .await
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::pin!(operation);
+            async {
+                'poll: loop {
+                    let is_paused = paused.as_ref().is_some_and(|paused| *paused.borrow());
+                    let native_bypass = is_paused
+                        && launch.runtime.direction == AudioDirection::Speaker
+                        && native
+                            .as_ref()
+                            .is_some_and(|io| io.bypass.load(std::sync::atomic::Ordering::Acquire));
+                    if let Some(native) = native.as_ref() {
+                        let drained = playback_finished && session.is_drained()
+                            && segmenter.pending_frame_count() == 0
+                            && playback_queue.buffered_ms() == 0
+                            && capture_queue.buffered_ms() == 0
+                            && playback_audible_until_ns <= monotonic_ns();
+                        let mut states = native
+                            .progress
+                            .lock()
+                            .map_err(|_| DirectionFailureOrigin::InternalTransport)?;
+                        let state = states
+                            .entry(launch.runtime.direction)
+                            .or_default();
+                        state.drained = drained;
+                        state.parked = is_paused && drained;
+                    }
+
+                    tokio::select! {
+                        biased;
+                        reason = wait_for_direction_stop(stop) => {
+                            return Ok(Some(DirectionOutcome::Stopped(reason)));
+                        }
+                        _ = async { if let Some(paused) = paused.as_mut() { let _ = paused.changed().await; } else { std::future::pending::<()>().await; } } => {
+                            if native.as_ref().is_some_and(|io| *io.paused.borrow()
+                                && !io.bypass.load(std::sync::atomic::Ordering::Acquire))
+                                && !playback_finished {
+                                playback_queue.clear();
+                                playback_metadata.clear();
+                                reset_playback = true;
+                                break 'poll Ok(None);
+                            }
+                        }
+                        _ = watchdog.tick() => {
+                            let effects = session
+                                .poll(monotonic_ns())
+                                .map_err(|_| direction_runtime_error(
+                                    launch.runtime.direction,
+                                    "watchdog_poll",
+                                    DirectionFailureOrigin::SessionValidation,
+                                ))?;
+                            for effect in effects {
+                                match effect {
+                                    DirectionWatchdogEffect::Send(request) => {
+                                        tracing::warn!(
+                                            event = "direction_watchdog_action",
+                                            direction = ?launch.runtime.direction,
+                                            action = "send"
+                                        );
+                                        let (runtime_direction, phase_deadline, operation) =
+                                            provider_send_operation(launch.runtime.direction, session, provider, request);
+                                        if let Some(stop) = send_provider(
+                                            runtime_direction,
+                                            ProviderEffectContext::unattributed(runtime_generation),
+                                            stop,
+                                            phase_deadline,
+                                            operation,
+                                            observer.as_ref(),
+                                        )
+                                        .await?
+                                        {
+                                                return Ok(Some(DirectionOutcome::Stopped(stop)));
+                                        }
+                                    }
+                                    DirectionWatchdogEffect::PurgeAndSend(request) => {
+                                        tracing::warn!(
+                                            event = "direction_watchdog_action",
+                                            direction = ?launch.runtime.direction,
+                                            action = "purge_and_send"
+                                        );
+                                        playback_queue.clear();
+                                        playback_metadata.clear();
+                                        reset_playback = true;
+                                        reset_request = Some(request);
+                                        break 'poll Ok(None);
+
+                                    }
+                                    DirectionWatchdogEffect::RestartSidecar => {
+                                        tracing::error!(
+                                            event = "direction_runtime_stage_failed",
+                                            direction = ?launch.runtime.direction,
+                                            stage = "watchdog_restart"
+                                        );
+                                        return Err(DirectionFailureOrigin::WatchdogRestart);
+                                    }
+                                }
+                            }
+                        }
+
+                        event = async {
+                            tokio::select! {
+                                event = provider.next_event() => DirectionLoopEvent::Provider(event),
+                                frame = read_direction_capture(capture.as_mut(), native.as_ref(),
+                                    launch.runtime.direction, capture_sequence),
+                                    if !mode_change_requested && (!is_paused || native_bypass) =>
+                                    DirectionLoopEvent::Capture(frame),
+                                result = operation.as_mut() => DirectionLoopEvent::Playback(result),
+                            }
+                        } => match event {
+                            DirectionLoopEvent::Provider(event) => {
+                                let event = event
+                                    .map_err(|error| {
+                                        tracing::error!(
+                                            event = "direction_runtime_stage_failed",
+                                            direction = ?launch.runtime.direction,
+                                            stage = "provider_event_receive",
+                                            error = ?error
+                                        );
+                                        provider_failure_origin(&error)
+                                    })?
+                                    .ok_or_else(|| direction_runtime_error(
+                                        launch.runtime.direction,
+                                        "provider_event_closed",
+                                        DirectionFailureOrigin::ProviderConnection,
+                                    ))?;
+                                let effects = session
+                                    .handle_provider_event(&event, monotonic_ns())
+                                    .map_err(|error| {
+                                        tracing::error!(
+                                            event = "direction_runtime_stage_failed",
+                                            direction = ?launch.runtime.direction,
+                                            stage = "provider_event_validation",
+                                            error = ?error
+                                        );
+                                        DirectionFailureOrigin::SessionValidation
+                                    })?;
+                                for effect in effects {
+                                    match effect {
+                                        DirectionEffect::Playback {
+                                            utterance_id,
+                                            frame,
+                                            ..
+                                        } => {
+                                            let metadata = QueuedPlaybackMetadata {
+                                                utterance_id,
+                                                sequence: frame.sequence(),
+                                                provider_monotonic_ns: frame.capture_monotonic_ns(),
+                                                enqueued_monotonic_ns: monotonic_ns(),
+                                            };
+                                            playback_queue
+                                                .push(frame)
+                                                .map_err(|_| direction_runtime_error(
+                                                    launch.runtime.direction,
+                                                    "playback_queue_overflow",
+                                                    DirectionFailureOrigin::Queue,
+                                                ))?;
+                                            playback_metadata.push_back(Some(metadata));
+                                        }
+                                        DirectionEffect::TranscriptFinal { utterance_id } => {
+                                            tracing::info!(
+                                                event = "direction_stage_observed",
+                                                direction = ?launch.runtime.direction,
+                                                stage = "asr_final",
+                                                %utterance_id
+                                            );
+                                            observer.observe(DuplexRuntimeEvent::TranscriptFinal {
+                                                direction: launch.runtime.direction,
+                                                utterance_id,
+                                            });
+                                        }
+                                        DirectionEffect::TranslationFinal { utterance_id } => {
+                                            tracing::info!(
+                                                event = "direction_stage_observed",
+                                                direction = ?launch.runtime.direction,
+                                                stage = "translation_final",
+                                                %utterance_id
+                                            );
+                                            observer.observe(DuplexRuntimeEvent::TranslationFinal {
+                                                direction: launch.runtime.direction,
+                                                utterance_id,
+                                            });
+                                        }
+                                        latency @ DirectionEffect::Latency { .. } => {
+                                            observe_latency_effect(
+                                                launch.runtime.direction,
+                                                &latency,
+                                                observer.as_ref(),
+                                            );
+                                        }
+                                        DirectionEffect::ProviderError {
+                                            utterance_id,
+                                            code,
+                                            retryable,
+                                        } => {
+                                            tracing::warn!(
+                                                event = "direction_provider_error",
+                                                direction = ?launch.runtime.direction,
+                                                utterance_id = ?utterance_id,
+                                                code = ?code,
+                                                retryable
+                                            );
+                                            observer.observe(DuplexRuntimeEvent::ProviderError {
+                                                direction: launch.runtime.direction,
+                                                utterance_id,
+                                                code,
+                                                retryable,
+                                            });
+                                        }
+                                        DirectionEffect::UtteranceTerminalOutcome {
+                                            utterance_id,
+                                            outcome,
+                                        } => {
+                                            if let Some(native) = native.as_ref() {
+                                                let mut states = native.progress.lock().map_err(|_| DirectionFailureOrigin::InternalTransport)?;
+                                                let state = states.entry(launch.runtime.direction).or_default();
+                                                if outcome == TerminalOutcome::Completed {
+                                                    state.completed = state.completed.saturating_add(1);
+                                                } else {
+                                                    state.failed = true;
+                                                }
+                                            }
+                                            tracing::info!(
+                                                event = "direction_terminal_outcome",
+                                                direction = ?launch.runtime.direction,
+                                                %utterance_id,
+                                                outcome = ?outcome
+                                            );
+                                            observer.observe(DuplexRuntimeEvent::UtteranceTerminalOutcome {
+                                                direction: launch.runtime.direction,
+                                                utterance_id,
+                                                outcome,
+                                            });
+                                        }
+                                        DirectionEffect::UtteranceTerminal { utterance_id } => {
+                                            tracing::info!(
+                                                event = "direction_stage_observed",
+                                                direction = ?launch.runtime.direction,
+                                                stage = "utterance_terminal",
+                                                %utterance_id
+                                            );
+                                            let event = DuplexRuntimeEvent::UtteranceTerminal {
+                                                direction: launch.runtime.direction,
+                                                utterance_id,
+                                            };
+                                            observer.observe(event);
+                                            if mode_change_after_event(
+                                                observer.as_ref(),
+                                                launch.runtime.mode,
+                                                event,
+                                            )
+                                            .is_some()
+                                            {
+                                                mode_change_requested = true;
+                                            }
+                                        }
+                                        DirectionEffect::ExpiredAudio {
+                                            utterance_id,
+                                            request,
+                                        } => {
+                                            observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
+                                                direction: launch.runtime.direction,
+                                                utterance_id,
+                                                observed_monotonic_ns: monotonic_ns(),
+                                            });
+                                            playback_queue.clear();
+                                            playback_metadata.clear();
+                                            reset_playback = true;
+                                            reset_request = Some(request);
+
+                                        }
+                                        DirectionEffect::SessionClosed => {}
+                                    }
+                                }
+                                if reset_playback || (playback_frame.is_none()
+                                    && (!playback_queue.is_empty() || mode_change_requested)) {
+                                    break 'poll Ok(None);
+                                }
+                            }
+
+                            DirectionLoopEvent::Capture(frame) => {
+                                let (frame, native_timing) = frame.map_err(|_| direction_runtime_error(
+                                    launch.runtime.direction,
+                                    "capture_read",
+                                    DirectionFailureOrigin::PcmCapture,
+                                ))?;
+                                capture_sequence = capture_sequence.saturating_add(1);
+                                if native_bypass {
+                                    playback_queue.push(frame).map_err(|_| direction_runtime_error(
+                                        launch.runtime.direction,
+                                        "playback_queue_overflow",
+                                        DirectionFailureOrigin::Queue,
+                                    ))?;
+                                    playback_metadata.push_back(None);
+                                    if playback_frame.is_none() {
+                                        break 'poll Ok(None);
+                                    }
+                                    continue 'poll;
+                                }
+                                capture_queue
+                                    .push(frame)
+                                    .map_err(|_| direction_runtime_error(
+                                        launch.runtime.direction,
+                                        "capture_queue_overflow",
+                                        DirectionFailureOrigin::Queue,
+                                    ))?;
+                                while let Some(frame) = capture_queue.pop() {
+                                    let (completed_frame, events, pending_frames) = process_capture_frame(
+                                        &mut segmenter,
+                                        frame,
+                                        launch.runtime.direction,
+                                        runtime_generation,
+                                    )?;
+                                    let custody = CaptureDispatchCustody::begin(
+                                        launch.runtime.direction,
+                                        runtime_generation,
+                                        pending_frames,
+                                        &events,
+                                        observer.as_ref(),
+                                    );
+                                    for event in events {
+                                        let effect_context = capture_event_effect_context(
+                                            &event,
+                                            runtime_generation,
+                                        );
+                                        if let CaptureEvent::Frame {
+                                            utterance_id,
+                                            frame,
+                                            end_of_utterance: true,
+                                            ..
+                                        } = &event
+                                        {
+                                            tracing::info!(
+                                                event = "direction_capture_eou",
+                                                direction = ?launch.runtime.direction,
+                                                %utterance_id,
+                                                sequence = frame.sequence()
+                                            );
+                                        }
+                                        observe_capture_event(
+                                            launch.runtime.direction,
+                                            &event,
+                                            observer.as_ref(),
+                                        );
+                                        if let Some(request) = session
+                                            .handle_capture(event)
+                                            .map_err(|_| direction_runtime_error(
+                                                launch.runtime.direction,
+                                                "capture_session",
+                                                DirectionFailureOrigin::SessionValidation,
+                                            ))?
+                                        {
+                                            let (runtime_direction, phase_deadline, operation) =
+                                                provider_send_operation(launch.runtime.direction, session, provider, request);
+                                            if let Some(stop) = send_provider(
+                                                runtime_direction,
+                                                effect_context.unwrap_or_else(|| {
+                                                    ProviderEffectContext::unattributed(
+                                                        runtime_generation,
+                                                    )
+                                                }),
+                                                stop,
+                                                phase_deadline,
+                                                operation,
+                                                observer.as_ref(),
+                                            )
+                                            .await?
+                                            {
+                                                    return Ok(Some(DirectionOutcome::Stopped(stop)));
+                                            }
+                                        }
+                                    }
+                                    custody.complete(observer.as_ref());
+                                    if let Some(timing) = native_timing.clone() {
+                                        if let Some(native) = native.as_ref() {
+                                            native.progress.lock().map_err(|_| DirectionFailureOrigin::InternalTransport)?
+                                                .entry(launch.runtime.direction).or_default().last_capture_physical = matches!(timing.origin, NativeCaptureOrigin::Physical);
+                                        }
+                                        observer.native_capture_frame_processed(launch.runtime.direction, completed_frame, timing);
+                                    } else {
+                                        observer.capture_frame_processed(launch.runtime.direction, completed_frame);
+                                    }
+                                }
+                            }
+
+                            DirectionLoopEvent::Playback(result) => {
+                                match result? {
+                                    PlaybackWrite::Completed(observed) => {
+                                        playback_finished = true;
+                                        if playback_context.is_some() {
+                                            playback_audible_until_ns = extend_playback_deadline(
+                                                playback_audible_until_ns,
+                                                observed,
+                                                u64::from(playback_frame.as_ref().expect("active playback frame").format().frame_duration_ms()),
+                                            );
+                                        }
+                                        break 'poll Ok(None);
+                                    }
+                                    PlaybackWrite::Stopped(stop) =>
+                                        return Ok(Some(DirectionOutcome::Stopped(stop))),
+                                }
+                            }
+                        }
+                    }
+                }
+            }.await
+        };
+        if !playback_finished {
+            *playback_io.reusable = false;
+        }
+        if let Some(outcome) = loop_result? {
+            return Ok(outcome);
+        }
+        if reset_playback {
+            if let Some(reason) =
+                stop_playback_for_reset(&mut playback_io, stop, watchdog_phase_deadline(session))
+                    .await?
+            {
                 return Ok(DirectionOutcome::Stopped(reason));
             }
-            event = direction.provider.next_event() => {
-                let event = event
-                    .map_err(|error| {
-                        tracing::error!(
-                            event = "direction_runtime_stage_failed",
-                            direction = ?direction.launch.runtime.direction,
-                            stage = "provider_event_receive",
-                            error = ?error
-                        );
-                        provider_failure_origin(&error)
-                    })?
-                    .ok_or_else(|| direction_runtime_error(
-                        direction.launch.runtime.direction,
-                        "provider_event_closed",
-                        DirectionFailureOrigin::ProviderConnection,
-                    ))?;
-                let effects = direction
-                    .session
-                    .handle_provider_event(&event, monotonic_ns())
-                    .map_err(|error| {
-                        tracing::error!(
-                            event = "direction_runtime_stage_failed",
-                            direction = ?direction.launch.runtime.direction,
-                            stage = "provider_event_validation",
-                            error = ?error
-                        );
-                        DirectionFailureOrigin::SessionValidation
-                    })?;
-                let mut mode_change_requested = false;
-                for effect in effects {
-                    match effect {
-                        DirectionEffect::Playback {
-                            utterance_id,
-                            frame,
-                            ..
-                        } => {
-                            let metadata = QueuedPlaybackMetadata {
-                                utterance_id,
-                                sequence: frame.sequence(),
-                                provider_monotonic_ns: frame.capture_monotonic_ns(),
-                                enqueued_monotonic_ns: monotonic_ns(),
-                            };
-                            playback_queue
-                                .push(frame)
-                                .map_err(|_| direction_runtime_error(
-                                    direction.launch.runtime.direction,
-                                    "playback_queue_overflow",
-                                    DirectionFailureOrigin::Queue,
-                                ))?;
-                            playback_metadata.push_back(metadata);
-                        }
-                        DirectionEffect::TranscriptFinal { utterance_id } => {
-                            tracing::info!(
-                                event = "direction_stage_observed",
-                                direction = ?direction.launch.runtime.direction,
-                                stage = "asr_final",
-                                %utterance_id
-                            );
-                            observer.observe(DuplexRuntimeEvent::TranscriptFinal {
-                                direction: direction.launch.runtime.direction,
-                                utterance_id,
-                            });
-                        }
-                        DirectionEffect::TranslationFinal { utterance_id } => {
-                            tracing::info!(
-                                event = "direction_stage_observed",
-                                direction = ?direction.launch.runtime.direction,
-                                stage = "translation_final",
-                                %utterance_id
-                            );
-                            observer.observe(DuplexRuntimeEvent::TranslationFinal {
-                                direction: direction.launch.runtime.direction,
-                                utterance_id,
-                            });
-                        }
-                        latency @ DirectionEffect::Latency { .. } => {
-                            observe_latency_effect(
-                                direction.launch.runtime.direction,
-                                &latency,
-                                observer.as_ref(),
-                            );
-                        }
-                        DirectionEffect::ProviderError {
-                            utterance_id,
-                            code,
-                            retryable,
-                        } => {
-                            tracing::warn!(
-                                event = "direction_provider_error",
-                                direction = ?direction.launch.runtime.direction,
-                                utterance_id = ?utterance_id,
-                                code = ?code,
-                                retryable
-                            );
-                            observer.observe(DuplexRuntimeEvent::ProviderError {
-                                direction: direction.launch.runtime.direction,
-                                utterance_id,
-                                code,
-                                retryable,
-                            });
-                        }
-                        DirectionEffect::UtteranceTerminalOutcome {
-                            utterance_id,
-                            outcome,
-                        } => {
-                            tracing::info!(
-                                event = "direction_terminal_outcome",
-                                direction = ?direction.launch.runtime.direction,
-                                %utterance_id,
-                                outcome = ?outcome
-                            );
-                            observer.observe(DuplexRuntimeEvent::UtteranceTerminalOutcome {
-                                direction: direction.launch.runtime.direction,
-                                utterance_id,
-                                outcome,
-                            });
-                        }
-                        DirectionEffect::UtteranceTerminal { utterance_id } => {
-                            tracing::info!(
-                                event = "direction_stage_observed",
-                                direction = ?direction.launch.runtime.direction,
-                                stage = "utterance_terminal",
-                                %utterance_id
-                            );
-                            let event = DuplexRuntimeEvent::UtteranceTerminal {
-                                direction: direction.launch.runtime.direction,
-                                utterance_id,
-                            };
-                            observer.observe(event);
-                            if mode_change_after_event(
-                                observer.as_ref(),
-                                direction.launch.runtime.mode,
-                                event,
-                            )
-                            .is_some()
-                            {
-                                mode_change_requested = true;
-                            }
-                        }
-                        DirectionEffect::ExpiredAudio {
-                            utterance_id,
-                            request,
-                        } => {
-                            observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
-                                direction: direction.launch.runtime.direction,
-                                utterance_id,
-                                observed_monotonic_ns: monotonic_ns(),
-                            });
-                            playback_queue.clear();
-                            playback_metadata.clear();
-                            if let Some(stop) = stop_playback_for_reset(direction, stop).await? {
-                                return Ok(DirectionOutcome::Stopped(stop));
-                            }
-                            playback_audible_until_ns = 0;
-                            let (runtime_direction, phase_deadline, operation) =
-                                provider_send_operation(direction, request);
-                            if let Some(stop) = send_provider(
-                                runtime_direction,
-                                ProviderEffectContext::unattributed(direction.runtime_generation),
-                                stop,
-                                phase_deadline,
-                                operation,
-                                observer.as_ref(),
-                            )
-                            .await?
-                            {
-                                    return Ok(DirectionOutcome::Stopped(stop));
-                            }
-                        }
-                        DirectionEffect::SessionClosed => {}
-                    }
-                }
-                while let Some(frame) = playback_queue.pop() {
-                    let metadata = playback_metadata
-                        .pop_front()
-                        .ok_or_else(|| direction_runtime_error(
-                            direction.launch.runtime.direction,
-                            "playback_metadata_missing",
-                            DirectionFailureOrigin::Queue,
-                        ))?;
-                    if direction.playback.is_none() {
-                        direction.playback = Some(
-                            PulsePcmPlayback::spawn(&PulsePcmCommand::playback(
-                                &direction.launch.playback_device,
-                                direction.launch.playback_stream_name,
-                            ))
-                            .map_err(|_| direction_runtime_error(
-                                direction.launch.runtime.direction,
-                                "playback_respawn",
-                                DirectionFailureOrigin::PcmPlayback,
-                            ))?,
-                        );
-                        direction.playback_reusable = true;
-                        let admission_deadline = watchdog_phase_deadline(&direction.session)
-                            .unwrap_or_else(|| Instant::now() + HOT_IO_LIVENESS_TIMEOUT)
-                            .min(Instant::now() + HOT_IO_LIVENESS_TIMEOUT);
-                        let admitted = await_hot_io(
-                            HotIoKind::PlaybackWrite,
-                            stop,
-                            Some(admission_deadline),
-                            async {
-                                let registration = direction.playback.as_mut()
-                                    .expect("new playback is owned")
-                                    .wait_registered_muted(admission_deadline.into_std())
-                                    .await
-                                    .map_err(|_| DuplexRuntimeError::StartFailed)?;
-                                direction.playback_mix_authority.as_ref()
-                                    .ok_or(DuplexRuntimeError::StartFailed)?
-                                    .admit_registered(
-                                        &registration,
-                                        PlaybackRegistrationPhase::Running,
-                                        admission_deadline.into_std(),
-                                    )
-                            },
-                        ).await;
-                        match admitted {
-                            HotIoResult::Completed(Ok(())) => {}
-                            HotIoResult::Stopped { stop, .. } => {
-                                return Ok(DirectionOutcome::Stopped(stop));
-                            }
-                            HotIoResult::Completed(Err(_))
-                            | HotIoResult::TimedOut { .. }
-                            | HotIoResult::NotReusable { .. } => {
-                                return Err(direction_runtime_error(
-                                    direction.launch.runtime.direction,
-                                    "playback_respawn_admission",
-                                    DirectionFailureOrigin::PcmPlayback,
-                                ));
-                            }
-                        }
-                    }
-                    let observed_monotonic_ns = match write_playback_frame(
-                        direction,
-                        stop,
-                        &frame,
-                        metadata,
-                        observer.as_ref(),
-                    )
-                    .await?
-                    {
-                        PlaybackWrite::Completed(observed) => observed,
-                        PlaybackWrite::Stopped(stop) => {
-                            return Ok(DirectionOutcome::Stopped(stop));
-                        }
-                    };
-                    playback_audible_until_ns = extend_playback_deadline(
-                        playback_audible_until_ns,
-                        observed_monotonic_ns,
-                        u64::from(frame.format().frame_duration_ms()),
-                    );
-                }
-                if mode_change_requested {
-                    return match wait_for_playback_deadline(playback_audible_until_ns, stop).await? {
-                        Some(stop) => Ok(DirectionOutcome::Stopped(stop)),
-                        None => Ok(DirectionOutcome::ModeChanged),
-                    };
-                }
-            }
-            frame = direction.capture.read_frame(capture_sequence, monotonic_ns()) => {
-                let frame = frame.map_err(|_| direction_runtime_error(
-                    direction.launch.runtime.direction,
-                    "capture_read",
-                    DirectionFailureOrigin::PcmCapture,
-                ))?;
-                capture_sequence = capture_sequence.saturating_add(1);
-                capture_queue
-                    .push(frame)
-                    .map_err(|_| direction_runtime_error(
-                        direction.launch.runtime.direction,
-                        "capture_queue_overflow",
-                        DirectionFailureOrigin::Queue,
-                    ))?;
-                while let Some(frame) = capture_queue.pop() {
-                    let (completed_frame, events, pending_frames) = process_capture_frame(
-                        &mut segmenter,
-                        frame,
-                        direction.launch.runtime.direction,
-                        direction.runtime_generation,
-                    )?;
-                    let custody = CaptureDispatchCustody::begin(
-                        direction.launch.runtime.direction,
-                        direction.runtime_generation,
-                        pending_frames,
-                        &events,
-                        observer.as_ref(),
-                    );
-                    for event in events {
-                        let effect_context = capture_event_effect_context(
-                            &event,
-                            direction.runtime_generation,
-                        );
-                        if let CaptureEvent::Frame {
-                            utterance_id,
-                            frame,
-                            end_of_utterance: true,
-                            ..
-                        } = &event
-                        {
-                            tracing::info!(
-                                event = "direction_capture_eou",
-                                direction = ?direction.launch.runtime.direction,
-                                %utterance_id,
-                                sequence = frame.sequence()
-                            );
-                        }
-                        observe_capture_event(
-                            direction.launch.runtime.direction,
-                            &event,
-                            observer.as_ref(),
-                        );
-                        if let Some(request) = direction
-                            .session
-                            .handle_capture(event)
-                            .map_err(|_| direction_runtime_error(
-                                direction.launch.runtime.direction,
-                                "capture_session",
-                                DirectionFailureOrigin::SessionValidation,
-                            ))?
-                        {
-                            let (runtime_direction, phase_deadline, operation) =
-                                provider_send_operation(direction, request);
-                            if let Some(stop) = send_provider(
-                                runtime_direction,
-                                effect_context.unwrap_or_else(|| {
-                                    ProviderEffectContext::unattributed(
-                                        direction.runtime_generation,
-                                    )
-                                }),
-                                stop,
-                                phase_deadline,
-                                operation,
-                                observer.as_ref(),
-                            )
-                            .await?
-                            {
-                                    return Ok(DirectionOutcome::Stopped(stop));
-                            }
-                        }
-                    }
-                    custody.complete(observer.as_ref());
-                    observer.capture_frame_processed(
-                        direction.launch.runtime.direction,
-                        completed_frame,
-                    );
-                }
-            }
-            _ = watchdog.tick() => {
-                let effects = direction
-                    .session
-                    .poll(monotonic_ns())
-                    .map_err(|_| direction_runtime_error(
-                        direction.launch.runtime.direction,
-                        "watchdog_poll",
-                        DirectionFailureOrigin::SessionValidation,
-                    ))?;
-                for effect in effects {
-                    match effect {
-                        DirectionWatchdogEffect::Send(request) => {
-                            tracing::warn!(
-                                event = "direction_watchdog_action",
-                                direction = ?direction.launch.runtime.direction,
-                                action = "send"
-                            );
-                            let (runtime_direction, phase_deadline, operation) =
-                                provider_send_operation(direction, request);
-                            if let Some(stop) = send_provider(
-                                runtime_direction,
-                                ProviderEffectContext::unattributed(direction.runtime_generation),
-                                stop,
-                                phase_deadline,
-                                operation,
-                                observer.as_ref(),
-                            )
-                            .await?
-                            {
-                                    return Ok(DirectionOutcome::Stopped(stop));
-                            }
-                        }
-                        DirectionWatchdogEffect::PurgeAndSend(request) => {
-                            tracing::warn!(
-                                event = "direction_watchdog_action",
-                                direction = ?direction.launch.runtime.direction,
-                                action = "purge_and_send"
-                            );
-                            playback_queue.clear();
-                            playback_metadata.clear();
-                            if let Some(stop) = stop_playback_for_reset(direction, stop).await? {
-                                return Ok(DirectionOutcome::Stopped(stop));
-                            }
-                            playback_audible_until_ns = 0;
-                            let (runtime_direction, phase_deadline, operation) =
-                                provider_send_operation(direction, request);
-                            if let Some(stop) = send_provider(
-                                runtime_direction,
-                                ProviderEffectContext::unattributed(direction.runtime_generation),
-                                stop,
-                                phase_deadline,
-                                operation,
-                                observer.as_ref(),
-                            )
-                            .await?
-                            {
-                                    return Ok(DirectionOutcome::Stopped(stop));
-                            }
-                        }
-                        DirectionWatchdogEffect::RestartSidecar => {
-                            tracing::error!(
-                                event = "direction_runtime_stage_failed",
-                                direction = ?direction.launch.runtime.direction,
-                                stage = "watchdog_restart"
-                            );
-                            return Err(DirectionFailureOrigin::WatchdogRestart);
-                        }
-                    }
+            playback_audible_until_ns = 0;
+            if let Some(request) = reset_request {
+                let (runtime_direction, phase_deadline, operation) =
+                    provider_send_operation(launch.runtime.direction, session, provider, request);
+                if let Some(reason) = send_provider(
+                    runtime_direction,
+                    ProviderEffectContext::unattributed(runtime_generation),
+                    stop,
+                    phase_deadline,
+                    operation,
+                    observer.as_ref(),
+                )
+                .await?
+                {
+                    return Ok(DirectionOutcome::Stopped(reason));
                 }
             }
         }
+        if mode_change_requested && playback_queue.is_empty() {
+            return match wait_for_playback_deadline(playback_audible_until_ns, stop).await? {
+                Some(reason) => Ok(DirectionOutcome::Stopped(reason)),
+                None => Ok(DirectionOutcome::ModeChanged),
+            };
+        }
     }
+}
+
+async fn read_direction_capture(
+    capture: Option<&mut PulsePcmCapture>,
+    native: Option<&Arc<NativeDuplexIo>>,
+    direction: AudioDirection,
+    sequence: u64,
+) -> Result<(PcmFrame, Option<NativeCaptureTiming>), ()> {
+    if direction == AudioDirection::Microphone
+        && let Some(native) = native
+    {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let frame = native
+            .capture
+            .lock()
+            .await
+            .next_frame(deadline)
+            .await
+            .map_err(|_| ())?;
+        let identity = native.handle.check_fresh(deadline).map_err(|_| ())?;
+        native.validate_pcm_authority().map_err(|_| ())?;
+        if frame.graph != identity.graph
+            || frame.adc_end.checked_sub(frame.adc_start) != Some(960)
+            || matches!(frame.origin, NativeCaptureOrigin::InjectedPositive { .. })
+                && !native
+                    .injected_positive
+                    .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(());
+        }
+        let timing = NativeCaptureTiming {
+            graph: frame.graph,
+            adc_start: frame.adc_start,
+            adc_end: frame.adc_end,
+            capture_buffer_frames: identity.capture_buffer,
+            capture_read_bracket_ns: frame.capture_read_bracket_ns,
+            origin: frame.origin,
+        };
+        return Ok((frame.frame, Some(timing)));
+    }
+    capture
+        .ok_or(())?
+        .read_frame(sequence, monotonic_ns())
+        .await
+        .map(|frame| (frame, None))
+        .map_err(|_| ())
 }
 
 fn extend_playback_deadline(
@@ -4866,6 +5481,822 @@ pub(crate) mod tests {
         ));
     }
 
+    #[derive(Clone)]
+    struct DuplexLoopTransport {
+        opened: mpsc::Sender<DuplexLoopProvider>,
+        tasks: Arc<AsyncMutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    struct DuplexLoopProvider {
+        open: translator_ipc::provider::OpenProviderSession,
+        events: mpsc::Sender<Result<ProviderEvent, Status>>,
+        event_sequence: Arc<std::sync::atomic::AtomicU64>,
+        inputs: Arc<Mutex<Vec<translator_ipc::provider::ProviderInputFrame>>>,
+    }
+
+    impl DuplexLoopProvider {
+        fn next_event_sequence(&self) -> u64 {
+            self.event_sequence
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+
+        async fn audio(&self, stream_id: Uuid, utterance_id: Uuid, sequence: u64) {
+            self.events
+                .send(Ok(ProviderEvent {
+                    event: Some(provider_event::Event::AudioDelta(
+                        translator_ipc::provider::ProviderAudioDelta {
+                            schema_version: "translator.provider.audio_delta.v1".into(),
+                            session_id: self.open.session_id.clone(),
+                            direction_id: self.open.direction_id,
+                            stream_id: stream_id.to_string(),
+                            utterance_id: utterance_id.to_string(),
+                            sequence,
+                            event_sequence: self.next_event_sequence(),
+                            provider_monotonic_ns: monotonic_ns(),
+                            sample_rate_hz: 16_000,
+                            channels: 1,
+                            sample_format: translator_ipc::provider::SampleFormat::S16le.into(),
+                            frame_duration_ms: 20,
+                            pcm: vec![0; 640],
+                        },
+                    )),
+                }))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tonic::async_trait]
+    impl ProviderTransport for DuplexLoopTransport {
+        type StreamStream =
+            Pin<Box<dyn Stream<Item = Result<ProviderEvent, Status>> + Send + 'static>>;
+
+        async fn stream(
+            &self,
+            request: Request<tonic::Streaming<ProviderRequest>>,
+        ) -> Result<Response<Self::StreamStream>, Status> {
+            let mut requests = request.into_inner();
+            let initial = requests.message().await?.unwrap();
+            let Some(provider_request::Request::OpenSession(open)) = initial.request else {
+                return Err(Status::invalid_argument("open session required"));
+            };
+            let (events, receiver) = mpsc::channel(256);
+            events
+                .send(Ok(ProviderEvent {
+                    event: Some(provider_event::Event::SessionOpened(
+                        ProviderSessionOpened {
+                            schema_version: "translator.provider.session_opened.v1".into(),
+                            session_id: open.session_id.clone(),
+                            direction_id: open.direction_id,
+                            negotiated_input_format: open.requested_input_format,
+                            negotiated_output_format: open.requested_output_format,
+                            capabilities: Some(ProviderCapabilities {
+                                audio_output: true,
+                                transcript_delta: true,
+                                translation_delta: true,
+                                cancellation: true,
+                                cloud_egress: false,
+                            }),
+                            event_sequence: 1,
+                        },
+                    )),
+                }))
+                .await
+                .unwrap();
+            events
+                .send(Ok(ProviderEvent {
+                    event: Some(provider_event::Event::Health(ProviderHealth {
+                        schema_version: "translator.provider.health.v1".into(),
+                        session_id: open.session_id.clone(),
+                        direction_id: open.direction_id,
+                        event_sequence: 2,
+                        provider_id: open.provider_id,
+                        provider_name: "duplex-loop-fixture".into(),
+                        state: ProviderState::Ready.into(),
+                        models: Vec::new(),
+                        queues: Some(ProviderQueues {
+                            provider_input_buffered_ms: 0,
+                            provider_output_buffered_ms: 0,
+                            queue_lag_ms: 0,
+                        }),
+                        retry: None,
+                        safe_error: None,
+                    })),
+                }))
+                .await
+                .unwrap();
+            let inputs = Arc::new(Mutex::new(Vec::new()));
+            let event_sequence = Arc::new(std::sync::atomic::AtomicU64::new(3));
+            self.opened
+                .send(DuplexLoopProvider {
+                    open: open.clone(),
+                    events: events.clone(),
+                    event_sequence: event_sequence.clone(),
+                    inputs: inputs.clone(),
+                })
+                .await
+                .unwrap();
+            let task = tokio::spawn(async move {
+                while let Ok(Some(request)) = requests.message().await {
+                    match request.request {
+                        Some(provider_request::Request::InputFrame(frame)) => {
+                            inputs.lock().unwrap().push(frame);
+                        }
+                        Some(provider_request::Request::CloseSession(_)) => {
+                            let _ = events
+                                .send(Ok(ProviderEvent {
+                                    event: Some(provider_event::Event::SessionClosed(
+                                        ProviderSessionClosed {
+                                            schema_version: "translator.provider.session_closed.v1"
+                                                .into(),
+                                            session_id: open.session_id,
+                                            direction_id: open.direction_id,
+                                            event_sequence: event_sequence
+                                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                                            reason: SessionCloseReason::UserStop.into(),
+                                        },
+                                    )),
+                                }))
+                                .await;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            self.tasks.lock().await.push(task);
+            Ok(Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(receiver),
+            )))
+        }
+
+        async fn probe(
+            &self,
+            _: Request<ProviderProbeRequest>,
+        ) -> Result<Response<ProviderProbeResponse>, Status> {
+            Err(Status::unimplemented("probe not used"))
+        }
+    }
+
+    struct DuplexLoopFixture {
+        effects: ProcessDirectionEffects,
+        opened: mpsc::Receiver<DuplexLoopProvider>,
+        stop: oneshot::Sender<()>,
+        server: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+        tasks: Arc<AsyncMutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    impl DuplexLoopFixture {
+        fn start() -> Self {
+            let directory = duplex_loop_directory();
+            let socket = directory.join("provider.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let (opened, receiver) = mpsc::channel(2);
+            let tasks = Arc::new(AsyncMutex::new(Vec::new()));
+            let transport = DuplexLoopTransport {
+                opened,
+                tasks: tasks.clone(),
+            };
+            let (stop, stopped) = oneshot::channel();
+            let incoming = futures_util::stream::unfold(listener, |listener| async {
+                let connection = listener.accept().await.map(|(connection, _)| connection);
+                Some((connection, listener))
+            });
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(ProviderTransportServer::new(transport))
+                    .serve_with_incoming_shutdown(incoming, async {
+                        let _ = stopped.await;
+                    })
+                    .await
+            });
+            Self {
+                effects: ProcessDirectionEffects::new(ProcessDuplexConfig {
+                    python: PathBuf::from("unused-python"),
+                    sidecar_root: PathBuf::from("unused-sidecar"),
+                    socket_path: socket,
+                    expected_uid: fs::metadata(directory).unwrap().uid(),
+                }),
+                opened: receiver,
+                stop,
+                server,
+                tasks,
+            }
+        }
+
+        async fn prepare(
+            &mut self,
+            direction: AudioDirection,
+        ) -> (PreparedDirection, DuplexLoopProvider) {
+            let launch = test_launch(
+                ready_snapshot(),
+                TestAudioTargets {
+                    microphone_capture: "duplex-microphone".into(),
+                    microphone_playback: "duplex-microphone".into(),
+                    speaker_capture: "duplex-speaker".into(),
+                    speaker_playback: "duplex-speaker".into(),
+                },
+            );
+            let launch = match direction {
+                AudioDirection::Microphone => launch.microphone,
+                AudioDirection::Speaker => launch.speaker,
+            }
+            .unwrap();
+            let mut owner = self.effects.begin(launch);
+            self.effects
+                .prepare_with_pcm_spawners(
+                    &mut owner,
+                    &crate::SidecarLaunch {
+                        generation_id: Uuid::new_v4(),
+                        token: "ab".repeat(32),
+                    },
+                    Instant::now() + Duration::from_secs(2),
+                    PulsePcmCapture::spawn,
+                    PulsePcmPlayback::spawn,
+                )
+                .await
+                .unwrap();
+            let prepared = self
+                .effects
+                .finish(owner)
+                .unwrap_or_else(|_| panic!("prepare failed"));
+            let provider = self.opened.recv().await.unwrap();
+            for kind in ["capture", "playback"] {
+                marker_identity(&duplex_loop_marker(kind, direction)).await;
+            }
+            (prepared, provider)
+        }
+
+        async fn cleanup(&self, prepared: PreparedDirection) {
+            let direction = prepared.launch.runtime.direction;
+            let identities = ["capture", "playback"]
+                .map(|kind| parse_marker_identity(&duplex_loop_marker(kind, direction)).unwrap());
+            let mut owner = self.effects.recover_owner(prepared);
+            self.effects
+                .stop_pcm(&mut owner, Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+            self.effects
+                .close_provider(
+                    &mut owner,
+                    CloseRequestReason::UserStop,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            assert!(ProcessDirectionEffects::is_clean(&owner));
+            for identity in identities {
+                assert_ne!(ProcessIdentity::inspect(identity.pid), Some(identity));
+                wait_pid_absent(identity.pid, "duplex PCM owner was not reaped").await;
+            }
+        }
+
+        async fn shutdown(self) {
+            for task in self.tasks.lock().await.drain(..) {
+                tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let _ = self.stop.send(());
+            tokio::time::timeout(Duration::from_secs(2), self.server)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    fn duplex_loop_directory() -> PathBuf {
+        std::env::var_os("TRANSLATOR_DUPLEX_LOOP_DIRECTORY")
+            .map(PathBuf::from)
+            .unwrap()
+    }
+
+    fn duplex_loop_marker(kind: &str, direction: AudioDirection) -> PathBuf {
+        let direction = match direction {
+            AudioDirection::Microphone => "microphone",
+            AudioDirection::Speaker => "speaker",
+        };
+        duplex_loop_directory().join(format!("{kind}.{direction}.pid"))
+    }
+
+    fn duplex_loop_gate(kind: &str, direction: AudioDirection) -> PathBuf {
+        duplex_loop_marker(kind, direction).with_extension("release")
+    }
+
+    fn duplex_voice_frame(sequence: u64) -> Vec<u8> {
+        let mut pcm = (0..320)
+            .flat_map(|sample| {
+                let phase = (sequence * 320 + sample) as f64 / 16_000.0;
+                let value = (6_000.0 * (phase * 220.0 * std::f64::consts::TAU).sin()
+                    + 3_000.0 * (phase * 440.0 * std::f64::consts::TAU).sin()
+                    + 1_500.0 * (phase * 880.0 * std::f64::consts::TAU).sin())
+                    as i16;
+                value.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        pcm[..2].copy_from_slice(&(sequence as i16).to_le_bytes());
+        pcm
+    }
+
+    #[test]
+    fn duplex_pcm_helper_process() {
+        let Some(kind) = std::env::var_os("TRANSLATOR_DUPLEX_PCM_KIND") else {
+            return;
+        };
+        use std::io::{Read, Write};
+        let arguments = std::env::var("TRANSLATOR_DUPLEX_PCM_ARGUMENTS").unwrap();
+        let direction = if arguments.contains("duplex-speaker") {
+            AudioDirection::Speaker
+        } else {
+            AudioDirection::Microphone
+        };
+        if kind == "playback" {
+            assert_eq!(
+                rustix::pipe::fcntl_setpipe_size(std::io::stdin(), 4096).unwrap(),
+                4096
+            );
+        }
+        let identity = ProcessIdentity::inspect(std::process::id()).unwrap();
+        let marker = duplex_loop_marker(kind.to_str().unwrap(), direction);
+        fs::write(
+            &marker,
+            format!(
+                "{} {} {} {}\n",
+                identity.pid,
+                identity.start_time_ticks,
+                identity.executable_device,
+                identity.executable_inode
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let gate = duplex_loop_gate(kind.to_str().unwrap(), direction);
+        while !gate.exists() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if kind == "capture" {
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/proc/self/fd/3")
+                .unwrap();
+            let mode = std::env::var("TRANSLATOR_DUPLEX_LOOP_TEST").unwrap();
+            if mode.contains("partial") || mode.contains("eof") {
+                output.write_all(&duplex_voice_frame(0)[..320]).unwrap();
+                output.flush().unwrap();
+                fs::write(marker.with_extension("partial"), b"ready").unwrap();
+                if mode.contains("eof") {
+                    return;
+                }
+            } else {
+                for sequence in 0..12 {
+                    output.write_all(&duplex_voice_frame(sequence)).unwrap();
+                }
+                output.flush().unwrap();
+                fs::write(marker.with_extension("ready"), b"ready").unwrap();
+            }
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        } else {
+            let mut input = std::io::stdin().lock();
+            let mut block = [0; 640];
+            while input.read(&mut block).unwrap() != 0 {}
+        }
+    }
+
+    async fn duplex_loop_child(test: &str) -> bool {
+        if std::env::var_os("TRANSLATOR_DUPLEX_LOOP_DIRECTORY").is_some() {
+            return false;
+        }
+        let fixture = tempdir().unwrap();
+        fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (program, kind) in [("parec", "capture"), ("pacat", "playback")] {
+            let path = fixture.path().join(program);
+            fs::write(&path, format!(
+                "#!/bin/sh\numask 077\nexport TRANSLATOR_DUPLEX_PCM_KIND='{kind}'\nexport TRANSLATOR_DUPLEX_PCM_ARGUMENTS=\"$*\"\nexec 3>&1\nexec \"$TRANSLATOR_DUPLEX_TEST_BINARY\" --exact translation_runtime::tests::duplex_pcm_helper_process --nocapture --test-threads=1 >/dev/null\n"
+            )).unwrap();
+            fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let test_binary = std::env::current_exe().unwrap();
+        let mut child = tokio::process::Command::new(&test_binary)
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", fixture.path().display()),
+            )
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8")
+            .env("TRANSLATOR_DUPLEX_TEST_BINARY", &test_binary)
+            .env("TRANSLATOR_DUPLEX_LOOP_DIRECTORY", fixture.path())
+            .env("TRANSLATOR_DUPLEX_LOOP_TEST", test)
+            .env("TRANSLATOR_VAD_CONFIRMATION_FRAMES", "3")
+            .arg("--exact")
+            .arg(format!("translation_runtime::tests::{test}"))
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let identity = ProcessIdentity::inspect(child.id().unwrap()).unwrap();
+        let markers = [
+            "capture.microphone.pid",
+            "playback.microphone.pid",
+            "capture.speaker.pid",
+            "playback.speaker.pid",
+        ]
+        .map(|name| fixture.path().join(name));
+        let marker_refs = markers.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+            Ok(Ok(status)) if status.success() => {}
+            status => {
+                let reaped = matches!(status, Ok(Ok(_)));
+                cleanup_failed_characterization(&mut child, identity, reaped, &marker_refs).await;
+                panic!("duplex loop child failed: {status:?}");
+            }
+        }
+        for marker in markers.iter().filter(|marker| marker.exists()) {
+            let identity = parse_marker_identity(marker).unwrap();
+            assert!(!Path::new(&format!("/proc/{}", identity.pid)).exists());
+        }
+        true
+    }
+
+    async fn duplex_wait_until(mut ready: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_millis(300), async {
+            while !ready() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("duplex progress did not occur before the blocked playback was released");
+    }
+
+    async fn duplex_seed_playback(
+        prepared: &mut PreparedDirection,
+        provider: &DuplexLoopProvider,
+        frames: u64,
+    ) {
+        let utterance_id = Uuid::new_v4();
+        let stream_id = prepared.session.stream_id();
+        prepared
+            .session
+            .handle_capture(CaptureEvent::SpeechStarted {
+                stream_id,
+                utterance_id,
+                capture_monotonic_ns: monotonic_ns(),
+            })
+            .unwrap();
+        let request = prepared
+            .session
+            .handle_capture(CaptureEvent::Frame {
+                stream_id,
+                utterance_id,
+                frame: aec_test_frame(0, monotonic_ns()),
+                end_of_utterance: true,
+            })
+            .unwrap()
+            .unwrap();
+        prepared.provider.send(request).await.unwrap();
+        for sequence in 0..frames {
+            provider.audio(stream_id, utterance_id, sequence).await;
+        }
+    }
+
+    type DuplexLoopTask = tokio::task::JoinHandle<(
+        PreparedDirection,
+        Result<DirectionOutcome, DirectionFailureOrigin>,
+    )>;
+
+    fn duplex_spawn_direction(
+        mut prepared: PreparedDirection,
+        observer: Arc<dyn DuplexRuntimeObserver>,
+    ) -> (watch::Sender<Option<WorkerStop>>, DuplexLoopTask) {
+        let (stop, mut receiver) = watch::channel(None);
+        let task = tokio::task::spawn_local(async move {
+            let result = run_direction_loop(&mut prepared, &mut receiver, observer).await;
+            (prepared, result)
+        });
+        (stop, task)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_capture_submits_while_playback_is_blocked() {
+        if duplex_loop_child("production_duplex_capture_submits_while_playback_is_blocked").await {
+            return;
+        }
+        tokio::task::LocalSet::new().run_until(async {
+            let mut fixture = DuplexLoopFixture::start();
+            let observer = Arc::new(RecordingObserver::default());
+            let mut directions = Vec::new();
+            for direction in [AudioDirection::Microphone, AudioDirection::Speaker] {
+                let (mut prepared, provider) = fixture.prepare(direction).await;
+                duplex_seed_playback(&mut prepared, &provider, 10).await;
+                let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+                directions.push((direction, provider, stop, task));
+            }
+            for (direction, _, _, _) in &directions {
+                duplex_wait_until(|| observer.events.lock().unwrap().iter().filter(|event| {
+                    matches!(event, DuplexRuntimeEvent::AudioFrame { direction: actual, .. } if actual == direction)
+                }).count() == 6).await;
+                fs::write(duplex_loop_gate("capture", *direction), b"release").unwrap();
+            }
+            for (direction, provider, _, _) in &directions {
+                duplex_wait_until(|| provider.inputs.lock().unwrap().len() >= 4).await;
+                assert!(!duplex_loop_gate("playback", *direction).exists());
+                let inputs = provider.inputs.lock().unwrap();
+                let captured = &inputs[1..];
+                assert!(captured.iter().enumerate().all(|(index, frame)| frame.sequence == index as u64 + 1));
+                assert!(captured.windows(2).all(|frames| frames[0].capture_monotonic_ns <= frames[1].capture_monotonic_ns));
+                assert!(captured.iter().all(|frame| (0..12).any(|sequence| frame.pcm == duplex_voice_frame(sequence))));
+                let source_sequences = captured.iter().map(|frame| {
+                    (0..12).find(|sequence| frame.pcm == duplex_voice_frame(*sequence)).unwrap()
+                }).collect::<Vec<_>>();
+                assert!(source_sequences.windows(2).all(|frames| frames[0] < frames[1]));
+                drop(inputs);
+                let processed = observer.internal_events.lock().unwrap();
+                let sequences = processed.iter().filter_map(|event| match event {
+                    InternalRuntimeObservation::CaptureFrameProcessed { direction: actual, sequence } if actual == direction => Some(*sequence),
+                    _ => None,
+                }).collect::<Vec<_>>();
+                assert!(sequences.len() >= 3);
+                assert!(sequences.iter().enumerate().all(|(index, sequence)| *sequence == index as u64));
+            }
+            for (direction, _, stop, task) in directions {
+                fs::write(duplex_loop_gate("playback", direction), b"release").unwrap();
+                stop.send(Some(WorkerStop::Close {
+                    reason: CloseRequestReason::UserStop,
+                    deadline: Instant::now() + Duration::from_secs(2),
+                })).unwrap();
+                let (prepared, result) = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+                assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+                fixture.cleanup(prepared).await;
+            }
+            fixture.shutdown().await;
+        }).await;
+    }
+
+    #[derive(Default)]
+    struct DuplexFairnessObserver {
+        latency_events: std::sync::atomic::AtomicUsize,
+        latency_before_first_capture: Mutex<Option<usize>>,
+    }
+
+    impl DuplexRuntimeObserver for DuplexFairnessObserver {
+        fn observe(&self, event: DuplexRuntimeEvent) {
+            if matches!(event, DuplexRuntimeEvent::ProviderLatency { .. }) {
+                self.latency_events
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        fn capture_frame_processed(&self, _: AudioDirection, _: CompletedCaptureFrame) {
+            self.latency_before_first_capture
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| {
+                    self.latency_events
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                });
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_ready_provider_does_not_starve_capture() {
+        if duplex_loop_child("production_duplex_ready_provider_does_not_starve_capture").await {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut fixture = DuplexLoopFixture::start();
+                let (prepared, provider) = fixture.prepare(AudioDirection::Microphone).await;
+                for _ in 0..128 {
+                    provider
+                        .events
+                        .send(Ok(ProviderEvent {
+                            event: Some(provider_event::Event::Latency(
+                                translator_ipc::provider::ProviderLatency {
+                                    schema_version: "translator.provider.latency.v1".into(),
+                                    session_id: provider.open.session_id.clone(),
+                                    direction_id: provider.open.direction_id,
+                                    stream_id: prepared.session.stream_id().to_string(),
+                                    event_sequence: provider.next_event_sequence(),
+                                    utterance_id: None,
+                                    asr_first_text_ms: None,
+                                    asr_final_text_ms: None,
+                                    mt_first_text_ms: None,
+                                    tts_first_audio_ms: None,
+                                    provider_total_ms: Some(1),
+                                },
+                            )),
+                        }))
+                        .await
+                        .unwrap();
+                }
+                fs::write(
+                    duplex_loop_gate("capture", AudioDirection::Microphone),
+                    b"release",
+                )
+                .unwrap();
+                duplex_wait_until(|| {
+                    duplex_loop_marker("capture", AudioDirection::Microphone)
+                        .with_extension("ready")
+                        .exists()
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let observer = Arc::new(DuplexFairnessObserver::default());
+                let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+                duplex_wait_until(|| {
+                    observer
+                        .latency_before_first_capture
+                        .lock()
+                        .unwrap()
+                        .is_some()
+                })
+                .await;
+                let before_capture = observer
+                    .latency_before_first_capture
+                    .lock()
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    before_capture < 32,
+                    "ready provider events starved a ready capture: {before_capture}"
+                );
+                duplex_wait_until(|| {
+                    observer
+                        .latency_events
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        == 128
+                })
+                .await;
+                stop.send(Some(WorkerStop::Close {
+                    reason: CloseRequestReason::UserStop,
+                    deadline: Instant::now() + Duration::from_secs(2),
+                }))
+                .unwrap();
+                let (prepared, result) = task.await.unwrap();
+                assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+                fixture.cleanup(prepared).await;
+                fixture.shutdown().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_playback_overflow_is_local_and_peer_keeps_capturing() {
+        if duplex_loop_child(
+            "production_duplex_playback_overflow_is_local_and_peer_keeps_capturing",
+        )
+        .await
+        {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut fixture = DuplexLoopFixture::start();
+                let observer = Arc::new(RecordingObserver::default());
+                let (mut microphone, microphone_provider) =
+                    fixture.prepare(AudioDirection::Microphone).await;
+                let (speaker, speaker_provider) = fixture.prepare(AudioDirection::Speaker).await;
+                duplex_seed_playback(&mut microphone, &microphone_provider, 28).await;
+                let (_microphone_stop, microphone_task) =
+                    duplex_spawn_direction(microphone, observer.clone());
+                let (speaker_stop, speaker_task) = duplex_spawn_direction(speaker, observer);
+                fs::write(
+                    duplex_loop_gate("capture", AudioDirection::Speaker),
+                    b"release",
+                )
+                .unwrap();
+                duplex_wait_until(|| speaker_provider.inputs.lock().unwrap().len() >= 3).await;
+                let (microphone, result) = tokio::time::timeout(
+                    Duration::from_millis(300),
+                    microphone_task,
+                )
+                .await
+                .expect("the 400ms playback bound must fail locally while the writer is blocked")
+                .unwrap();
+                assert_eq!(result, Err(DirectionFailureOrigin::Queue));
+                assert_eq!(
+                    classify_direction_failure(result.unwrap_err()),
+                    FaultScope::Local
+                );
+                assert!(
+                    !speaker_task.is_finished(),
+                    "a local queue overflow stopped its peer"
+                );
+                assert!(
+                    !microphone.playback_reusable,
+                    "a cancelled pending write must not be reused"
+                );
+                fixture.cleanup(microphone).await;
+                speaker_stop
+                    .send(Some(WorkerStop::Close {
+                        reason: CloseRequestReason::UserStop,
+                        deadline: Instant::now() + Duration::from_secs(2),
+                    }))
+                    .unwrap();
+                let (speaker, result) = speaker_task.await.unwrap();
+                assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+                fixture.cleanup(speaker).await;
+                fixture.shutdown().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_stop_cancels_partial_io_and_retains_cleanup_custody() {
+        if duplex_loop_child(
+            "production_duplex_stop_cancels_partial_io_and_retains_cleanup_custody",
+        )
+        .await
+        {
+            return;
+        }
+        tokio::task::LocalSet::new().run_until(async {
+            let mut fixture = DuplexLoopFixture::start();
+            let observer = Arc::new(RecordingObserver::default());
+            for direction in [AudioDirection::Microphone, AudioDirection::Speaker] {
+                let (mut prepared, provider) = fixture.prepare(direction).await;
+                duplex_seed_playback(&mut prepared, &provider, 10).await;
+                let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+                duplex_wait_until(|| observer.events.lock().unwrap().iter().filter(|event| {
+                    matches!(event, DuplexRuntimeEvent::AudioFrame { direction: actual, .. } if *actual == direction)
+                }).count() == 6).await;
+                fs::write(duplex_loop_gate("capture", direction), b"release").unwrap();
+                duplex_wait_until(|| duplex_loop_marker("capture", direction).with_extension("partial").exists()).await;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let reason = match direction {
+                    AudioDirection::Microphone => WorkerStop::Close { reason: CloseRequestReason::UserStop, deadline },
+                    AudioDirection::Speaker => WorkerStop::GenerationLost { deadline },
+                };
+                stop.send(Some(reason)).unwrap();
+                let (prepared, result) = tokio::time::timeout(Duration::from_millis(100), task).await.unwrap().unwrap();
+                assert_eq!(result, Ok(DirectionOutcome::Stopped(reason)));
+                assert!(prepared.capture.is_some() && prepared.playback.is_some());
+                assert!(!prepared.playback_reusable);
+                let event_count = observer.events.lock().unwrap().len();
+                let processed_count = observer.internal_events.lock().unwrap().len();
+                fs::write(duplex_loop_gate("playback", direction), b"release").unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                assert_eq!(observer.events.lock().unwrap().len(), event_count);
+                assert_eq!(observer.internal_events.lock().unwrap().len(), processed_count);
+                assert!(observer.internal_events.lock().unwrap().iter().all(|event| !matches!(event,
+                    InternalRuntimeObservation::CaptureFrameProcessed { direction: actual, .. } if *actual == direction)));
+                fixture.cleanup(prepared).await;
+            }
+            fixture.shutdown().await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_capture_eof_retains_cleanup_custody() {
+        if duplex_loop_child("production_duplex_capture_eof_retains_cleanup_custody").await {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut fixture = DuplexLoopFixture::start();
+                let observer = Arc::new(RecordingObserver::default());
+                let (mut prepared, provider) = fixture.prepare(AudioDirection::Microphone).await;
+                duplex_seed_playback(&mut prepared, &provider, 10).await;
+                let (_stop, task) = duplex_spawn_direction(prepared, observer.clone());
+                duplex_wait_until(|| {
+                    observer
+                        .events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|event| matches!(event, DuplexRuntimeEvent::AudioFrame { .. }))
+                        .count()
+                        == 6
+                })
+                .await;
+                fs::write(
+                    duplex_loop_gate("capture", AudioDirection::Microphone),
+                    b"release",
+                )
+                .unwrap();
+                let (prepared, result) = tokio::time::timeout(Duration::from_millis(300), task)
+                    .await
+                    .expect("capture EOF must interrupt a pending playback write")
+                    .unwrap();
+                assert_eq!(result, Err(DirectionFailureOrigin::PcmCapture));
+                assert!(prepared.capture.is_some() && prepared.playback.is_some());
+                assert!(!prepared.playback_reusable);
+                assert!(observer.internal_events.lock().unwrap().is_empty());
+                fixture.cleanup(prepared).await;
+                fixture.shutdown().await;
+            })
+            .await;
+    }
+
     fn write_fake_pcm_program(path: &Path, kind: &str) {
         fs::write(
             path,
@@ -5813,6 +7244,33 @@ pub(crate) mod tests {
             .await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn playback_write_error_and_dropped_future_do_not_restore_reuse() {
+        let (_stop, mut receiver) = watch::channel(None);
+        let mut reusable = true;
+        let failed = await_playback_write(&mut reusable, &mut receiver, None, async {
+            Err::<(), _>("partial write failed")
+        })
+        .await;
+        assert_eq!(failed, HotIoResult::Completed(Err("partial write failed")));
+        assert!(!reusable);
+
+        reusable = true;
+        let (entered, mut entered_result) = oneshot::channel();
+        {
+            let pending = await_playback_write(&mut reusable, &mut receiver, None, async {
+                let _ = entered.send(());
+                std::future::pending::<Result<(), &'static str>>().await
+            });
+            tokio::pin!(pending);
+            tokio::select! {
+                _ = &mut pending => panic!("write unexpectedly completed"),
+                _ = &mut entered_result => {}
+            }
+        }
+        assert!(!reusable);
+    }
+
     #[test]
     fn production_direction_loop_routes_every_hot_write_through_the_bounded_helpers() {
         let source = include_str!("translation_runtime.rs");
@@ -5826,9 +7284,11 @@ pub(crate) mod tests {
         let normalized = loop_source.split_whitespace().collect::<String>();
         assert!(!normalized.contains(".provider.send("));
         assert!(!normalized.contains(".write_frame("));
-        assert_eq!(normalized.matches("send_provider(").count(), 4);
+        assert_eq!(normalized.matches("send_provider(").count(), 3);
         assert_eq!(normalized.matches("write_playback_frame(").count(), 1);
-        assert_eq!(normalized.matches("stop_playback_for_reset(").count(), 2);
+        assert_eq!(normalized.matches("stop_playback_for_reset(").count(), 1);
+        assert_eq!(normalized.matches("tokio::pin!(operation)").count(), 1);
+        assert!(normalized.contains("letplayback_deadline=Some("));
         let helpers = source
             .split_once("async fn stop_playback_for_reset")
             .unwrap()
@@ -5838,7 +7298,10 @@ pub(crate) mod tests {
             .0
             .split_whitespace()
             .collect::<String>();
-        assert_eq!(helpers.matches("watchdog_phase_deadline(").count(), 3);
+        assert_eq!(helpers.matches("watchdog_phase_deadline(").count(), 1);
+        assert!(
+            !normalized.contains("write_playback_with_gain(frame.pcm(),percent,deadline).await")
+        );
     }
 
     #[test]
@@ -6608,6 +8071,7 @@ pub(crate) mod tests {
             entry_failures: VecDeque<AudioDirection>,
             triggers: HashMap<AudioDirection, VecDeque<Trigger>>,
             probe_ready: bool,
+            reject_start: bool,
             probe_results: VecDeque<bool>,
             probe_delays: VecDeque<Duration>,
             probe_calls: usize,
@@ -6942,6 +8406,14 @@ pub(crate) mod tests {
         impl DirectionEffects for ScriptedEffects {
             type Acquisition = ScriptAcquisition;
             type Prepared = ScriptPrepared;
+
+            fn validate_start(&self, _deadline: Instant) -> Result<(), DuplexRuntimeError> {
+                if self.state.lock().unwrap().reject_start {
+                    Err(DuplexRuntimeError::StartFailed)
+                } else {
+                    Ok(())
+                }
+            }
 
             fn begin(&self, launch: DirectionLaunch) -> Self::Acquisition {
                 let mut state = self.state.lock().unwrap();
@@ -7558,6 +9030,30 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             coordinator
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn post_bootstrap_admission_failure_prevents_every_pcm_and_provider_acquisition() {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let effects = ScriptedEffects::default();
+                    effects.state.lock().unwrap().reject_start = true;
+                    let mut coordinator =
+                        coordinator(effects.clone(), Arc::new(LifecycleRecorder::default()));
+                    assert_eq!(
+                        coordinator.start_resources(transaction_deadline()).await,
+                        Err(DuplexRuntimeError::StartFailed)
+                    );
+                    assert_eq!(effects.event_count(&ScriptEvent::WaitReady), 1);
+                    assert_eq!(effects.provider_acquisitions(AudioDirection::Microphone), 0);
+                    assert_eq!(effects.provider_acquisitions(AudioDirection::Speaker), 0);
+                    assert_eq!(effects.live_count(), 0);
+                    coordinator.shutdown(transaction_deadline()).await.unwrap();
+                    assert_eq!(effects.event_count(&ScriptEvent::GenerationShutdown), 1);
+                    assert!(coordinator.workers.is_empty());
+                    assert!(!coordinator.has_pending_cleanup());
+                })
+                .await;
         }
 
         async fn finish_quiescence_fixture(

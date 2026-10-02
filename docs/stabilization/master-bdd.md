@@ -1,7 +1,7 @@
 # Translator stabilization master BDD contract
 
 - Baseline: untouched `9291e8beafee3e02aaa179178ce460ac9e6c6de2`.
-- Candidate: exact commit built from `codex/stabilization-20260904` after all gates pass.
+- Candidate: exact commit built from `codex/product-clean-20260923` after all gates pass.
 - Product authority: tracked public documentation plus the intentionally unpublished PRD/design at `e40156a`; removed benchmark artifacts are historical evidence, not current proof.
 - A response is successful only when reported state equals effective runtime state at the response boundary.
 - Missing live prerequisites are `UNAVAILABLE`, never `PASS`.
@@ -18,6 +18,8 @@
 - The mandatory local-provider release matrix is all three modes x both audio directions x both language pairs x both required target voices, including every fallback allowed to report operational. Removing or hiding any baseline local core cell blocks release. The release manifest binds a provider-first-frame p99 for every matrix cell. Its processing reserve is that cell's p99 rounded up to a 20-ms frame plus 100 ms; when more than one fallback can be chosen after capture, the reserve uses the conservative maximum across those reachable cells. The forced capture cutoff is `maximum source age - processing reserve`. Failure of a mandatory local cell blocks release; only explicitly optional capabilities such as OpenAI and validated open-speaker AEC may be omitted and documented.
 - Release classification is a separate immutable contract: graph-boundary p95 `<=1000 ms` is `meets_target`, `(1000,1500] ms` is `usable_degraded`, and `>1500 ms` is `fails_usable_limit`.
 - Starting with both directions disabled is invalid. Incoming-only opens no microphone and requires a validated physical sink. Outgoing-only may use the direct physical mic only with headphones; open speakers require matching validated AEC. Simultaneous duplex requires headphones or matching validated AEC. An unsafe path never falls back to a direct physical mic/sink.
+- A generic Analog physical output may be explicitly confirmed as headphones by the authenticated owner while stopped. This ephemeral exact-pair confirmation is distinct from driver metadata and AEC proof; stale identity/port/availability, discovery failure and daemon restart revoke it. The UI never confirms automatically or changes direction settings to make Start pass.
+- A pending playback write does not stop that direction's capture processing/provider submission or the peer direction. Ready provider events do not starve capture. The existing 400-ms PCM bound and local overflow/cleanup rules remain; partial or failed playback is not reusable.
 - `degraded` is operational only when every model required by the selected provider/direction is `ready`, no safe error is active, and degradation identifies a measured slower compute fallback. `not_loaded`, `loading`, or `failed` is not operational.
 - Debug capture is an independently enabled session. Translation stop and provider replacement close no capture artifact and do not erase one; stopped translation appends no PCM. Explicit disable, daemon restart, time/size/free-space failure close it. Debug text has the different lifecycle stated below.
 - Provider-engine replacement prepares B before the registry lock, atomically swaps the active pointer once under that lock, and retires A afterward. A lease whose locked pointer read completes before the swap receives A; a read completing after the swap receives B.
@@ -72,8 +74,8 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 RUST_TEST_THREADS=1 cargo test --locked --workspace --all-targets
 RUST_TEST_THREADS=1 cargo test --locked --workspace --doc
-sidecar/.venv/bin/ruff check --config sidecar/pyproject.toml sidecar/translator_sidecar sidecar/tests tests scripts/translator-browser-live-stream-smoke scripts/translator-simulated-app-stream-smoke scripts/translator-task10-real-app-smoke scripts/translator-task11-openai-preflight scripts/translator-task11-openai-synthetic-smoke scripts/translator-task12-zoom-diagnostic scripts/translator-publication-check scripts/translator-test-manifest scripts/translator-validate
-sidecar/.venv/bin/ruff format --check --config sidecar/pyproject.toml sidecar/translator_sidecar sidecar/tests tests scripts/translator-browser-live-stream-smoke scripts/translator-simulated-app-stream-smoke scripts/translator-task10-real-app-smoke scripts/translator-task11-openai-preflight scripts/translator-task11-openai-synthetic-smoke scripts/translator-task12-zoom-diagnostic scripts/translator-publication-check scripts/translator-test-manifest scripts/translator-validate
+sidecar/.venv/bin/ruff check --config sidecar/pyproject.toml sidecar/translator_sidecar sidecar/tests tests scripts/translator-browser-live-stream-smoke scripts/translator-simulated-app-stream-smoke scripts/translator-task10-real-app-smoke scripts/translator-task11-openai-preflight scripts/translator-task11-openai-synthetic-smoke scripts/translator-task12-zoom-diagnostic scripts/translator-native-ui-check scripts/translator-publication-check scripts/translator-test-manifest scripts/translator-validate
+sidecar/.venv/bin/ruff format --check --config sidecar/pyproject.toml sidecar/translator_sidecar sidecar/tests tests scripts/translator-browser-live-stream-smoke scripts/translator-simulated-app-stream-smoke scripts/translator-task10-real-app-smoke scripts/translator-task11-openai-preflight scripts/translator-task11-openai-synthetic-smoke scripts/translator-task12-zoom-diagnostic scripts/translator-native-ui-check scripts/translator-publication-check scripts/translator-test-manifest scripts/translator-validate
 sidecar/.venv/bin/python -I -W error::ResourceWarning -W error::RuntimeWarning scripts/translator-test-manifest _run-pytest
 sidecar/.venv/bin/python -I -W error::ResourceWarning -W error::RuntimeWarning scripts/translator-test-manifest _run-unittest
 shellcheck scripts/translator-asr-quality-debug scripts/translator-desktop scripts/translator-podcast-quality-debug scripts/translator-publication-check.bash scripts/translator-sca scripts/translator-schema-check scripts/translator-task9-smoke
@@ -302,6 +304,28 @@ Given a pre-ack partial-start failure, every acquired resource is released and s
 Provider probe deadline is `1000 ms`, direction-open deadline `5000 ms`, start acknowledgement deadline `130000 ms`, close acknowledgement `2000 ms`, and Stop `10000 ms`. Exhaustion sets a safe non-running/failed state and proves no child process, lease, route override, or queued frame remains before a later Start succeeds. Concurrent Stop/failure cleans each resource once; repeated Stop returns a bounded successful stopped response.
 
 Owner/seam: translation runtime supervisor; instrumented lifecycle tests with virtual time.
+
+Daemon shutdown differs from an operational HTTP Stop. It closes admission
+before draining HTTP and background work, quarantines owned outputs, stops and
+joins existing runtimes, and returns retained graph custody to its existing
+calibration owner. It never acquires new Production permission or repairs and
+restores ordinary bypass after the gate becomes Stopping. Ordinary Stop keeps
+its existing verified-bypass and restart behavior.
+
+HTTP drain keeps its seven-second limit. Round-trip and translation owner
+drains each use one original eight-second absolute deadline; every retry
+receives that same deadline. These sequential limits are not a total
+eight-second daemon deadline. Timeout or terminal failure cannot skip other
+owner drains, debug/event closure, or the existing AEC shutdown attempt. The
+unfinished drainer and all unsafe owners remain held by the existing fatal
+custody guard; route restoration and graph cleanup cannot report success.
+Tests exercise the composed path with an actual mix owner, stopped/running/
+pending states, held owner joins, quarantine/Stop faults and receiver closure.
+
+The protocol ceilings above do not extend the control application's unchanged
+four-second Start and eight-second Stop deadlines. Component work remains
+subject to the original command deadline; standalone bootstrap time does not
+measure the actual HTTP transaction.
 
 ### SYS-1 — User-service crash and restart lifecycle
 

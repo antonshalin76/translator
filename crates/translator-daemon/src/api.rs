@@ -204,6 +204,7 @@ pub fn build_router_with_controllers(
         .route("/v1/routes/candidates", get(route_candidates))
         .route("/v1/translation/start", post(start_translation))
         .route("/v1/translation/stop", post(stop_translation))
+        .route("/v1/devices/headphones", post(confirm_headphones))
         .route("/v1/aec-calibration/start", post(start_aec_calibration))
         .route("/v1/aec-calibration/cancel", post(cancel_aec_calibration))
         .route("/v1/aec-calibration", get(aec_calibration_status))
@@ -310,6 +311,17 @@ async fn start_translation(State(state): State<ApiState>) -> axum::response::Res
 
 async fn stop_translation(State(state): State<ApiState>) -> axum::response::Response {
     execute_translation(state.translation, ControlCommand::Stop).await
+}
+
+async fn confirm_headphones(
+    State(state): State<ApiState>,
+    Json(confirmation): Json<Option<translator_audio::HeadphoneConfirmation>>,
+) -> axum::response::Response {
+    execute_translation(
+        state.translation,
+        ControlCommand::ConfirmHeadphones(confirmation.map(Box::new)),
+    )
+    .await
 }
 
 async fn start_aec_calibration(State(state): State<ApiState>) -> axum::response::Response {

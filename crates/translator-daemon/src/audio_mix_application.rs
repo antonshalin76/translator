@@ -197,6 +197,26 @@ impl<R: CommandRunner> AudioMixApplication<R> {
 }
 
 impl<R: CommandRunner + Send + Sync> PlaybackMixAuthority for AudioMixApplication<R> {
+    fn native_playback_percent(&self, original: bool) -> Result<u8, DuplexRuntimeError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DuplexRuntimeError::StartFailed)?;
+        if state.unknown {
+            return Err(DuplexRuntimeError::StartFailed);
+        }
+        let effective = state.mode.effective(state.committed);
+        let percent = if original {
+            effective.speaker_original_percent
+        } else {
+            effective.speaker_translation_percent
+        };
+        if percent > 100 {
+            return Err(DuplexRuntimeError::StartFailed);
+        }
+        Ok(percent)
+    }
+
     fn admit_registered(
         &self,
         registration: &PulsePlaybackRegistration,
@@ -296,4 +316,51 @@ fn failure(code: &'static str) -> ControlFailure {
 
 fn unknown() -> ControlFailure {
     failure("audio_mix_state_unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoCommands;
+    impl CommandRunner for NoCommands {
+        fn run_until(
+            &self,
+            _: &str,
+            _: &[String],
+            _: Instant,
+        ) -> Result<translator_audio::CommandResult, translator_audio::CommandRunError> {
+            panic!("native gain projection must not execute a Pulse or ALSA command")
+        }
+    }
+
+    #[test]
+    fn native_gain_obeys_existing_mix_mode_and_unknown_state() {
+        let application = AudioMixApplication::new(NoCommands);
+        for (mode, original, translation) in [
+            (
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false,
+                },
+                0,
+                0,
+            ),
+            (TranslationMixMode::Translating, 0, 47),
+            (TranslationMixMode::MicrophoneMutedBypass, 100, 0),
+        ] {
+            let mut state = application.state.lock().unwrap();
+            state.committed.speaker_original_percent = 0;
+            state.committed.speaker_translation_percent = 47;
+            state.mode = mode;
+            drop(state);
+            assert_eq!(application.native_playback_percent(true).unwrap(), original);
+            assert_eq!(
+                application.native_playback_percent(false).unwrap(),
+                translation
+            );
+        }
+        application.state.lock().unwrap().unknown = true;
+        assert!(application.native_playback_percent(true).is_err());
+        assert!(application.native_playback_percent(false).is_err());
+    }
 }

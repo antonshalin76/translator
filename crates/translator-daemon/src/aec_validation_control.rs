@@ -202,6 +202,73 @@ impl AecCalibrationController {
         }
     }
 
+    pub(crate) fn handoff_production(
+        &self,
+        binding: &AecProofBinding,
+    ) -> Result<AudioOperationLease, AecCalibrationControlError> {
+        let mut state = lock_recovering(&self.inner.state);
+        if state.stopping {
+            return Err(AecCalibrationControlError::Stopping);
+        }
+        if !matches!(state.status, AecCalibrationControlStatus::Succeeded { .. }) {
+            return Err(AecCalibrationControlError::Unavailable);
+        }
+        self.inner
+            .coordinator
+            .validate_current(binding, true)
+            .map_err(|_| AecCalibrationControlError::Unavailable)?;
+        let custody = state
+            .retained_custody
+            .as_mut()
+            .ok_or(AecCalibrationControlError::Unavailable)?;
+        let lease = custody
+            .lease
+            .as_mut()
+            .ok_or(AecCalibrationControlError::Busy)?;
+        lease.handoff_production().map_err(map_gate_error)?;
+        Ok(custody
+            .lease
+            .take()
+            .expect("lease was relabelled without releasing custody"))
+    }
+
+    pub(crate) fn return_production(
+        &self,
+        mut lease: AudioOperationLease,
+    ) -> Result<(), AudioOperationLease> {
+        let mut state = lock_recovering(&self.inner.state);
+        let Some(custody) = state
+            .retained_custody
+            .as_mut()
+            .filter(|custody| custody.lease.is_none())
+        else {
+            return Err(lease);
+        };
+        if lease.return_calibration(custody.attempt_id).is_err()
+            && self.inner.gate.state() != crate::AudioOperationState::Stopping
+        {
+            return Err(lease);
+        }
+        custody.lease = Some(lease);
+        Ok(())
+    }
+
+    pub(crate) fn retain_abandoned_production(&self, lease: AudioOperationLease) -> bool {
+        if let Err(lease) = self.return_production(lease) {
+            self.inner.gate.begin_stopping();
+            drop(lease);
+            return false;
+        }
+        self.inner.coordinator.revoke();
+        let mut state = lock_recovering(&self.inner.state);
+        if let Some(custody) = state.retained_custody.as_ref() {
+            state.status = AecCalibrationControlStatus::CleanupUncertain {
+                attempt_id: custody.attempt_id,
+            };
+        }
+        true
+    }
+
     pub async fn start(&self) -> Result<AecCalibrationControlStatus, AecCalibrationControlError> {
         let _lifecycle = self.inner.lifecycle.lock().await;
         self.reap_finished().await?;
@@ -242,19 +309,51 @@ impl AecCalibrationController {
     }
 
     pub async fn cancel(&self, attempt_id: Uuid) -> AecCalibrationControlStatus {
-        let mut state = lock_recovering(&self.inner.state);
-        if let Some(active) = state
-            .active
-            .as_ref()
-            .filter(|active| active.attempt_id == attempt_id)
-        {
-            active.cancellation.cancel();
-            if matches!(state.status, AecCalibrationControlStatus::Succeeded { .. }) {
-                self.inner.coordinator.revoke();
-                state.status = AecCalibrationControlStatus::Cancelled { attempt_id };
+        let retire = {
+            let mut state = lock_recovering(&self.inner.state);
+            let matched = state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.attempt_id == attempt_id)
+                || state
+                    .retained_custody
+                    .as_ref()
+                    .is_some_and(|custody| custody.attempt_id == attempt_id);
+            if matched {
+                if let Some(active) = state.active.as_ref() {
+                    active.cancellation.cancel();
+                }
+                let retire = matches!(state.status, AecCalibrationControlStatus::Succeeded { .. });
+                if retire {
+                    self.inner.coordinator.revoke();
+                    state.status = AecCalibrationControlStatus::Cancelled { attempt_id };
+                }
+                retire
+            } else {
+                false
+            }
+        };
+        if retire {
+            let deadline = Instant::now() + crate::RUNTIME_CLEANUP_BUDGET;
+            loop {
+                let returned = lock_recovering(&self.inner.state)
+                    .retained_custody
+                    .as_ref()
+                    .is_some_and(|custody| custody.lease.is_some());
+                if returned {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return self.status();
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            if !self.retry_retained_cleanup().await {
+                lock_recovering(&self.inner.state).status =
+                    AecCalibrationControlStatus::CleanupUncertain { attempt_id };
             }
         }
-        state.status.clone()
+        self.status()
     }
 
     pub fn status(&self) -> AecCalibrationControlStatus {
@@ -427,6 +526,13 @@ impl AecCalibrationController {
     async fn retry_retained_cleanup(&self) -> bool {
         let retained = {
             let state = lock_recovering(&self.inner.state);
+            if state
+                .retained_custody
+                .as_ref()
+                .is_some_and(|custody| custody.lease.is_none())
+            {
+                return false;
+            }
             state
                 .retained_custody
                 .as_ref()
@@ -728,30 +834,14 @@ async fn run_attempt(
         inner.coordinator.revoke();
         terminal = AecCalibrationControlStatus::Cancelled { attempt_id };
     }
-    if graph_retained
-        && matches!(terminal, AecCalibrationControlStatus::Succeeded { .. })
-        && !cancellation.is_cancelled()
-    {
-        drop(lease);
-        state.retained_custody = Some(RetainedCustody {
-            attempt_id,
-            lease: None,
-            cleanup_task: Arc::new(AsyncMutex::new(None)),
-        });
-    } else if graph_retained {
+    if graph_retained || !cleanup_confirmed {
         state.retained_custody = Some(RetainedCustody {
             attempt_id,
             lease: Some(lease),
             cleanup_task: Arc::new(AsyncMutex::new(None)),
         });
-    } else if cleanup_confirmed {
-        drop(lease);
     } else {
-        state.retained_custody = Some(RetainedCustody {
-            attempt_id,
-            lease: Some(lease),
-            cleanup_task: Arc::new(AsyncMutex::new(None)),
-        });
+        drop(lease);
     }
     if !state.stopping
         && state
@@ -897,6 +987,12 @@ mod tests {
     use super::*;
     use crate::AudioOperationState;
     use std::sync::atomic::AtomicUsize;
+    struct FixtureClock;
+    impl crate::aec_validation::AecMonotonicClock for FixtureClock {
+        fn now_ns(&self) -> u64 {
+            70_000_000_000
+        }
+    }
     use translator_audio::{
         AEC_FIXTURE_DBFS, AEC_OBSERVATION_DURATION_NS, AEC_OBSERVATION_FRAME_COUNT,
         AEC_OBSERVATION_FRAME_SAMPLES, AEC_POWER_WINDOW_COUNT, AEC_SAMPLES_PER_POWER_WINDOW,
@@ -989,7 +1085,9 @@ mod tests {
     fn c9_custody_controller(
         outcome: C9Outcome,
     ) -> (AecCalibrationController, Arc<C9CustodyEngine>) {
-        let coordinator = Arc::new(AecCalibrationCoordinator::new());
+        let coordinator = Arc::new(AecCalibrationCoordinator::with_clock(Arc::new(
+            FixtureClock,
+        )));
         let gate = AudioOperationGate::new();
         let engine = Arc::new(C9CustodyEngine {
             gate: gate.clone(),
@@ -1012,7 +1110,7 @@ mod tests {
             matches!(status, AecCalibrationControlStatus::Succeeded { .. })
         })
         .await;
-        let production = engine.gate.acquire_production().unwrap();
+        let production = controller.handoff_production(&test_binding()).unwrap();
         let proof = engine.coordinator.status();
         let effects = engine.effects.lock().unwrap().clone();
         assert_eq!(
@@ -1025,7 +1123,7 @@ mod tests {
             "Busy must not clean a production-owned retained graph"
         );
         assert_eq!(engine.coordinator.status(), proof);
-        drop(production);
+        assert!(controller.return_production(production).is_ok());
 
         controller.start().await.unwrap();
         wait_until(&controller, |status| {
@@ -1363,7 +1461,11 @@ mod tests {
                     PreflightInspection::Panic => panic!("injected inspection panic"),
                     PreflightInspection::InvalidBinding => {
                         let mut binding = test_binding();
-                        binding.aec_module_id = 0;
+                        binding.graph = translator_audio::AecGraphIdentity::PulseModule {
+                            module_id: 0,
+                            source_id: 2,
+                            sink_id: 3,
+                        };
                         return Ok(binding);
                     }
                     PreflightInspection::Valid => {}
@@ -1515,6 +1617,88 @@ mod tests {
             assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
             controller.shutdown().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_preflight_waits_for_delayed_cleanup_terminal() {
+        let engine = Arc::new(PreflightGraphEngine::new(PreflightInspection::Error));
+        engine.release_inspection();
+        let (controller, coordinator, gate) = controller(engine.clone());
+        let AecCalibrationControlStatus::Running { attempt_id } = controller.start().await.unwrap()
+        else {
+            panic!("attempt not admitted")
+        };
+        tokio::time::timeout(Duration::from_secs(1), engine.cleanup_entered.notified())
+            .await
+            .expect("failed inspection must enter owned cleanup");
+        controller.cancel(attempt_id).await;
+        assert_eq!(
+            controller.status(),
+            AecCalibrationControlStatus::Running { attempt_id }
+        );
+        assert_eq!(
+            gate.state(),
+            AudioOperationState::Calibration { attempt_id }
+        );
+        let delayed_engine = engine.clone();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            delayed_engine.release_cleanup();
+        });
+        wait_until(&controller, |status| {
+            matches!(status, AecCalibrationControlStatus::Cancelled { attempt_id: current } if *current == attempt_id)
+        })
+        .await;
+        release.await.unwrap();
+        assert_eq!(engine.cleanups.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.calibrations.load(Ordering::SeqCst), 0);
+        assert!(!engine.graph_owned.load(Ordering::SeqCst));
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        controller.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_observation_of_unreached_predicate_remains_bounded() {
+        let engine = Arc::new(PreflightGraphEngine::new(PreflightInspection::Valid));
+        let (controller, coordinator, gate) = controller(engine);
+        let observation_controller = controller.clone();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            tokio::spawn(async move {
+                wait_until(&observation_controller, |_| false).await;
+            }),
+        )
+        .await
+        .expect("terminal observation must stop within its test budget");
+        assert!(result.unwrap_err().is_panic());
+        assert!(started.elapsed() >= Duration::from_secs(5));
+        assert_eq!(
+            controller.status(),
+            AecCalibrationControlStatus::Unavailable
+        );
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        controller.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn measuring_observation_of_unreached_state_remains_bounded() {
+        let coordinator = Arc::new(AecCalibrationCoordinator::new());
+        let observation_coordinator = coordinator.clone();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            tokio::spawn(async move {
+                wait_until_measuring(&observation_coordinator).await;
+            }),
+        )
+        .await
+        .expect("measuring observation must stop within its test budget");
+        assert!(result.unwrap_err().is_panic());
+        assert!(started.elapsed() >= Duration::from_secs(5));
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2028,9 +2212,11 @@ mod tests {
             sink_muted: false,
             source_geometry: "desk-left".into(),
             sink_geometry: "desk-front".into(),
-            aec_module_id: 1,
-            aec_source_id: 2,
-            aec_sink_id: 3,
+            graph: translator_audio::AecGraphIdentity::PulseModule {
+                module_id: 1,
+                source_id: 2,
+                sink_id: 3,
+            },
             aec_generation: "generation-1".into(),
             aec_config_id: "aec-1".into(),
             vad_config_id: "vad-1".into(),
@@ -2046,6 +2232,7 @@ mod tests {
         };
         let binding = test_binding();
         let observation = AecObservationEvidence {
+            native_timing: None,
             observer_generation: "observer-1".into(),
             calibration_attempt_id: "attempt-1".into(),
             challenge_id: "challenge-1".into(),
@@ -2133,14 +2320,17 @@ mod tests {
         controller: &AecCalibrationController,
         predicate: impl Fn(&AecCalibrationControlStatus) -> bool,
     ) {
-        for _ in 0..10_000 {
-            let status = controller.status();
-            if predicate(&status) {
-                return;
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if predicate(&controller.status()) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
-            tokio::task::yield_now().await;
-        }
-        panic!(
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
             "status did not reach expected state: {:?}",
             controller.status()
         );
@@ -2173,13 +2363,17 @@ mod tests {
     }
 
     async fn wait_until_measuring(coordinator: &AecCalibrationCoordinator) {
-        for _ in 0..10_000 {
-            if coordinator.status() == AecProofStatus::Measuring {
-                return;
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if coordinator.status() == AecProofStatus::Measuring {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
-            tokio::task::yield_now().await;
-        }
-        panic!(
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
             "coordinator did not reach measuring state: {:?}",
             coordinator.status()
         );
@@ -2192,7 +2386,9 @@ mod tests {
         Arc<AecCalibrationCoordinator>,
         AudioOperationGate,
     ) {
-        let coordinator = Arc::new(AecCalibrationCoordinator::new());
+        let coordinator = Arc::new(AecCalibrationCoordinator::with_clock(Arc::new(
+            FixtureClock,
+        )));
         let gate = AudioOperationGate::new();
         (
             AecCalibrationController::new(coordinator.clone(), gate.clone(), engine),
@@ -2451,6 +2647,179 @@ mod tests {
         assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
         assert_eq!(gate.state(), AudioOperationState::Stopping);
         assert!(lock_recovering(&controller.inner.state).active.is_none());
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_retained_success_keeps_exclusivity_until_authorized_runtime_handoff() {
+        let engine = Arc::new(TrackingSuccessfulEngine {
+            publication: SuccessfulEngine(Mutex::new(Some(successful_publication()))),
+            cleanup_calls: AtomicUsize::new(0),
+        });
+        let (controller, coordinator, gate) = controller(engine.clone());
+        let attempt_id = match controller.start().await.unwrap() {
+            AecCalibrationControlStatus::Running { attempt_id } => attempt_id,
+            status => panic!("unexpected calibration state: {status:?}"),
+        };
+        wait_until(&controller, |status| {
+            matches!(status, AecCalibrationControlStatus::Succeeded { .. })
+        })
+        .await;
+
+        assert!(matches!(
+            coordinator.status(),
+            AecProofStatus::Validated { .. }
+        ));
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            gate.state(),
+            AudioOperationState::Calibration { attempt_id }
+        );
+        assert!(gate.acquire_production().is_err());
+        assert!(gate.acquire_human_round_trip(Uuid::new_v4()).is_err());
+        assert!(gate.acquire_manual().is_err());
+        controller.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retained_runtime_handoff_stop_and_restart_never_open_an_idle_gap() {
+        let engine = Arc::new(TrackingSuccessfulEngine {
+            publication: SuccessfulEngine(Mutex::new(Some(successful_publication()))),
+            cleanup_calls: AtomicUsize::new(0),
+        });
+        let (controller, _, gate) = controller(engine.clone());
+        let attempt_id = match controller.start().await.unwrap() {
+            AecCalibrationControlStatus::Running { attempt_id } => attempt_id,
+            state => panic!("unexpected state: {state:?}"),
+        };
+        wait_until(&controller, |s| {
+            matches!(s, AecCalibrationControlStatus::Succeeded { .. })
+        })
+        .await;
+        for _ in 0..2 {
+            let lease = controller.handoff_production(&test_binding()).unwrap();
+            assert_eq!(gate.state(), AudioOperationState::Production);
+            assert!(controller.handoff_production(&test_binding()).is_err());
+            assert!(controller.start().await.is_err());
+            assert!(gate.acquire_manual().is_err());
+            assert!(controller.return_production(lease).is_ok());
+            assert_eq!(
+                gate.state(),
+                AudioOperationState::Calibration { attempt_id }
+            );
+            assert!(gate.acquire_production().is_err());
+        }
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 0);
+        controller.shutdown().await.unwrap();
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retained_cancellation_waits_for_runtime_custody_before_one_cleanup() {
+        let engine = Arc::new(TrackingSuccessfulEngine {
+            publication: SuccessfulEngine(Mutex::new(Some(successful_publication()))),
+            cleanup_calls: AtomicUsize::new(0),
+        });
+        let (controller, coordinator, gate) = controller(engine.clone());
+        let attempt_id = match controller.start().await.unwrap() {
+            AecCalibrationControlStatus::Running { attempt_id } => attempt_id,
+            state => panic!("unexpected state: {state:?}"),
+        };
+        wait_until(&controller, |s| {
+            matches!(s, AecCalibrationControlStatus::Succeeded { .. })
+        })
+        .await;
+        let lease = controller.handoff_production(&test_binding()).unwrap();
+        let cancelling = controller.clone();
+        let cancellation = tokio::spawn(async move { cancelling.cancel(attempt_id).await });
+        wait_until(&controller, |s| {
+            matches!(s, AecCalibrationControlStatus::Cancelled { .. })
+        })
+        .await;
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert_eq!(gate.state(), AudioOperationState::Production);
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 0);
+        assert!(controller.return_production(lease).is_ok());
+        cancellation.await.unwrap();
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(controller.handoff_production(&test_binding()).is_err());
+    }
+
+    #[tokio::test]
+    async fn retained_stopping_accepts_returned_custody_without_reopening_admission() {
+        let engine = Arc::new(TrackingSuccessfulEngine {
+            publication: SuccessfulEngine(Mutex::new(Some(successful_publication()))),
+            cleanup_calls: AtomicUsize::new(0),
+        });
+        let (controller, _, gate) = controller(engine.clone());
+        controller.start().await.unwrap();
+        wait_until(&controller, |s| {
+            matches!(s, AecCalibrationControlStatus::Succeeded { .. })
+        })
+        .await;
+        let lease = controller.handoff_production(&test_binding()).unwrap();
+        gate.begin_stopping();
+        assert!(controller.return_production(lease).is_ok());
+        assert_eq!(gate.state(), AudioOperationState::Stopping);
+        assert!(controller.handoff_production(&test_binding()).is_err());
+        controller.shutdown().await.unwrap();
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.state(), AudioOperationState::Stopping);
+    }
+
+    #[tokio::test]
+    async fn retained_shutdown_never_cleans_a_production_owned_graph() {
+        let engine = Arc::new(TrackingSuccessfulEngine {
+            publication: SuccessfulEngine(Mutex::new(Some(successful_publication()))),
+            cleanup_calls: AtomicUsize::new(0),
+        });
+        let (controller, coordinator, gate) = controller(engine.clone());
+        controller.start().await.unwrap();
+        wait_until(&controller, |s| {
+            matches!(s, AecCalibrationControlStatus::Succeeded { .. })
+        })
+        .await;
+        let lease = controller.handoff_production(&test_binding()).unwrap();
+        assert!(controller.shutdown().await.is_err());
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert_eq!(gate.state(), AudioOperationState::Stopping);
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 0);
+        assert!(controller.return_production(lease).is_ok());
+        controller.shutdown().await.unwrap();
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retained_abandoned_runtime_returns_custody_without_an_idle_gap() {
+        let engine = Arc::new(TrackingSuccessfulEngine {
+            publication: SuccessfulEngine(Mutex::new(Some(successful_publication()))),
+            cleanup_calls: AtomicUsize::new(0),
+        });
+        let (controller, coordinator, gate) = controller(engine.clone());
+        let attempt_id = match controller.start().await.unwrap() {
+            AecCalibrationControlStatus::Running { attempt_id } => attempt_id,
+            s => panic!("unexpected state: {s:?}"),
+        };
+        wait_until(&controller, |s| {
+            matches!(s, AecCalibrationControlStatus::Succeeded { .. })
+        })
+        .await;
+        let lease = controller.handoff_production(&test_binding()).unwrap();
+        assert!(controller.retain_abandoned_production(lease));
+        assert_eq!(coordinator.status(), AecProofStatus::Unavailable);
+        assert_eq!(
+            gate.state(),
+            AudioOperationState::Calibration { attempt_id }
+        );
+        assert!(gate.acquire_production().is_err());
+        assert!(gate.acquire_manual().is_err());
+        assert!(matches!(
+            controller.status(),
+            AecCalibrationControlStatus::CleanupUncertain { .. }
+        ));
+        assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 0);
+        controller.shutdown().await.unwrap();
         assert_eq!(engine.cleanup_calls.load(Ordering::SeqCst), 1);
     }
 

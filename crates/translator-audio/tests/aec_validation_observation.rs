@@ -52,9 +52,11 @@ fn valid_input() -> AecValidationInput {
             sink_muted: false,
             source_geometry: "desk-left-45cm".into(),
             sink_geometry: "desk-front-80cm".into(),
-            aec_module_id: 73,
-            aec_source_id: 81,
-            aec_sink_id: 82,
+            graph: translator_audio::AecGraphIdentity::PulseModule {
+                module_id: 73,
+                source_id: 81,
+                sink_id: 82,
+            },
             aec_generation: "aec-generation-1".into(),
             aec_config_id: "webrtc-48k-mono-v1".into(),
             vad_config_id: "vad-v1".into(),
@@ -66,6 +68,7 @@ fn valid_input() -> AecValidationInput {
         resolution: acquisition("resolution-1", 1.0),
         windows,
         observation: AecObservationEvidence {
+            native_timing: None,
             observer_generation: "observer-1".to_owned(),
             calibration_attempt_id: "attempt-1".to_owned(),
             challenge_id: "challenge-1".to_owned(),
@@ -128,6 +131,48 @@ fn assert_invalid(input: AecValidationInput) {
         evaluate_aec(input),
         Err(AecValidationError::InvalidValidationInput)
     );
+}
+
+#[test]
+fn actual_native_adc_span_does_not_turn_host_arrival_jitter_into_pcm_loss() {
+    let mut input = valid_input();
+    let graph = translator_audio::AecGraphIdentity::Native {
+        session_id: 42,
+        generation: 71,
+        physical_device_id: "alsa-hw:0,0:PCH:ALC287 Analog".into(),
+        dsp_config_id: "spa-webrtc-48k".into(),
+    };
+    input.binding.graph = graph.clone();
+    input.observation.maximum_frame_gap_ns = 21_000_000;
+    let mut payload = serde_json::to_value(input).unwrap();
+    payload["observation"]["native_timing"] = serde_json::json!({
+        "graph": graph, "adc_start": 48000, "adc_end": 48000 + 3000 * 960,
+        "capture_buffer_frames": 3840, "maximum_read_bracket_ns": 1_000_000,
+        "source_gaps": 0, "source_duplicates": 0, "source_reordered": 0
+    });
+    let input: AecValidationInput = serde_json::from_value(payload.clone()).unwrap();
+    assert!(evaluate_aec(input).unwrap().validated);
+    for fault in 0..12 {
+        let mut altered = payload.clone();
+        let timing = &mut altered["observation"]["native_timing"];
+        match fault {
+            0 => timing["graph"]["session_id"] = serde_json::json!(43),
+            1 => timing["graph"]["generation"] = serde_json::json!(72),
+            2 => timing["adc_end"] = serde_json::json!(48000 + 3000 * 960 - 1),
+            3 => timing["adc_end"] = serde_json::json!(0),
+            4 => timing["capture_buffer_frames"] = serde_json::json!(0),
+            5 => timing["capture_buffer_frames"] = serde_json::json!(48001),
+            6 => timing["maximum_read_bracket_ns"] = serde_json::json!(0),
+            7 => timing["maximum_read_bracket_ns"] = serde_json::json!(u64::MAX),
+            8 => timing["source_gaps"] = serde_json::json!(1),
+            9 => timing["source_duplicates"] = serde_json::json!(1),
+            10 => timing["source_reordered"] = serde_json::json!(1),
+            11 => timing["maximum_read_bracket_ns"] = serde_json::json!(80_000_001),
+            _ => unreachable!(),
+        }
+        let input: AecValidationInput = serde_json::from_value(altered).unwrap();
+        assert_invalid(input);
+    }
 }
 
 #[test]

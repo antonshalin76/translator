@@ -15,9 +15,9 @@ use tower::ServiceExt;
 use translator_audio::{CommandResult, CommandRunError, CommandRunner};
 use translator_daemon::{
     ActiveDuplexRuntime, AdmittedDuplex, ApiControllers, ApiLimits, AudioMixApplication,
-    AudioOperationGate, ControlApplication, ControlCommand, ControlFailure, ControlToken,
-    DuplexRunner, DuplexRuntimeError, RuntimeMaintenance, RuntimeStore,
-    build_router_with_controllers,
+    AudioMixKnowledge, AudioOperationGate, ControlApplication, ControlCommand, ControlFailure,
+    ControlToken, DuplexRunner, DuplexRuntimeError, RuntimeMaintenance, RuntimeStatus,
+    RuntimeStore, build_router_with_controllers,
 };
 
 const TOKEN: &str = "4242424242424242424242424242424242424242424242424242424242424242";
@@ -326,7 +326,46 @@ async fn failed_physical_patch_never_changes_http_or_sse_desired_state() {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(status["audio_mix"], initial["audio_mix"]);
     drop(events);
+    control.execute(ControlCommand::Stop).await.unwrap();
+    {
+        let state = pulse.state.lock().unwrap();
+        assert_eq!(state.volumes, [0, 0, 65536]);
+        assert_eq!(
+            &state.sets[state.sets.len() - 3..],
+            [
+                vec!["set-sink-input-volume", "43", "0%"],
+                vec!["set-sink-input-volume", "44", "0%"],
+                vec!["set-sink-input-volume", "45", "100%"],
+            ]
+        );
+    }
+    control.execute(ControlCommand::Start).await.unwrap();
     control.shutdown().await.unwrap();
+    {
+        let state = pulse.state.lock().unwrap();
+        assert_eq!(state.volumes, [0, 0, 0]);
+        assert_eq!(
+            &state.sets[state.sets.len() - 3..],
+            [
+                vec!["set-sink-input-volume", "43", "0%"],
+                vec!["set-sink-input-volume", "44", "0%"],
+                vec!["set-sink-input-volume", "45", "0%"],
+            ]
+        );
+    }
+    let stopped = store.snapshot();
+    assert_eq!(stopped.audio_mix, before);
+    assert_eq!(stopped.runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(stopped.audio_mix_knowledge, AudioMixKnowledge::Known);
+    assert!(!stopped.translation_running);
+    assert_eq!(
+        control
+            .execute(ControlCommand::Start)
+            .await
+            .unwrap_err()
+            .code,
+        "translation_controller_unavailable"
+    );
 }
 
 #[tokio::test]
@@ -372,22 +411,42 @@ async fn cancelled_http_and_watchdog_are_drained_before_shutdown_returns() {
     assert_eq!(after.audio_mix.microphone_translation_percent, 80);
     assert_eq!(after.audio_mix.speaker_translation_percent, 90);
     assert!(!after.translation_running);
-    let state = pulse.state.lock().unwrap();
+    assert_eq!(after.runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(after.audio_mix_knowledge, AudioMixKnowledge::Known);
+    {
+        let state = pulse.state.lock().unwrap();
+        assert_eq!(
+            &state.sets[6..12],
+            [
+                vec!["set-sink-input-volume", "43", "80%"],
+                vec!["set-sink-input-volume", "44", "90%"],
+                vec!["set-sink-input-volume", "45", "0%"],
+                vec!["set-sink-input-volume", "43", "80%"],
+                vec!["set-sink-input-volume", "44", "90%"],
+                vec!["set-sink-input-volume", "45", "0%"],
+            ],
+            "queued watchdog must use the newly committed candidate"
+        );
+        assert_eq!(
+            &state.sets[state.sets.len() - 3..],
+            [
+                vec!["set-sink-input-volume", "43", "0%"],
+                vec!["set-sink-input-volume", "44", "0%"],
+                vec!["set-sink-input-volume", "45", "0%"],
+            ]
+        );
+        assert_eq!(
+            state.volumes,
+            [0, 0, 0],
+            "owned shutdown must verify quarantine"
+        );
+    }
     assert_eq!(
-        &state.sets[6..12],
-        [
-            vec!["set-sink-input-volume", "43", "80%"],
-            vec!["set-sink-input-volume", "44", "90%"],
-            vec!["set-sink-input-volume", "45", "0%"],
-            vec!["set-sink-input-volume", "43", "80%"],
-            vec!["set-sink-input-volume", "44", "90%"],
-            vec!["set-sink-input-volume", "45", "0%"],
-        ],
-        "queued watchdog must use the newly committed candidate"
-    );
-    assert_eq!(
-        state.volumes,
-        [0, 0, 65536],
-        "joined shutdown must physically reconcile bypass"
+        control
+            .execute(ControlCommand::Start)
+            .await
+            .unwrap_err()
+            .code,
+        "translation_controller_unavailable"
     );
 }

@@ -84,6 +84,8 @@ def _case_metadata(case: object) -> bool:
                 "license_id",
             )
         )
+        and _normalized(case["accent"])
+        not in {"", "unknown", "null", "none", "unspecified", "n a"}
         and isinstance(case.get("source_language"), str)
         and case.get("source_language") in {"ru", "en"}
         and case.get("speaker_gender") in GENDERS
@@ -146,7 +148,8 @@ def _holdout(
         speakers[language].add(speaker)
         bucket_speakers[language, case["primary_bucket"]].add(speaker)
         genders[language].add(case["speaker_gender"])
-        accents[language].add(case["accent"])
+        accent = _normalized(case["accent"])
+        accents[language].add(accent)
         polarity = case.get("control_polarity")
         if case["primary_bucket"] in BUCKETS[2:5]:
             if polarity not in ("positive", "negative"):
@@ -155,7 +158,7 @@ def _holdout(
                 controls[language, case["primary_bucket"]].add(polarity)
         elif polarity is not None:
             reasons.add("critical_controls")
-        identity = (case["speaker_gender"], case["accent"])
+        identity = (case["speaker_gender"], accent)
         if speaker in speaker_identity and speaker_identity[speaker] != identity:
             reasons.add("speaker_metadata")
         speaker_identity[speaker] = identity

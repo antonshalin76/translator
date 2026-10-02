@@ -399,6 +399,7 @@ impl StartBarrier {
 #[derive(Default)]
 struct TestState {
     starts: AtomicUsize,
+    start_budgets: Mutex<Vec<Duration>>,
     start_failures: AtomicUsize,
     cleanup_start_failures: AtomicUsize,
     stop_calls: AtomicUsize,
@@ -418,8 +419,13 @@ impl DuplexRunner for TestRunner {
     fn start(
         &self,
         _admitted: AdmittedDuplex,
-        _deadline: tokio::time::Instant,
+        deadline: tokio::time::Instant,
     ) -> DuplexStartResult {
+        self.state
+            .start_budgets
+            .lock()
+            .unwrap()
+            .push(deadline.saturating_duration_since(tokio::time::Instant::now()));
         if let Some(barrier) = &self.start_barrier {
             barrier.wait().map_err(DuplexStartFailure::rejected)?;
         }
@@ -545,6 +551,30 @@ fn lifecycle_router(store: RuntimeStore, application: Arc<ControlApplication>) -
             ..ApiControllers::default()
         },
     )
+}
+
+#[tokio::test]
+async fn cold_start_reaches_the_runner_with_the_existing_model_readiness_budget() {
+    let state = Arc::new(TestState::default());
+    let controller = application(
+        RuntimeStore::default(),
+        Arc::new(TestRunner {
+            state: state.clone(),
+            start_barrier: None,
+        }),
+        AudioOperationGate::new(),
+    );
+    let started = controller.execute(ControlCommand::Start).await.unwrap();
+    assert!(started.translation_running);
+    let budget = state.start_budgets.lock().unwrap()[0];
+    controller.execute(ControlCommand::Stop).await.unwrap();
+    controller.shutdown().await.unwrap();
+    assert!(
+        budget >= Duration::from_secs(125),
+        "cold Start received {budget:?}"
+    );
+    assert!(budget <= Duration::from_secs(130));
+    assert_eq!(state.active.load(Ordering::SeqCst), 0);
 }
 
 async fn open_lifecycle_events(router: axum::Router) -> Body {
@@ -689,6 +719,114 @@ fn application_with_mix(
         Arc::new(NoopFacts),
         Some(mix),
     )
+}
+
+struct LifecycleProjectionMix {
+    store: RuntimeStore,
+    observed: Mutex<Vec<RuntimeStatus>>,
+}
+
+impl AudioMixController for LifecycleProjectionMix {
+    fn apply_desired(
+        &self,
+        _: AudioMixState,
+        mode: TranslationMixMode,
+    ) -> Result<(), ControlFailure> {
+        self.reconcile_committed(mode)
+    }
+
+    fn reconcile_committed(&self, _: TranslationMixMode) -> Result<(), ControlFailure> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push(self.store.snapshot().runtime_status);
+        Ok(())
+    }
+
+    fn recover_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+        self.reconcile_committed(mode)
+    }
+}
+
+#[tokio::test]
+async fn stopped_audio_reconciliation_does_not_project_nonexistent_runtime_cleanup() {
+    let store = RuntimeStore::default();
+    let facts =
+        translator_daemon::RuntimeFactsSource::inspect(&NoopFacts, std::time::Instant::now())
+            .unwrap();
+    store.set_devices(facts.devices.into());
+    store.set_audio_graph(facts.audio_graph);
+    store.set_routes(facts.routes);
+    let mix = Arc::new(LifecycleProjectionMix {
+        store: store.clone(),
+        observed: Mutex::new(Vec::new()),
+    });
+    let state = Arc::new(TestState::default());
+    let controller = application_with_mix(
+        store.clone(),
+        Arc::new(TestRunner {
+            state: state.clone(),
+            start_barrier: None,
+        }),
+        AudioOperationGate::new(),
+        mix.clone(),
+    );
+    controller
+        .execute(ControlCommand::ReconcileAudio)
+        .await
+        .unwrap();
+    let statuses = mix.observed.lock().unwrap().clone();
+    controller.shutdown().await.unwrap();
+    assert!(!statuses.is_empty());
+    assert!(
+        statuses
+            .iter()
+            .all(|status| *status == RuntimeStatus::Stopped),
+        "{statuses:?}"
+    );
+    assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+}
+
+async fn assert_owned_shutdown_after_safety_stop(
+    application: &ControlApplication,
+    store: &RuntimeStore,
+    runner: &TestRunner,
+    mix: &TestMix,
+    gate: &AudioOperationGate,
+) {
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.state(), AudioOperationState::Production);
+    let mut expected = mix.calls();
+    expected.push((
+        "reconcile",
+        TranslationMixMode::Quarantine {
+            mic_original_expected: false,
+        },
+    ));
+    application.shutdown().await.unwrap();
+    assert_eq!(mix.calls(), expected);
+    assert!(expected.iter().all(|(_, mode)| !matches!(
+        mode,
+        TranslationMixMode::Bypass | TranslationMixMode::MicrophoneMutedBypass
+    )));
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(
+        store.snapshot().audio_mix_knowledge,
+        AudioMixKnowledge::Known
+    );
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+    assert_eq!(
+        application
+            .execute(ControlCommand::Start)
+            .await
+            .unwrap_err()
+            .code,
+        "translation_controller_unavailable",
+    );
 }
 
 #[tokio::test]
@@ -1180,12 +1318,13 @@ async fn cleanup_pending_watchdog_cannot_restore_audio_from_start_quarantine() {
 #[tokio::test]
 async fn device_loss_quarantines_and_stops_live_microphone_before_reconcile() {
     let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
     let runner = Arc::new(TestRunner::default());
     let mix = Arc::new(TestMix::default());
     let application = ControlApplication::spawn(
         store.clone(),
         runner.clone(),
-        AudioOperationGate::new(),
+        gate.clone(),
         Arc::new(NoopFacts),
         Arc::new(ChangedDeviceFacts),
         Some(mix.clone()),
@@ -1216,10 +1355,7 @@ async fn device_loss_quarantines_and_stops_live_microphone_before_reconcile() {
             }
         ))
     );
-    assert_eq!(
-        application.shutdown().await.unwrap_err().code,
-        "translation_precondition_failed"
-    );
+    assert_owned_shutdown_after_safety_stop(&application, &store, &runner, &mix, &gate).await;
     assert!(
         !mix.calls()
             .iter()
@@ -1230,12 +1366,13 @@ async fn device_loss_quarantines_and_stops_live_microphone_before_reconcile() {
 #[tokio::test]
 async fn loopback_refresh_failure_quarantines_and_stops_live_microphone() {
     let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
     let runner = Arc::new(TestRunner::default());
     let mix = Arc::new(TestMix::default());
     let application = ControlApplication::spawn(
         store.clone(),
         runner.clone(),
-        AudioOperationGate::new(),
+        gate.clone(),
         Arc::new(NoopFacts),
         Arc::new(FailedRefresh),
         Some(mix.clone()),
@@ -1265,10 +1402,7 @@ async fn loopback_refresh_failure_quarantines_and_stops_live_microphone() {
             }
         ))
     );
-    assert_eq!(
-        application.shutdown().await.unwrap_err().code,
-        "original_loopback_custody_unknown"
-    );
+    assert_owned_shutdown_after_safety_stop(&application, &store, &runner, &mix, &gate).await;
     assert!(
         !mix.calls()
             .iter()
@@ -1279,6 +1413,7 @@ async fn loopback_refresh_failure_quarantines_and_stops_live_microphone() {
 #[tokio::test]
 async fn failed_quarantine_still_stops_pcm_and_records_unknown_mix() {
     let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
     let runner = Arc::new(TestRunner::default());
     let mix = Arc::new(TestMix::default());
     mix.reconcile.lock().unwrap().extend([
@@ -1289,7 +1424,7 @@ async fn failed_quarantine_still_stops_pcm_and_records_unknown_mix() {
     let application = ControlApplication::spawn(
         store.clone(),
         runner.clone(),
-        AudioOperationGate::new(),
+        gate.clone(),
         Arc::new(NoopFacts),
         Arc::new(FailedRefresh),
         Some(mix.clone()),
@@ -1324,10 +1459,7 @@ async fn failed_quarantine_still_stops_pcm_and_records_unknown_mix() {
             }
         ))
     );
-    assert_eq!(
-        application.shutdown().await.unwrap_err().code,
-        "original_loopback_custody_unknown"
-    );
+    assert_owned_shutdown_after_safety_stop(&application, &store, &runner, &mix, &gate).await;
     assert!(
         !mix.calls()
             .iter()
@@ -1365,12 +1497,13 @@ async fn system_default_change_does_not_stop_pinned_live_microphone() {
 async fn lost_graph_or_route_quarantines_and_stops_live_microphone() {
     for graph in [true, false] {
         let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
         let runner = Arc::new(TestRunner::default());
         let mix = Arc::new(TestMix::default());
         let application = ControlApplication::spawn(
             store.clone(),
             runner.clone(),
-            AudioOperationGate::new(),
+            gate.clone(),
             Arc::new(NoopFacts),
             Arc::new(LostAudioGraphOrRoute { graph }),
             Some(mix.clone()),
@@ -1400,10 +1533,7 @@ async fn lost_graph_or_route_quarantines_and_stops_live_microphone() {
                 }
             ))
         );
-        assert_eq!(
-            application.shutdown().await.unwrap_err().code,
-            "translation_precondition_failed"
-        );
+        assert_owned_shutdown_after_safety_stop(&application, &store, &runner, &mix, &gate).await;
         assert!(
             !mix.calls()
                 .iter()
@@ -1415,12 +1545,13 @@ async fn lost_graph_or_route_quarantines_and_stops_live_microphone() {
 #[tokio::test]
 async fn speaker_only_start_skips_microphone_quarantine_and_lost_route_stops_runtime() {
     let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
     let runner = Arc::new(TestRunner::default());
     let mix = Arc::new(TestMix::default());
     let application = ControlApplication::spawn(
         store.clone(),
         runner.clone(),
-        AudioOperationGate::new(),
+        gate.clone(),
         Arc::new(NoopFacts),
         Arc::new(LostAudioGraphOrRoute { graph: false }),
         Some(mix.clone()),
@@ -1454,10 +1585,7 @@ async fn speaker_only_start_skips_microphone_quarantine_and_lost_route_stops_run
         store.snapshot().runtime_status,
         RuntimeStatus::CleanupPending
     );
-    assert_eq!(
-        application.shutdown().await.unwrap_err().code,
-        "translation_precondition_failed"
-    );
+    assert_owned_shutdown_after_safety_stop(&application, &store, &runner, &mix, &gate).await;
 }
 
 #[test]
@@ -1968,7 +2096,7 @@ async fn failed_start_consumes_generation_before_a_retry_can_run() {
 }
 
 #[tokio::test]
-async fn shutdown_applies_bypass_only_after_native_cleanup() {
+async fn shutdown_quarantines_and_completes_native_cleanup_without_bypass() {
     let store = RuntimeStore::default();
     let runner = Arc::new(TestRunner::default());
     let mix = Arc::new(TestMix::default());
@@ -1983,6 +2111,8 @@ async fn shutdown_applies_bypass_only_after_native_cleanup() {
     application.shutdown().await.unwrap();
 
     assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
     assert_eq!(
         mix.calls(),
         [
@@ -1999,26 +2129,30 @@ async fn shutdown_applies_bypass_only_after_native_cleanup() {
                     mic_original_expected: false
                 }
             ),
-            ("reconcile", TranslationMixMode::Bypass),
         ]
     );
     let snapshot = store.snapshot();
     assert_eq!(snapshot.runtime_status, RuntimeStatus::Stopped);
     assert_eq!(snapshot.audio_mix_knowledge, AudioMixKnowledge::Known);
+    assert_eq!(
+        application
+            .execute(ControlCommand::Start)
+            .await
+            .unwrap_err()
+            .code,
+        "translation_controller_unavailable"
+    );
 }
 
 #[tokio::test]
-async fn failed_native_shutdown_keeps_translating_mix_and_retry_ownership() {
+async fn failed_native_shutdown_keeps_quarantine_and_retry_ownership() {
     let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
     let runner = Arc::new(TestRunner::default());
     runner.state.stop_failures.store(1, Ordering::SeqCst);
     let mix = Arc::new(TestMix::default());
-    let application = application_with_mix(
-        store.clone(),
-        runner.clone(),
-        AudioOperationGate::new(),
-        mix.clone(),
-    );
+    let application =
+        application_with_mix(store.clone(), runner.clone(), gate.clone(), mix.clone());
 
     application.execute(ControlCommand::Start).await.unwrap();
     assert_eq!(
@@ -2047,6 +2181,9 @@ async fn failed_native_shutdown_keeps_translating_mix_and_retry_ownership() {
         store.snapshot().runtime_status,
         RuntimeStatus::CleanupPending
     );
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.state(), AudioOperationState::Production);
     let rejected = application
         .execute(ControlCommand::Start)
         .await
@@ -2077,8 +2214,16 @@ async fn failed_native_shutdown_keeps_translating_mix_and_retry_ownership() {
                     mic_original_expected: false
                 }
             ),
-            ("reconcile", TranslationMixMode::Bypass),
         ]
+    );
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(
+        store.snapshot().audio_mix_knowledge,
+        AudioMixKnowledge::Known
     );
 }
 
@@ -2090,7 +2235,7 @@ async fn cancelled_accepted_shutdown_attaches_to_one_native_cleanup_and_stays_cl
     let barrier = Arc::new(StartBarrier::default());
     *runner.state.stop_barrier.lock().unwrap() = Some(barrier.clone());
     let application = application_with_mix(
-        store,
+        store.clone(),
         runner.clone(),
         AudioOperationGate::new(),
         mix.clone(),
@@ -2108,6 +2253,18 @@ async fn cancelled_accepted_shutdown_attaches_to_one_native_cleanup_and_stays_cl
     })
     .await
     .expect("shutdown must be accepted before caller cancellation");
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        mix.calls().last(),
+        Some(&(
+            "reconcile",
+            TranslationMixMode::Quarantine {
+                mic_original_expected: false
+            },
+        )),
+        "quarantine must precede completion of the held native stop"
+    );
     cancelled.abort();
     let _ = cancelled.await;
     barrier.release();
@@ -2140,9 +2297,15 @@ async fn cancelled_accepted_shutdown_attaches_to_one_native_cleanup_and_stays_cl
                     mic_original_expected: false
                 }
             ),
-            ("reconcile", TranslationMixMode::Bypass),
         ],
-        "caller cancellation must not detach or duplicate the accepted bypass transaction"
+        "caller cancellation must not detach or duplicate the accepted quarantine transaction"
+    );
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(
+        store.snapshot().audio_mix_knowledge,
+        AudioMixKnowledge::Known
     );
     let rejected = application
         .execute(ControlCommand::Start)
@@ -2214,9 +2377,9 @@ async fn dropping_last_application_handle_drains_active_runtime_and_mix() {
     application.execute(ControlCommand::Start).await.unwrap();
     drop(application);
 
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(translator_daemon::RUNTIME_CLEANUP_BUDGET, async {
         while runner.state.active.load(Ordering::SeqCst) != 0
-            || gate.state() != AudioOperationState::Idle
+            || gate.state() != AudioOperationState::Stopping
             || store.snapshot().runtime_status != RuntimeStatus::Stopped
         {
             tokio::task::yield_now().await;
@@ -2225,8 +2388,14 @@ async fn dropping_last_application_handle_drains_active_runtime_and_mix() {
     .await
     .expect("dropping the final sender must run owned native cleanup");
     assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(gate.state(), AudioOperationState::Idle);
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.state(), AudioOperationState::Stopping);
     assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(
+        store.snapshot().audio_mix_knowledge,
+        AudioMixKnowledge::Known
+    );
     assert_eq!(
         mix.calls(),
         [
@@ -2243,7 +2412,6 @@ async fn dropping_last_application_handle_drains_active_runtime_and_mix() {
                     mic_original_expected: false
                 }
             ),
-            ("reconcile", TranslationMixMode::Bypass),
         ]
     );
 }
@@ -2269,9 +2437,9 @@ async fn dropping_last_handle_retries_the_same_cleanup_pending_owner() {
     );
     drop(application);
 
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(translator_daemon::RUNTIME_CLEANUP_BUDGET, async {
         while runner.state.active.load(Ordering::SeqCst) != 0
-            || gate.state() != AudioOperationState::Idle
+            || gate.state() != AudioOperationState::Stopping
             || store.snapshot().runtime_status != RuntimeStatus::Stopped
         {
             tokio::task::yield_now().await;
@@ -2280,24 +2448,60 @@ async fn dropping_last_handle_retries_the_same_cleanup_pending_owner() {
     .await
     .expect("receiver closure must retain and retry the cleanup-pending owner");
     assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(gate.state(), AudioOperationState::Idle);
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.state(), AudioOperationState::Stopping);
     assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(
+        store.snapshot().audio_mix_knowledge,
+        AudioMixKnowledge::Known
+    );
     assert_eq!(
         mix.calls()
             .iter()
             .filter(|call| **call == ("reconcile", TranslationMixMode::Bypass))
             .count(),
-        1
+        0
+    );
+    assert_eq!(
+        mix.calls(),
+        [
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            ("reconcile", TranslationMixMode::Translating),
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+        ]
     );
 }
 
 #[tokio::test]
 async fn shutdown_unknown_mix_gets_one_explicit_recovery_and_failed_recovery_is_retryable() {
     let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
     let runner = Arc::new(TestRunner::default());
     let mix = Arc::new(TestMix::default());
     mix.reconcile.lock().unwrap().extend([
-        Ok(()),
         Ok(()),
         Ok(()),
         Err(mix_error("audio_mix_state_unknown")),
@@ -2307,12 +2511,8 @@ async fn shutdown_unknown_mix_gets_one_explicit_recovery_and_failed_recovery_is_
         .lock()
         .unwrap()
         .extend([Err(mix_error("audio_mix_state_unknown")), Ok(())]);
-    let application = application_with_mix(
-        store.clone(),
-        runner,
-        AudioOperationGate::new(),
-        mix.clone(),
-    );
+    let application =
+        application_with_mix(store.clone(), runner.clone(), gate.clone(), mix.clone());
 
     application.execute(ControlCommand::Start).await.unwrap();
     assert_eq!(
@@ -2324,6 +2524,34 @@ async fn shutdown_unknown_mix_gets_one_explicit_recovery_and_failed_recovery_is_
     assert_eq!(
         failed.audio_mix_knowledge,
         AudioMixKnowledge::AudioMixStateUnknown
+    );
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.state(), AudioOperationState::Production);
+    assert_eq!(
+        mix.calls(),
+        [
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            ("reconcile", TranslationMixMode::Translating),
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+        ]
     );
     assert_eq!(
         application
@@ -2352,8 +2580,12 @@ async fn shutdown_unknown_mix_gets_one_explicit_recovery_and_failed_recovery_is_
                     mic_original_expected: false
                 }
             ),
-            ("reconcile", TranslationMixMode::Bypass),
-            ("recover", TranslationMixMode::Bypass),
+            (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
             (
                 "reconcile",
                 TranslationMixMode::Quarantine {
@@ -2366,18 +2598,24 @@ async fn shutdown_unknown_mix_gets_one_explicit_recovery_and_failed_recovery_is_
                     mic_original_expected: false
                 }
             ),
-            ("reconcile", TranslationMixMode::Bypass),
         ]
     );
     assert_eq!(
         store.snapshot().audio_mix_knowledge,
         AudioMixKnowledge::Known
     );
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(gate.state(), AudioOperationState::Idle);
 }
 
 #[tokio::test]
 async fn ordinary_bypass_failure_is_not_silently_recovered() {
     let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
+    let runner = Arc::new(TestRunner::default());
     let mix = Arc::new(TestMix::default());
     mix.reconcile.lock().unwrap().extend([
         Ok(()),
@@ -2387,16 +2625,16 @@ async fn ordinary_bypass_failure_is_not_silently_recovered() {
         Ok(()),
         Ok(()),
     ]);
-    let application = application_with_mix(
-        store.clone(),
-        Arc::new(TestRunner::default()),
-        AudioOperationGate::new(),
-        mix.clone(),
-    );
+    let application =
+        application_with_mix(store.clone(), runner.clone(), gate.clone(), mix.clone());
 
     application.execute(ControlCommand::Start).await.unwrap();
     assert_eq!(
-        application.shutdown().await.unwrap_err().code,
+        application
+            .execute(ControlCommand::Stop)
+            .await
+            .unwrap_err()
+            .code,
         "audio_mix_apply_failed"
     );
     assert!(
@@ -2408,11 +2646,71 @@ async fn ordinary_bypass_failure_is_not_silently_recovered() {
         store.snapshot().runtime_status,
         RuntimeStatus::CleanupPending
     );
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.state(), AudioOperationState::Production);
 
-    application.shutdown().await.unwrap();
+    application.execute(ControlCommand::Stop).await.unwrap();
     assert!(
         mix.calls()
             .iter()
             .all(|(operation, _)| *operation != "recover")
+    );
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(
+        store.snapshot().audio_mix_knowledge,
+        AudioMixKnowledge::Known
+    );
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+    assert_eq!(
+        mix.calls(),
+        [
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            ("reconcile", TranslationMixMode::Translating),
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            ("reconcile", TranslationMixMode::Bypass),
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            ("reconcile", TranslationMixMode::Bypass),
+        ]
+    );
+    // Operational Stop leaves ordinary admission open; owned shutdown closes it.
+    application.execute(ControlCommand::Start).await.unwrap();
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 1);
+    application.shutdown().await.unwrap();
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        mix.calls().last(),
+        Some(&(
+            "reconcile",
+            TranslationMixMode::Quarantine {
+                mic_original_expected: false
+            },
+        ))
+    );
+    assert_eq!(
+        application
+            .execute(ControlCommand::Start)
+            .await
+            .unwrap_err()
+            .code,
+        "translation_controller_unavailable"
     );
 }

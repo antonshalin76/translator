@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""Check actual asset-backed Tauri focus/layout; disconnected scope is not APP-3.
+
+Run with Selenium under a private Xvfb/DBus session and a capped user scope.
+Tool installation, application builds and product audio are deliberately separate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import signal
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+from selenium import webdriver
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.utils import is_connectable
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.webkitgtk.options import Options
+
+
+def arguments():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--application", type=Path, required=True)
+    parser.add_argument("--tauri-driver", type=Path, required=True)
+    parser.add_argument("--native-driver", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--build-profile", choices=("debug", "release"), required=True)
+    parser.add_argument("--driver-port", type=int, default=45697)
+    parser.add_argument("--native-port", type=int, default=45698)
+    parser.add_argument("--daemon-port", type=int, default=45699)
+    args = parser.parse_args()
+    ports = (args.driver_port, args.native_port, args.daemon_port)
+    if len(set(ports)) != 3 or any(not 1024 <= port <= 65535 for port in ports):
+        parser.error("three distinct unprivileged ports are required")
+    return args, ports
+
+
+def digest(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def check(name, fn, rows):
+    started = time.monotonic_ns()
+    try:
+        details = fn()
+        rows.append(
+            dict(
+                name=name,
+                status="PASS",
+                details=details,
+                elapsed_ms=(time.monotonic_ns() - started) / 1e6,
+            )
+        )
+    except Exception as error:
+        rows.append(
+            dict(
+                name=name,
+                status="FAIL",
+                error=type(error).__name__,
+                details=getattr(error, "diagnostic", None),
+                elapsed_ms=(time.monotonic_ns() - started) / 1e6,
+            )
+        )
+
+
+def main() -> int:
+    args, PORTS = arguments()
+    PACKET = args.output_dir.resolve()
+    ROOT = args.source_root.resolve(strict=True)
+    APP = args.application.resolve(strict=True)
+    DRIVER = args.tauri_driver.resolve(strict=True)
+    NATIVE = args.native_driver.resolve(strict=True)
+    os.umask(0o077)
+    PACKET.mkdir(mode=0o700, exist_ok=False)
+    runtime = PACKET / "runtime"
+    runtime.mkdir(mode=0o700, exist_ok=False)
+    bindings = {
+        str(path.relative_to(ROOT)): digest(path)
+        for path in (
+            ROOT / "apps/translator-ui/src/main.ts",
+            ROOT / "apps/translator-ui/src/styles.css",
+            ROOT / "apps/translator-ui/src-tauri/src/main.rs",
+            ROOT / "apps/translator-ui/src-tauri/tauri.conf.json",
+        )
+    }
+    bindings.update(
+        application=digest(APP),
+        driver=digest(DRIVER),
+        native=digest(NATIVE),
+        harness=digest(Path(__file__)),
+    )
+    for port in PORTS:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", port))
+    environment = dict(
+        os.environ,
+        XDG_RUNTIME_DIR=str(runtime),
+        TRANSLATOR_DAEMON_URL=f"http://127.0.0.1:{PORTS[2]}",
+        XDG_CACHE_HOME=str(PACKET / "cache"),
+        XDG_CONFIG_HOME=str(PACKET / "config"),
+        WEBKIT_DISABLE_DMABUF_RENDERER="1",
+        LIBGL_ALWAYS_SOFTWARE="1",
+    )
+    rows = []
+    browser = None
+    cleanup = "COMPLETE"
+    with (PACKET / "driver.log").open("xb") as log:
+        process = subprocess.Popen(
+            [
+                str(DRIVER),
+                "--port",
+                str(PORTS[0]),
+                "--native-port",
+                str(PORTS[1]),
+                "--native-driver",
+                str(NATIVE),
+            ],
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            WebDriverWait(None, 10).until(
+                lambda _: (
+                    process.poll() is None
+                    and all(is_connectable(port) for port in PORTS[:2])
+                )
+            )
+            options = Options()
+            options.set_capability("browserName", "wry")
+            options.set_capability("tauri:options", {"application": str(APP)})
+            browser = webdriver.Remote(f"http://127.0.0.1:{PORTS[0]}", options=options)
+            wait = WebDriverWait(browser, 10)
+            wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".nav-item")))
+            assert browser.title == "Translator"
+            assert browser.current_url.startswith(
+                ("tauri://", "http://tauri.localhost")
+            )
+            rows.append(
+                dict(
+                    name="native_asset_document", status="PASS", url=browser.current_url
+                )
+            )
+
+            def disconnected():
+                wait.until(
+                    lambda page: (
+                        page.find_element(By.CSS_SELECTOR, ".build-state").text
+                        == "Daemon offline"
+                    )
+                )
+                assert all(
+                    not item.is_enabled()
+                    for item in browser.find_elements(By.CSS_SELECTOR, "select")
+                )
+                starts = [
+                    item
+                    for item in browser.find_elements(By.TAG_NAME, "button")
+                    if item.text == "Начать калибровку"
+                ]
+                assert len(starts) == 1 and not starts[0].is_enabled()
+                return dict(controls_disabled=True, endpoint="isolated_unavailable")
+
+            check("disconnected_fail_closed", disconnected, rows)
+
+            def geometry():
+                results = []
+                for width, height in ((980, 680), (720, 520), (1280, 800)):
+                    browser.set_window_rect(width=width, height=height)
+                    result = browser.execute_script(
+                        "return {width:innerWidth,height:innerHeight,scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth}"
+                    )
+                    assert result["width"] >= 720 and result["height"] >= 480
+                    assert result["scroll"] <= result["client"]
+                    screenshot = PACKET / f"viewport-{width}x{height}.png"
+                    assert browser.save_screenshot(str(screenshot))
+                    results.append(
+                        dict(
+                            requested=[width, height],
+                            observed=result,
+                            screenshot_sha256=digest(screenshot),
+                        )
+                    )
+                return results
+
+            check("native_viewports", geometry, rows)
+
+            def keyboard():
+                witness = []
+
+                def active(stage):
+                    value = browser.execute_script(
+                        'return {tag:document.activeElement.tagName,href:document.activeElement.getAttribute("href"),text:document.activeElement.textContent?.slice(0,80)}'
+                    )
+                    witness.append(dict(stage=stage, **value))
+                    return value["href"]
+
+                # Focus an actual enabled native control, then exercise real keys.
+                # Blurring does not reset WebKit's sequential Tab starting point.
+                browser.execute_script('document.querySelector(".nav-item").focus()')
+                active("before_tab")
+                ActionChains(browser).send_keys(Keys.TAB).perform()
+                focused = browser.switch_to.active_element
+                href = focused.get_attribute("href")
+                after_tab = active("after_tab")
+                if not href or not href.endswith("#routes") or after_tab != "#routes":
+                    error = AssertionError("actual Tab must advance Status to Routes")
+                    error.diagnostic = witness
+                    raise error
+                wait.until(EC.staleness_of(focused))
+                current = active("after_real_poll_replaced_node")
+                if current != "#routes":
+                    error = AssertionError(
+                        "focused Routes must survive actual status polling"
+                    )
+                    error.diagnostic = witness
+                    raise error
+                ActionChains(browser).key_down(Keys.SHIFT).send_keys(Keys.TAB).key_up(
+                    Keys.SHIFT
+                ).perform()
+                if active("after_shift_tab") != "#status":
+                    error = AssertionError(
+                        "actual Shift Tab must return Routes to Status"
+                    )
+                    error.diagnostic = witness
+                    raise error
+                return dict(focus_retained_across_real_poll=True, witness=witness)
+
+            check("keyboard_poll_focus", keyboard, rows)
+
+            def identity_negatives():
+                controls = browser.execute_script(
+                    'return [...document.querySelectorAll("a,button,input,select")].map(item=>item.id)'
+                )
+                assert all(controls) and len(set(controls)) == len(controls)
+
+                def poll():
+                    witness = browser.find_element(By.CSS_SELECTOR, ".nav-item")
+                    wait.until(EC.staleness_of(witness))
+
+                browser.execute_script("document.activeElement.blur()")
+                poll()
+                assert (
+                    browser.execute_script("return document.activeElement.tagName")
+                    == "BODY"
+                )
+                browser.execute_script(
+                    'const item=document.getElementById("nav-status");item.id="retired-test-control";item.focus()'
+                )
+                poll()
+                assert (
+                    browser.execute_script("return document.activeElement.tagName")
+                    == "BODY"
+                )
+                # Ephemeral DOM fault injection, never a forged daemon status.
+                browser.execute_script(
+                    'const item=document.getElementById("cloud-opt-in");item.disabled=false;item.focus()'
+                )
+                poll()
+                assert not browser.find_element(By.ID, "cloud-opt-in").is_enabled()
+                assert (
+                    browser.execute_script("return document.activeElement.id")
+                    != "cloud-opt-in"
+                )
+                return dict(
+                    unique_control_ids=len(controls),
+                    no_focus_not_stolen=True,
+                    retired_identity_not_reassigned=True,
+                    disabled_counterpart_not_focused=True,
+                    scope="ephemeral_native_DOM_faults_not_runtime_admission",
+                )
+
+            check("semantic_focus_identity_negatives", identity_negatives, rows)
+        except Exception as error:
+            message = (
+                str(getattr(error, "msg", ""))
+                .replace(str(ROOT), "<workspace>")
+                .replace(str(DRIVER), "<tauri-driver>")
+                .replace(str(NATIVE), "<native-driver>")
+            )
+            rows.append(
+                dict(
+                    name="native_setup_or_session",
+                    status="FAIL",
+                    error=type(error).__name__,
+                    message=message[:500],
+                )
+            )
+        finally:
+            if browser is not None:
+                try:
+                    browser.quit()
+                except Exception:
+                    cleanup = "UNCERTAIN"
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    cleanup = "UNCERTAIN"
+    try:
+        WebDriverWait(None, 6).until(
+            lambda _: all(not is_connectable(port) for port in PORTS)
+        )
+        ports_clear = True
+    except Exception:
+        ports_clear = False
+    if not ports_clear:
+        cleanup = "UNCERTAIN"
+    receipt = dict(
+        schema=1,
+        scope="native_asset_disconnected_diagnostic",
+        build_profile=args.build_profile,
+        bindings=bindings,
+        checks=rows,
+        cleanup=cleanup,
+        ports_clear=ports_clear,
+        release=False,
+        APP_3="NOT_RUN",
+        physical_audio="NOT_RUN",
+    )
+    with (PACKET / "receipt.json").open("x", encoding="utf-8") as output:
+        json.dump(receipt, output, ensure_ascii=False, indent=2)
+    print(
+        json.dumps(
+            dict(
+                checks=[
+                    dict(name=row["name"], status=row["status"], error=row.get("error"))
+                    for row in rows
+                ],
+                cleanup=cleanup,
+                ports_clear=ports_clear,
+                release=False,
+            )
+        )
+    )
+    return (
+        0
+        if cleanup == "COMPLETE" and all(row["status"] == "PASS" for row in rows)
+        else 1
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -36,6 +36,7 @@ const AEC_REINSPECTION_INTERVAL: Duration = Duration::from_millis(250);
 pub enum ControlCommand {
     Start,
     Stop,
+    ConfirmHeadphones(Option<Box<translator_audio::HeadphoneConfirmation>>),
     PatchDirection(DirectionPatch),
     PatchProvider(ProviderPatch),
     PatchVoice(VoiceProfilePatch),
@@ -46,6 +47,18 @@ pub enum ControlCommand {
 
 pub trait RuntimeMaintenance: Send + Sync {
     fn refresh(&self, store: &RuntimeStore) -> Result<(), ControlFailure>;
+
+    fn confirm_headphones(
+        &self,
+        _confirmation: Option<translator_audio::HeadphoneConfirmation>,
+        _deadline: std::time::Instant,
+        _store: &RuntimeStore,
+    ) -> Result<(), ControlFailure> {
+        Err(ControlFailure {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "headphone_confirmation_unavailable",
+        })
+    }
 
     fn refresh_bypass_facts(&self, _store: &RuntimeStore) -> Result<(), ControlFailure> {
         Err(unavailable())
@@ -227,6 +240,9 @@ pub struct RuntimeSupervisor {
     runner: Arc<dyn DuplexRunner>,
     gate: AudioOperationGate,
     completion: Arc<dyn DuplexCompletionObserver>,
+    aec_controller: Option<crate::AecCalibrationController>,
+    retained_start: bool,
+    retained_bypass_verified: bool,
     next_generation: u64,
     state: SupervisorState,
 }
@@ -236,6 +252,33 @@ enum SupervisorState {
     Running(OwnedRuntime),
     CleanupPending(OwnedRuntime),
     BypassPending { _lease: AudioOperationLease },
+}
+
+impl Drop for RuntimeSupervisor {
+    fn drop(&mut self) {
+        if !self.retained_start {
+            return;
+        }
+        let lease = match std::mem::replace(&mut self.state, SupervisorState::Stopped) {
+            SupervisorState::Running(owned) | SupervisorState::CleanupPending(owned) => {
+                let OwnedRuntime {
+                    runtime, _lease, ..
+                } = owned;
+                drop(runtime);
+                Some(_lease)
+            }
+            SupervisorState::BypassPending { _lease } => Some(_lease),
+            SupervisorState::Stopped => None,
+        };
+        if let Some(lease) = lease {
+            if let Some(controller) = self.aec_controller.as_ref() {
+                controller.retain_abandoned_production(lease);
+            } else {
+                self.gate.begin_stopping();
+                drop(lease);
+            }
+        }
+    }
 }
 
 struct OwnedRuntime {
@@ -288,8 +331,12 @@ impl ControlApplication {
         let completion: Arc<dyn DuplexCompletionObserver> = Arc::new(CompletionMailbox {
             sender: lifecycle_sender,
         });
+        let mut supervisor = RuntimeSupervisor::new(runner, gate, completion);
+        supervisor.aec_controller = aec_authority
+            .as_ref()
+            .and_then(AecRuntimeAuthority::controller);
         let owner = Arc::new(StdMutex::new(ControlOwner {
-            supervisor: RuntimeSupervisor::new(runner, gate, completion),
+            supervisor,
             store,
             facts,
             maintenance,
@@ -324,10 +371,10 @@ impl ControlApplication {
     ) -> Result<RuntimeSnapshot, ControlFailure> {
         let (response, result) = oneshot::channel();
         let deadline = Instant::now()
-            + if matches!(command, ControlCommand::Stop) {
-                crate::RUNTIME_CLEANUP_BUDGET
-            } else {
-                crate::DIRECTION_CLEANUP_BUDGET
+            + match command {
+                ControlCommand::Start => crate::RUNTIME_START_BUDGET,
+                ControlCommand::Stop => crate::RUNTIME_CLEANUP_BUDGET,
+                _ => crate::DIRECTION_CLEANUP_BUDGET,
             };
         {
             let _submission = lock_recovering(&self.submission);
@@ -352,17 +399,26 @@ impl ControlApplication {
     }
 
     pub async fn shutdown(&self) -> Result<(), ControlFailure> {
-        let _shutdown = self.shutdown_gate.lock().await;
+        self.shutdown_until(Instant::now() + crate::RUNTIME_CLEANUP_BUDGET)
+            .await
+    }
+
+    pub async fn shutdown_until(&self, deadline: Instant) -> Result<(), ControlFailure> {
         self.closed.store(true, Ordering::Release);
+        let _shutdown = tokio::time::timeout_at(deadline, self.shutdown_gate.lock())
+            .await
+            .map_err(|_| cleanup_pending())?;
         if let Some(result) = *self.actor_result.lock().await {
             return result;
+        }
+        if Instant::now() >= deadline {
+            return Err(cleanup_pending());
         }
         let mut response = self.shutdown_response.lock().await;
         if response.is_none() {
             let (reply, result) = oneshot::channel();
-            let deadline = Instant::now() + crate::RUNTIME_CLEANUP_BUDGET;
-            let permit = match tokio::time::timeout(
-                SHUTDOWN_ADMISSION_WAIT,
+            let permit = match tokio::time::timeout_at(
+                deadline.min(Instant::now() + SHUTDOWN_ADMISSION_WAIT),
                 self.sender.clone().reserve_owned(),
             )
             .await
@@ -373,24 +429,35 @@ impl ControlApplication {
                     return self.reap_finished_actor().await;
                 }
             };
+            if Instant::now() >= deadline {
+                return Err(cleanup_pending());
+            }
             permit.send(ActorMessage::Shutdown {
                 deadline,
                 response: reply,
             });
             *response = Some(result);
         }
-        let result = response
-            .as_mut()
-            .expect("shutdown response was stored")
-            .await;
+        let result = tokio::time::timeout_at(
+            deadline,
+            response.as_mut().expect("shutdown response was stored"),
+        )
+        .await
+        .map_err(|_| cleanup_pending())?;
         response.take();
         drop(response);
         match result {
             Ok(Err(error)) => return Err(error),
             Ok(Ok(())) => {}
-            Err(_) => return self.join_actor().await,
+            Err(_) => return self.join_actor_until(deadline).await,
         }
-        self.join_actor().await
+        self.join_actor_until(deadline).await
+    }
+
+    async fn join_actor_until(&self, deadline: Instant) -> Result<(), ControlFailure> {
+        tokio::time::timeout_at(deadline, self.join_actor())
+            .await
+            .map_err(|_| cleanup_pending())?
     }
 
     async fn join_actor(&self) -> Result<(), ControlFailure> {
@@ -432,6 +499,9 @@ impl RuntimeSupervisor {
             runner,
             gate,
             completion,
+            aec_controller: None,
+            retained_start: false,
+            retained_bypass_verified: false,
             next_generation: 0,
             state: SupervisorState::Stopped,
         }
@@ -461,6 +531,40 @@ impl RuntimeSupervisor {
         })
     }
 
+    fn reserve_admitted_start(
+        &mut self,
+        admitted: &AdmittedDuplex,
+    ) -> Result<AudioOperationLease, ControlFailure> {
+        if let Some(reservation) = admitted
+            .aec_reservation()
+            .filter(|reservation| reservation.native_graph())
+        {
+            self.check_start()?;
+            let controller = self.aec_controller.as_ref().ok_or_else(unavailable)?;
+            let lease = controller
+                .handoff_production(reservation.binding())
+                .map_err(|_| ControlFailure {
+                    status: StatusCode::CONFLICT,
+                    code: "audio_operation_busy",
+                })?;
+            self.retained_start = true;
+            return Ok(lease);
+        }
+        self.reserve_start()
+    }
+
+    fn return_start_lease(&mut self, lease: AudioOperationLease) {
+        if self.retained_start {
+            if let Some(controller) = self.aec_controller.as_ref()
+                && let Err(lease) = controller.return_production(lease)
+            {
+                self.state = SupervisorState::BypassPending { _lease: lease };
+                return;
+            }
+            self.retained_start = false;
+        }
+    }
+
     fn start(
         &mut self,
         admitted: AdmittedDuplex,
@@ -474,6 +578,7 @@ impl RuntimeSupervisor {
             .checked_add(1)
             .ok_or_else(unavailable)?;
         self.next_generation = generation;
+        self.retained_bypass_verified = false;
         let runtime = match self.runner.start_supervised(
             admitted,
             generation,
@@ -553,6 +658,8 @@ impl RuntimeSupervisor {
                 code: "translation_stop_failed",
             });
         }
+        self.retained_bypass_verified =
+            self.retained_start && active.runtime.retained_native_bypass();
         let state = std::mem::replace(&mut self.state, SupervisorState::Stopped);
         let active = match state {
             SupervisorState::Running(active) | SupervisorState::CleanupPending(active) => active,
@@ -565,7 +672,19 @@ impl RuntimeSupervisor {
 
     fn complete_bypass(&mut self) {
         if matches!(self.state, SupervisorState::BypassPending { .. }) {
-            self.state = SupervisorState::Stopped;
+            let SupervisorState::BypassPending { _lease } =
+                std::mem::replace(&mut self.state, SupervisorState::Stopped)
+            else {
+                unreachable!()
+            };
+            if self.retained_start
+                && let Some(controller) = self.aec_controller.as_ref()
+                && let Err(lease) = controller.return_production(_lease)
+            {
+                self.state = SupervisorState::BypassPending { _lease: lease };
+            } else {
+                self.retained_start = false;
+            }
         }
     }
 
@@ -733,7 +852,7 @@ async fn run_actor(
                 Some(ActorMessage::Shutdown { deadline, response }) => {
                     let owner = owner.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        lock_recovering(&owner).stop_and_bypass(true, deadline)
+                        lock_recovering(&owner).shutdown_owned(deadline)
                     }).await.unwrap_or_else(|_| Err(unavailable()));
                     let complete = result.is_ok();
                     if complete
@@ -747,21 +866,40 @@ async fn run_actor(
                     }
                 }
                 None => {
-                    if let Some(inspection) = aec_inspection.take() {
-                        let _ = inspection.handle.await;
-                    }
+                    lock_recovering(&owner).supervisor.gate.begin_stopping();
+                    let deadline = Instant::now() + crate::RUNTIME_CLEANUP_BUDGET;
                     loop {
-                        let owner = owner.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            lock_recovering(&owner).stop_and_bypass(
-                                true,
-                                Instant::now() + crate::RUNTIME_CLEANUP_BUDGET,
-                            )
-                        }).await.unwrap_or_else(|_| Err(unavailable()));
-                        if result.is_ok() {
+                        if Instant::now() >= deadline {
+                            tracing::error!(event = "translation_shutdown_failed", code = "translation_cleanup_pending");
+                            let _custody = (owner, aec_inspection);
+                            pending::<()>().await;
                             return;
                         }
-                        tokio::time::sleep(CLEANUP_RETRY_DELAY).await;
+                        let cleanup_owner = owner.clone();
+                        let mut cleanup = tokio::task::spawn_blocking(move || {
+                            lock_recovering(&cleanup_owner).shutdown_owned(deadline)
+                        });
+                        let result = match tokio::time::timeout_at(deadline, &mut cleanup).await {
+                            Ok(result) => result.unwrap_or_else(|_| Err(unavailable())),
+                            Err(_) => {
+                                tracing::error!(event = "translation_shutdown_failed", code = "translation_cleanup_pending");
+                                let _custody = (owner, cleanup, aec_inspection);
+                                pending::<()>().await;
+                                return;
+                            }
+                        };
+                        if result.is_ok() {
+                            if let Some(mut inspection) = aec_inspection.take()
+                                && tokio::time::timeout_at(deadline, &mut inspection.handle).await.is_err()
+                            {
+                                tracing::error!(event = "translation_shutdown_failed", code = "aec_inspection_unconfirmed");
+                                let _custody = (owner, inspection);
+                                pending::<()>().await;
+                            }
+                            return;
+                        }
+                        tracing::error!(event = "translation_shutdown_failed", code = result.unwrap_err().code);
+                        tokio::time::sleep_until(deadline.min(Instant::now() + CLEANUP_RETRY_DELAY)).await;
                     }
                 }
             },
@@ -918,14 +1056,19 @@ impl ControlOwner {
                 let mut candidate = admitted.snapshot().clone();
                 let aec_protected = admitted.requires_aec_authority();
                 let microphone_enabled = enabled_directions(&candidate)?.microphone;
-                let lease = supervisor.reserve_start()?;
-                maintenance.prepare_start(&candidate)?;
-                admission_deadline(deadline)?;
+                let lease = supervisor.reserve_admitted_start(&admitted)?;
+                if let Err(error) = maintenance
+                    .prepare_start(&candidate)
+                    .and_then(|()| admission_deadline(deadline))
+                {
+                    supervisor.return_start_lease(lease);
+                    return Err(error);
+                }
                 if microphone_enabled {
                     if let Some(audio_mix) = audio_mix {
                         let mic_original_expected =
                             candidate.devices.as_ref().is_some_and(|devices| {
-                                devices.acoustic.mode == translator_audio::OutputMode::Headphones
+                                devices.acoustic.mode.is_headphones()
                                     && candidate.audio_mix.microphone_original_percent > 0
                             });
                         if let Err(error) =
@@ -940,6 +1083,7 @@ impl ControlOwner {
                                     Some(AudioMixKnowledge::AudioMixStateUnknown),
                                 );
                             }
+                            supervisor.return_start_lease(lease);
                             return Err(error);
                         }
                     }
@@ -987,6 +1131,19 @@ impl ControlOwner {
                 stop_and_bypass(supervisor, store, bypass_services, false, deadline, None)?;
                 *aec_runtime_generation = None;
             }
+            ControlCommand::ConfirmHeadphones(confirmation) => {
+                if supervisor.status() != RuntimeStatus::Stopped {
+                    return Err(ControlFailure {
+                        status: StatusCode::CONFLICT,
+                        code: "headphone_confirmation_requires_stopped",
+                    });
+                }
+                maintenance.confirm_headphones(
+                    confirmation.map(|value| *value),
+                    deadline.into_std(),
+                    store,
+                )?;
+            }
             ControlCommand::PatchDirection(patch) => {
                 apply_candidate(
                     supervisor,
@@ -1019,6 +1176,15 @@ impl ControlOwner {
             }
             ControlCommand::PatchAudioMix(patch) => {
                 let mut candidate = store.audio_mix_candidate(patch)?;
+                if supervisor.retained_start
+                    && (candidate.audio_mix.microphone_original_percent != 0
+                        || candidate.audio_mix.speaker_original_percent != 0)
+                {
+                    return Err(ControlFailure {
+                        status: StatusCode::CONFLICT,
+                        code: "aec_original_mix_unavailable",
+                    });
+                }
                 let audio_mix = audio_mix.ok_or_else(audio_mix_unavailable)?;
                 if supervisor.status() == RuntimeStatus::Stopped {
                     supervisor.reserve_bypass()?;
@@ -1174,6 +1340,41 @@ impl ControlOwner {
             deadline,
             None,
         )
+    }
+
+    fn shutdown_owned(&mut self, deadline: Instant) -> Result<(), ControlFailure> {
+        let quarantine = self.audio_mix.as_deref().map(|mix| {
+            let mode = TranslationMixMode::Quarantine {
+                mic_original_expected: false,
+            };
+            match mix.reconcile_committed(mode) {
+                Err(error) if error.code == "audio_mix_state_unknown" => {
+                    mix.recover_committed(mode)
+                }
+                result => result,
+            }
+        });
+        // Quarantine uncertainty must not prevent stopping the runtime we already own.
+        let stopped = self.supervisor.stop(deadline);
+        self.aec_runtime_generation = None;
+        let knowledge = quarantine.as_ref().map(|result| {
+            if result.is_err() {
+                AudioMixKnowledge::AudioMixStateUnknown
+            } else {
+                AudioMixKnowledge::Known
+            }
+        });
+        commit_projection(&self.store, RuntimeStatus::CleanupPending, knowledge);
+        stopped?;
+        if let Some(result) = quarantine {
+            result?;
+        }
+        self.supervisor.complete_bypass();
+        if self.supervisor.status() != RuntimeStatus::Stopped {
+            return Err(cleanup_pending());
+        }
+        commit_projection(&self.store, RuntimeStatus::Stopped, knowledge);
+        Ok(())
     }
 }
 
@@ -1465,19 +1666,29 @@ fn stop_and_bypass(
         commit_projection(store, RuntimeStatus::Stopped, None);
         return Ok(());
     }
-    commit_projection(store, RuntimeStatus::CleanupPending, None);
+    if store.snapshot().runtime_status != RuntimeStatus::Stopped {
+        commit_projection(store, RuntimeStatus::CleanupPending, None);
+    }
     if let Some(Err(error)) = quarantine {
-        if error.code == "audio_mix_state_unknown" {
-            commit_projection(
-                store,
-                RuntimeStatus::CleanupPending,
-                Some(AudioMixKnowledge::AudioMixStateUnknown),
-            );
-        }
+        commit_projection(
+            store,
+            RuntimeStatus::CleanupPending,
+            (error.code == "audio_mix_state_unknown")
+                .then_some(AudioMixKnowledge::AudioMixStateUnknown),
+        );
         return Err(error);
     }
-    let result = if let Some(mix) = services.audio_mix {
-        let mode = verified_bypass_mode(store, services, deadline)?;
+    let result = (|| {
+        let Some(mix) = services.audio_mix else {
+            return Ok(());
+        };
+        let mode = if supervisor.retained_bypass_verified {
+            services.maintenance.refresh_bypass_facts(store)?;
+            admission_deadline(deadline)?;
+            TranslationMixMode::MicrophoneMutedBypass
+        } else {
+            verified_bypass_mode(store, services, deadline)?
+        };
         let result = if let Some(volumes) = desired {
             mix.apply_desired(volumes, mode)
         } else {
@@ -1492,12 +1703,14 @@ fn stop_and_bypass(
         } else {
             result
         }
-    } else {
-        Ok(())
-    };
+    })();
     match result {
         Ok(()) => {
             supervisor.complete_bypass();
+            if supervisor.status() != RuntimeStatus::Stopped {
+                commit_projection(store, RuntimeStatus::CleanupPending, None);
+                return Err(cleanup_pending());
+            }
             commit_projection(
                 store,
                 RuntimeStatus::Stopped,
@@ -1580,7 +1793,7 @@ fn admitted_bypass_snapshot(
         });
     }
     let mut candidate = RuntimeSnapshot::default();
-    let headphones = observed.devices.output_mode == translator_audio::OutputMode::Headphones;
+    let headphones = observed.devices.output_mode.is_headphones();
     let microphone = candidate
         .directions
         .iter_mut()
@@ -2075,7 +2288,9 @@ pub(crate) mod safe_admission_tests {
         fn now_ns(&self) -> u64 {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
             let measured_end = 10_000_000_000 + translator_audio::AEC_OBSERVATION_DURATION_NS;
-            if self.expire_after_first_validation && read >= 2 {
+            // Publication and its status projection each read the clock before
+            // the two actual periodic validation transactions.
+            if self.expire_after_first_validation && read >= 3 {
                 measured_end + crate::AEC_PROOF_LIFETIME_NS
             } else {
                 measured_end
@@ -2098,9 +2313,11 @@ pub(crate) mod safe_admission_tests {
             sink_muted: false,
             source_geometry: "desk-left".into(),
             sink_geometry: "desk-front".into(),
-            aec_module_id: 73,
-            aec_source_id: 81,
-            aec_sink_id: 82,
+            graph: translator_audio::AecGraphIdentity::PulseModule {
+                module_id: 73,
+                source_id: 81,
+                sink_id: 82,
+            },
             aec_generation: generation.into(),
             aec_config_id: "webrtc".into(),
             vad_config_id: "vad".into(),
@@ -2158,6 +2375,7 @@ pub(crate) mod safe_admission_tests {
                 })
                 .collect(),
             observation: AecObservationEvidence {
+                native_timing: None,
                 observer_generation: "observer".into(),
                 calibration_attempt_id: challenge.attempt_id().to_string(),
                 challenge_id: challenge.challenge_id().to_string(),
@@ -3503,7 +3721,11 @@ mod corrective_mailbox_tests {
         }
 
         fn reconcile_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
-            if mode == TranslationMixMode::Bypass {
+            if mode
+                == (TranslationMixMode::Quarantine {
+                    mic_original_expected: false,
+                })
+            {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
@@ -3582,6 +3804,7 @@ mod corrective_mailbox_tests {
             Some(mix.clone()),
         );
         application.execute(ControlCommand::Start).await.unwrap();
+        mix.0.store(0, Ordering::SeqCst);
         let caller = tokio::spawn({
             let application = application.clone();
             async move { application.shutdown().await }
@@ -3628,11 +3851,11 @@ mod corrective_mailbox_tests {
             }
         })
         .await
-        .expect("the accepted bypass transaction must finish after actor join abort");
+        .expect("the accepted quarantine transaction must finish after actor join abort");
         assert_eq!(
             mix.0.load(Ordering::SeqCst),
             1,
-            "aborting the actor join must not detach the accepted bypass transaction"
+            "aborting the actor join must not detach the accepted quarantine transaction"
         );
         assert_eq!(
             application
@@ -3974,10 +4197,153 @@ mod corrective_mailbox_tests {
             .expect("the one owned actor must exit after cleanup");
         assert_eq!(state.calls.load(Ordering::SeqCst), 2);
         assert!(state.stopped.load(Ordering::SeqCst));
-        assert_eq!(gate.state(), crate::AudioOperationState::Idle);
+        assert_eq!(gate.state(), crate::AudioOperationState::Stopping);
         assert_eq!(
             lock_recovering(&owner).supervisor.status(),
             RuntimeStatus::Stopped
         );
+    }
+
+    #[tokio::test]
+    async fn stopped_receiver_close_shutdown_with_mix_never_acquires_new_production_authority() {
+        let gate = AudioOperationGate::new();
+        gate.begin_stopping();
+        let state = Arc::new(BlockingStopState::default());
+        let (completion_sender, completion_receiver) = watch::channel(LifecycleSlots::default());
+        let owner = Arc::new(StdMutex::new(ControlOwner {
+            supervisor: RuntimeSupervisor::new(
+                Arc::new(BlockingStopRunner(state.clone())),
+                gate.clone(),
+                Arc::new(CompletionMailbox {
+                    sender: completion_sender,
+                }),
+            ),
+            store: RuntimeStore::default(),
+            facts: Arc::new(NoopFacts),
+            maintenance: Arc::new(NoopFacts),
+            aec_authority: None,
+            audio_mix: Some(Arc::new(CountingMix::default())),
+            aec_runtime_generation: None,
+            aec_revocation_seen: 0,
+            terminal_seen: None,
+        }));
+        let (sender, receiver) = mpsc::channel(1);
+        let mut actor = tokio::spawn(run_actor(
+            receiver,
+            completion_receiver,
+            None,
+            owner.clone(),
+        ));
+        drop(sender);
+        let completed = match tokio::time::timeout(Duration::from_millis(500), &mut actor).await {
+            Ok(result) => {
+                result.unwrap();
+                true
+            }
+            Err(_) => {
+                actor.abort();
+                let _ = actor.await;
+                false
+            }
+        };
+        assert!(
+            completed,
+            "receiver closure must drain already-owned state without reopening the stopping gate"
+        );
+        assert_eq!(gate.state(), crate::AudioOperationState::Stopping);
+        assert_eq!(state.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            lock_recovering(&owner).supervisor.status(),
+            RuntimeStatus::Stopped
+        );
+    }
+
+    #[derive(Default)]
+    struct ShutdownFaultMix {
+        fail: AtomicBool,
+        modes: StdMutex<Vec<TranslationMixMode>>,
+    }
+
+    impl AudioMixController for ShutdownFaultMix {
+        fn apply_desired(
+            &self,
+            _: AudioMixState,
+            _: TranslationMixMode,
+        ) -> Result<(), ControlFailure> {
+            panic!("owned shutdown must not apply a new audio mix");
+        }
+
+        fn reconcile_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            self.modes.lock().unwrap().push(mode);
+            if self.fail.load(Ordering::SeqCst) {
+                Err(audio_mix_unknown())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn recover_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            self.reconcile_committed(mode)
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_quarantine_uncertainty_still_stops_runtime_and_retains_custody() {
+        let state = Arc::new(BlockingStopState::default());
+        *state.release.0.lock().unwrap() = true;
+        let mix = Arc::new(ShutdownFaultMix::default());
+        let gate = AudioOperationGate::new();
+        let store = RuntimeStore::default();
+        let application = ControlApplication::spawn(
+            store.clone(),
+            Arc::new(BlockingStopRunner(state.clone())),
+            gate.clone(),
+            Arc::new(NoopFacts),
+            Arc::new(NoopFacts),
+            Some(mix.clone()),
+        );
+        application.execute(ControlCommand::Start).await.unwrap();
+        mix.modes.lock().unwrap().clear();
+        mix.fail.store(true, Ordering::SeqCst);
+        state.failures.store(1, Ordering::SeqCst);
+        gate.begin_stopping();
+        assert!(application.shutdown().await.is_err());
+        assert_eq!(
+            state.calls.load(Ordering::SeqCst),
+            1,
+            "quarantine failure cannot skip the real owned stop"
+        );
+        assert_eq!(state.drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.snapshot().runtime_status,
+            RuntimeStatus::CleanupPending
+        );
+        assert!(matches!(
+            lock_recovering(&application._owner).supervisor.state,
+            SupervisorState::CleanupPending(_)
+        ));
+        state.failures.store(0, Ordering::SeqCst);
+        assert!(application.shutdown().await.is_err());
+        assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            lock_recovering(&application._owner).supervisor.state,
+            SupervisorState::BypassPending { .. }
+        ));
+        mix.fail.store(false, Ordering::SeqCst);
+        application.shutdown().await.unwrap();
+        assert_eq!(
+            state.calls.load(Ordering::SeqCst),
+            2,
+            "a completed stop must not repeat during quarantine recovery"
+        );
+        assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.state(), crate::AudioOperationState::Stopping);
+        assert!(mix.modes.lock().unwrap().iter().all(|mode| matches!(
+            mode,
+            TranslationMixMode::Quarantine {
+                mic_original_expected: false
+            }
+        )));
+        assert!(application.execute(ControlCommand::Start).await.is_err());
     }
 }

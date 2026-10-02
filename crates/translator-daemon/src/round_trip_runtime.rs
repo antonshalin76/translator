@@ -12,7 +12,7 @@ use std::{
 use axum::http::StatusCode;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
-use translator_audio::{GraphHealth, OutputMode, RouteResolution};
+use translator_audio::{GraphHealth, RouteResolution};
 use translator_core::ProviderId;
 use uuid::Uuid;
 
@@ -316,9 +316,27 @@ impl RoundTripRuntimeHandle {
     }
 
     pub fn shutdown(&self) -> Result<(), RoundTripOwnerShutdownError> {
-        self.starts_closed.store(true, Ordering::Release);
         let admitted = Instant::now();
-        let deadline = admitted + Duration::from_secs(10);
+        self.shutdown_with_deadlines(
+            admitted + Duration::from_secs(10),
+            admitted + crate::RUNTIME_CLEANUP_BUDGET,
+        )
+    }
+
+    pub fn shutdown_until(&self, deadline: Instant) -> Result<(), RoundTripOwnerShutdownError> {
+        let admitted = Instant::now();
+        self.shutdown_with_deadlines(
+            deadline.min(admitted + Duration::from_secs(10)),
+            deadline.min(admitted + crate::RUNTIME_CLEANUP_BUDGET),
+        )
+    }
+
+    fn shutdown_with_deadlines(
+        &self,
+        deadline: Instant,
+        cleanup_deadline: Instant,
+    ) -> Result<(), RoundTripOwnerShutdownError> {
+        self.starts_closed.store(true, Ordering::Release);
         let mut actor = lock_recovering(&self.actor);
         match &*actor {
             OwnerThread::Joined => return Ok(()),
@@ -326,12 +344,10 @@ impl RoundTripRuntimeHandle {
             OwnerThread::Running(_) => {}
         }
         if matches!(&*actor, OwnerThread::Running(thread) if !thread.is_finished()) {
-            match self.request(
-                false,
-                true,
-                deadline,
-                admitted + crate::RUNTIME_CLEANUP_BUDGET,
-            ) {
+            if Instant::now() >= deadline {
+                return Err(RoundTripOwnerShutdownError::CleanupPending);
+            }
+            match self.request(false, true, deadline, cleanup_deadline) {
                 Ok(_) => {}
                 Err(RoundTripRequestError::OwnerFailed) => {
                     return Err(RoundTripOwnerShutdownError::OwnerFailed);
@@ -649,7 +665,7 @@ const fn map_request_error(error: RoundTripRequestError) -> ControlFailure {
 
 pub(crate) fn round_trip_preconditions(snapshot: &RuntimeSnapshot) -> RoundTripPreconditions {
     let headphones = snapshot.devices.as_ref().is_some_and(|devices| {
-        devices.acoustic.mode == OutputMode::Headphones && devices.acoustic.full_duplex_allowed
+        devices.acoustic.mode.is_headphones() && devices.acoustic.full_duplex_allowed
     });
     let provider_ready = snapshot.provider_id == ProviderId::Local && !snapshot.translation_running;
     let virtual_graph_ready = snapshot
@@ -707,6 +723,7 @@ fn monotonic_ms() -> u64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use translator_audio::OutputMode;
 
     struct UnusedFacts;
     impl RuntimeFactsSource for UnusedFacts {
@@ -1036,6 +1053,90 @@ pub(crate) mod tests {
         );
         assert_ne!(status.checkpoint, Some(RoundTripCheckpoint::Completed));
         assert!(status.cleanup_pending);
+    }
+
+    #[test]
+    fn shutdown_until_retries_keep_original_transaction_and_outer_deadlines() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (observed, observation) = std_mpsc::channel();
+        let thread = thread::spawn(move || {
+            for attempt in 0..2 {
+                let RoundTripCommand::Stop {
+                    outer_deadline,
+                    cleanup_deadline,
+                    shutdown,
+                    response,
+                } = receiver.blocking_recv().unwrap()
+                else {
+                    panic!("shutdown must not enqueue a start");
+                };
+                observed
+                    .send((outer_deadline, cleanup_deadline, shutdown))
+                    .unwrap();
+                response
+                    .send(if attempt == 0 {
+                        Err(RoundTripRequestError::CleanupPending)
+                    } else {
+                        Ok(RoundTripSelfTestState::default())
+                    })
+                    .unwrap();
+            }
+        });
+        let owner = RoundTripRuntimeHandle {
+            sender,
+            actor: Mutex::new(OwnerThread::Running(thread)),
+            starts_closed: AtomicBool::new(false),
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            owner.shutdown_until(deadline),
+            Err(RoundTripOwnerShutdownError::CleanupPending)
+        );
+        assert_eq!(owner.shutdown_until(deadline), Ok(()));
+        assert_eq!(observation.recv().unwrap(), (deadline, deadline, true));
+        assert_eq!(observation.recv().unwrap(), (deadline, deadline, true));
+        assert!(matches!(
+            *lock_recovering(&owner.actor),
+            OwnerThread::Joined
+        ));
+        assert!(owner.starts_closed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn legacy_shutdown_retains_ten_second_outer_and_eight_second_cleanup_budgets() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (observed, observation) = std_mpsc::channel();
+        let thread = thread::spawn(move || {
+            let RoundTripCommand::Stop {
+                outer_deadline,
+                cleanup_deadline,
+                shutdown,
+                response,
+            } = receiver.blocking_recv().unwrap()
+            else {
+                panic!("unexpected start")
+            };
+            observed
+                .send((outer_deadline, cleanup_deadline, shutdown))
+                .unwrap();
+            response
+                .send(Ok(RoundTripSelfTestState::default()))
+                .unwrap();
+        });
+        let owner = RoundTripRuntimeHandle {
+            sender,
+            actor: Mutex::new(OwnerThread::Running(thread)),
+            starts_closed: AtomicBool::new(false),
+        };
+        let before = Instant::now();
+        owner.shutdown().unwrap();
+        let after = Instant::now();
+        let (outer, cleanup, shutdown) = observation.recv().unwrap();
+        assert!(shutdown);
+        assert_eq!(outer.duration_since(cleanup), Duration::from_secs(2));
+        assert!(cleanup >= before + crate::RUNTIME_CLEANUP_BUDGET);
+        assert!(cleanup <= after + crate::RUNTIME_CLEANUP_BUDGET);
+        assert!(outer >= before + Duration::from_secs(10));
     }
 
     #[test]
