@@ -6,7 +6,8 @@ Small is the existing ASR fallback. Hy has a measured MT-only development
 advantage; full-chain accuracy, acoustic latency and reliability are unproved.
 Model weights are for this owner's private installation, not redistribution.
 
-Requirements: the existing Ubuntu/PipeWire desktop, Python 3.12, user systemd,
+Requirements: the existing Ubuntu/PipeWire desktop with `libpulse.so.0`
+(`libpulse0`), Python 3.12, user systemd,
 the installed Ollama llama-server and its CUDA12 backend, and NVIDIA driver.
 The payload includes private, RECORD-verified cuDNN9/CUDA12 and NVRTC12 copies
 for CTranslate2. Missing Hy CUDA fails closed, rather than changing models.
@@ -85,12 +86,27 @@ control command or the daemon reconnects. Status results obtained before a
 control command cannot overwrite that command's acknowledgement.
 An unknown physical mixer state still stops/quarantines translation for safety.
 
-Leave `Microphone original` at 0% in a fresh preview session. Safe creation of
-that raw-microphone loopback is not implemented: a positive value is rejected
-with `microphone_original_unavailable`, rather than creating a briefly unmuted
-stream. This limitation does not disable RU-to-EN microphone translation or
-EN-to-RU incoming translation; their two translation sliders remain usable.
-The preview does not claim that the original-volume mixer is fully implemented.
+`Microphone original` forwards raw microphone audio into the outgoing virtual
+microphone independently of translated speech. With the microphone enabled and
+admitted headphones, Start prepares a pinned native Pulse capture/playback pair
+whose playback volume is zero before its first frame. During translation, the
+original slider changes this pair's gain without restarting either translation
+direction. Leave it at 0% if only translated microphone speech should be sent.
+Background device refresh cannot create a new microphone capture. A stopped
+positive-volume command can prepare the pair only after fresh headphone checks.
+
+The existing Stopped/Bypass policy sends originals at 100% and mutes translations;
+it retains the desired translating gains for the next Start. Microphone-muted
+bypass keeps the raw microphone at zero. A disabled microphone, revoked acoustic
+admission or changed endpoint disconnects the pair before replacement. A missing
+pair still rejects positive gain with
+`microphone_original_unavailable`; it cannot fall back to another microphone.
+Disabling microphone joins this pair before acknowledgement, preserves the
+desired microphone gains and applies zero effective microphone gains. Incoming
+translation and its volume remain independent. Re-enabling microphone requires
+an explicit admitted command and prepares a fresh pair at zero. Unverified gain
+readback cancels raw forwarding; failed cleanup retains custody and requires
+explicit recovery before another pair can be created.
 
 Cold Start uses the existing runtime's bounded 130-second readiness budget;
 Stop keeps its separate eight-second cleanup budget. Models are not retained
@@ -122,13 +138,13 @@ Task7, prove AEC, pass the independent holdout/paired evaluation, or authorize
 stable merge/publication. Automated package checks and actual translation
 behavior are distinct evidence.
 
-## Verified correction, 2026-10-02
+## Earlier installed-preview verification, 2026-10-02
 
-The installed preview completed an authenticated cold HTTP Start in 9,828 ms
+The earlier installed preview completed an authenticated cold HTTP Start in 9,828 ms
 and Stop in 1,111 ms. Both enabled directions remained Running across five
 status polls. Unauthorized confirmation was rejected, revocation blocked
-Start, and daemon restart revoked the ephemeral headphone choice. The final
-state is Stopped with both directions enabled, local processing and debug
+Start, and daemon restart revoked the ephemeral headphone choice. That trial
+ended Stopped with both directions enabled, local processing and debug
 text/capture disabled. The earlier 503 spawn failure and 4,001-ms Start timeout
 remain retained; successful startup does not erase them.
 
@@ -158,7 +174,10 @@ checks; library copies are checked against supplier RECORD. Copied ELF modes
 are normalized without changing build outputs. This is host-specific packaging,
 not an installable distribution for arbitrary operating systems.
 
-Build the frontend first (`bun run build` in `apps/translator-ui`). Raw Cargo
+Build the frontend first (`bun run build` in `apps/translator-ui`). The native
+Pulse dependency needs the existing `libpulse.so.0` runtime; `libpulse-dev` and
+pkg-config provide SDK discovery, with the pinned binding's Linux SONAME fallback
+available when the SDK is absent. Raw Cargo
 release builds must enable `--features translator-ui/custom-protocol`; the
 Tauri CLI enables this feature for `tauri build` automatically. A release build
 without it is rejected, because it would open the Vite development URL instead
@@ -173,3 +192,23 @@ with a held older native status result, and separation of unavailable AEC from
 command errors. All eight checks pass against the rebuilt UI using a private
 authenticated HTTP fixture, with no audio or model calls and complete cleanup.
 This does not validate a real microphone-original stream or live call quality.
+
+## R9 original-microphone verification
+
+The actual native transport and daemon graph/mix owners passed an isolated
+PulseAudio PCM regression using a synthetic microphone signal and an independent
+output observer. Every settled 100% frame preserved the input RMS of 5655.994;
+35% produced RMS 242.571, matching Pulse's nonlinear amplitude mapping, and 0%
+produced exact zero peaks. Observation excludes at most 240 ms of gain settling.
+Translated stream identities/gains stayed unchanged across original-gain changes.
+
+The same regression covers silence before the first admitted frame, fresh-zero
+incoming playback admission with microphone disabled, cancellation after a
+falsely acknowledged zero write, joined cleanup/recovery, rejected stream moves,
+endpoint removal/recreation and silent replacement without old PCM replay.
+Separate private checks cover cancellation at native startup phases and
+first-frame translated playback admission. The fixture finished with no streams;
+its owned Pulse process exited and its socket became unreachable.
+
+This proves the automated original-microphone capability on a private virtual
+graph, not physical headset/call quality, a long soak, AEC or stable release.

@@ -407,6 +407,7 @@ struct TestState {
     stop_failures: AtomicUsize,
     stop_barrier: Mutex<Option<Arc<StartBarrier>>>,
     completions: Mutex<Vec<(u64, Arc<dyn DuplexCompletionObserver>)>>,
+    allow_reconfigure: AtomicBool,
 }
 
 #[derive(Default)]
@@ -502,6 +503,17 @@ struct TestActive {
 }
 
 impl ActiveDuplexRuntime for TestActive {
+    fn reconfigure(
+        &mut self,
+        _: AdmittedDuplex,
+        _: tokio::time::Instant,
+    ) -> Result<(), DuplexRuntimeError> {
+        if self.state.allow_reconfigure.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(DuplexRuntimeError::ReconfigureFailed)
+        }
+    }
     fn stop(&mut self, _deadline: tokio::time::Instant) -> Result<(), DuplexRuntimeError> {
         self.state.stop_calls.fetch_add(1, Ordering::SeqCst);
         let barrier = self.state.stop_barrier.lock().unwrap().clone();
@@ -659,6 +671,395 @@ impl AudioMixController for TestMix {
     fn recover_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
         self.calls.lock().unwrap().push(("recover", mode));
         self.recover.lock().unwrap().pop_front().unwrap_or(Ok(()))
+    }
+}
+
+struct OriginalCustodyMaintenance {
+    gate: AudioOperationGate,
+    fail_prepare: AtomicBool,
+    fail_cleanup: AtomicBool,
+    cleanups: AtomicUsize,
+    prepared_microphones: Mutex<Vec<bool>>,
+}
+
+impl RuntimeMaintenance for OriginalCustodyMaintenance {
+    fn refresh(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        NoopFacts.refresh(store)
+    }
+    fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+        let facts = translator_daemon::RuntimeFactsSource::inspect(
+            &NoopFacts,
+            std::time::Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        store.set_devices(facts.devices.into());
+        store.set_audio_graph(facts.audio_graph);
+        store.set_routes(facts.routes);
+        Ok(())
+    }
+    fn verify_bypass_custody(
+        &self,
+        snapshot: &translator_daemon::RuntimeSnapshot,
+        permit: bool,
+    ) -> Result<(), ControlFailure> {
+        NoopFacts.verify_bypass_custody(snapshot, permit)
+    }
+    fn prepare_start(
+        &self,
+        snapshot: &translator_daemon::RuntimeSnapshot,
+    ) -> Result<(), ControlFailure> {
+        self.prepared_microphones.lock().unwrap().push(
+            snapshot
+                .directions
+                .iter()
+                .find(|direction| direction.direction_id == AudioDirection::Microphone)
+                .unwrap()
+                .enabled,
+        );
+        if self.fail_prepare.load(Ordering::SeqCst) {
+            Err(mix_error("original_loopback_custody_unknown"))
+        } else {
+            Ok(())
+        }
+    }
+    fn cleanup_originals(&self, deadline: std::time::Instant) -> Result<(), ControlFailure> {
+        assert_eq!(self.gate.state(), AudioOperationState::Production);
+        assert!(deadline > std::time::Instant::now());
+        self.cleanups.fetch_add(1, Ordering::SeqCst);
+        if self.fail_cleanup.load(Ordering::SeqCst) {
+            Err(mix_error("original_loopback_custody_unknown"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn original_start_faults_retain_exclusive_custody_until_joined_recovery() {
+    for preparation_failure in [true, false] {
+        let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
+        let runner = Arc::new(TestRunner::default());
+        let mix = Arc::new(TestMix::default());
+        let maintenance = Arc::new(OriginalCustodyMaintenance {
+            gate: gate.clone(),
+            fail_prepare: AtomicBool::new(preparation_failure),
+            fail_cleanup: AtomicBool::new(true),
+            cleanups: AtomicUsize::new(0),
+            prepared_microphones: Mutex::new(Vec::new()),
+        });
+        if !preparation_failure {
+            mix.reconcile
+                .lock()
+                .unwrap()
+                .push_back(Err(mix_error("audio_mix_state_unknown")));
+        }
+        let application = ControlApplication::spawn(
+            store.clone(),
+            runner.clone(),
+            gate.clone(),
+            Arc::new(NoopFacts),
+            maintenance.clone(),
+            Some(mix.clone()),
+        );
+        assert_eq!(
+            application
+                .execute(ControlCommand::Start)
+                .await
+                .unwrap_err()
+                .code,
+            "translation_cleanup_pending"
+        );
+        assert_eq!(runner.state.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(maintenance.cleanups.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.state(), AudioOperationState::Production);
+        assert_eq!(
+            store.snapshot().audio_mix_knowledge,
+            AudioMixKnowledge::AudioMixStateUnknown
+        );
+        assert_eq!(
+            application
+                .execute(ControlCommand::RecoverAudioMix)
+                .await
+                .unwrap_err()
+                .code,
+            "translation_cleanup_pending"
+        );
+        assert_eq!(gate.state(), AudioOperationState::Production);
+        maintenance.fail_cleanup.store(false, Ordering::SeqCst);
+        maintenance.fail_prepare.store(false, Ordering::SeqCst);
+        application
+            .execute(ControlCommand::RecoverAudioMix)
+            .await
+            .unwrap();
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        assert_eq!(
+            store.snapshot().audio_mix_knowledge,
+            AudioMixKnowledge::Known
+        );
+        application.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn original_unknown_reconcile_joins_raw_custody_and_stops_translation() {
+    let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
+    let runner = Arc::new(TestRunner::default());
+    let mix = Arc::new(TestMix::default());
+    let maintenance = Arc::new(OriginalCustodyMaintenance {
+        gate: gate.clone(),
+        fail_prepare: AtomicBool::new(false),
+        fail_cleanup: AtomicBool::new(true),
+        cleanups: AtomicUsize::new(0),
+        prepared_microphones: Mutex::new(Vec::new()),
+    });
+    let application = ControlApplication::spawn(
+        store.clone(),
+        runner.clone(),
+        gate.clone(),
+        Arc::new(NoopFacts),
+        maintenance.clone(),
+        Some(mix.clone()),
+    );
+    application.execute(ControlCommand::Start).await.unwrap();
+    mix.reconcile
+        .lock()
+        .unwrap()
+        .push_back(Err(mix_error("audio_mix_state_unknown")));
+    assert_eq!(
+        application
+            .execute(ControlCommand::ReconcileAudio)
+            .await
+            .unwrap_err()
+            .code,
+        "translation_cleanup_pending"
+    );
+    assert_eq!(
+        runner.state.stop_calls.load(Ordering::SeqCst),
+        1,
+        "raw cleanup failure must not skip translation stop"
+    );
+    assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(gate.state(), AudioOperationState::Production);
+    maintenance.fail_cleanup.store(false, Ordering::SeqCst);
+    application
+        .execute(ControlCommand::RecoverAudioMix)
+        .await
+        .unwrap();
+    assert_eq!(maintenance.cleanups.load(Ordering::SeqCst), 2);
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+    application.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn disabled_microphone_keeps_desired_gains_but_uses_muted_running_policy() {
+    let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
+    let mix = Arc::new(TestMix::default());
+    let runner = Arc::new(TestRunner::default());
+    runner.state.allow_reconfigure.store(true, Ordering::SeqCst);
+    let maintenance = Arc::new(OriginalCustodyMaintenance {
+        gate: gate.clone(),
+        fail_prepare: AtomicBool::new(false),
+        fail_cleanup: AtomicBool::new(false),
+        cleanups: AtomicUsize::new(0),
+        prepared_microphones: Mutex::new(Vec::new()),
+    });
+    let application = ControlApplication::spawn(
+        store.clone(),
+        runner,
+        gate,
+        Arc::new(NoopFacts),
+        maintenance.clone(),
+        Some(mix.clone()),
+    );
+    application.execute(ControlCommand::Start).await.unwrap();
+    application
+        .execute(ControlCommand::PatchAudioMix(AudioMixPatch {
+            microphone_original_percent: Some(35),
+            microphone_translation_percent: None,
+            speaker_original_percent: None,
+            speaker_translation_percent: Some(63),
+        }))
+        .await
+        .unwrap();
+    application
+        .execute(ControlCommand::PatchDirection(DirectionPatch {
+            direction_id: AudioDirection::Microphone,
+            enabled: Some(false),
+            source_language: None,
+            target_language: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        maintenance.prepared_microphones.lock().unwrap().last(),
+        Some(&false)
+    );
+    assert_eq!(
+        mix.calls().last(),
+        Some(&("reconcile", TranslationMixMode::TranslatingMicrophoneMuted))
+    );
+    assert_eq!(store.snapshot().audio_mix.microphone_original_percent, 35);
+    application
+        .execute(ControlCommand::PatchAudioMix(AudioMixPatch {
+            microphone_original_percent: Some(47),
+            microphone_translation_percent: None,
+            speaker_original_percent: None,
+            speaker_translation_percent: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        mix.calls().last(),
+        Some(&("apply", TranslationMixMode::TranslatingMicrophoneMuted))
+    );
+    application
+        .execute(ControlCommand::ReconcileAudio)
+        .await
+        .unwrap();
+    assert_eq!(
+        mix.calls().last(),
+        Some(&("reconcile", TranslationMixMode::TranslatingMicrophoneMuted))
+    );
+    assert_eq!(store.snapshot().audio_mix.speaker_translation_percent, 63);
+    application.execute(ControlCommand::Stop).await.unwrap();
+    application
+        .execute(ControlCommand::PatchAudioMix(AudioMixPatch {
+            microphone_original_percent: None,
+            microphone_translation_percent: None,
+            speaker_original_percent: None,
+            speaker_translation_percent: Some(61),
+        }))
+        .await
+        .unwrap();
+    application
+        .execute(ControlCommand::PatchDirection(DirectionPatch {
+            direction_id: AudioDirection::Microphone,
+            enabled: Some(true),
+            source_language: None,
+            target_language: None,
+        }))
+        .await
+        .unwrap();
+    application.execute(ControlCommand::Start).await.unwrap();
+    assert_eq!(
+        maintenance.prepared_microphones.lock().unwrap().last(),
+        Some(&true)
+    );
+    assert_eq!(
+        mix.calls().last(),
+        Some(&("reconcile", TranslationMixMode::Translating))
+    );
+    application.execute(ControlCommand::Stop).await.unwrap();
+    application.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopped_missing_original_creation_uses_fresh_headphone_facts() {
+    struct PreparingFacts {
+        inner: SwitchableBypassFacts,
+        prepares: AtomicUsize,
+    }
+    impl translator_daemon::RuntimeFactsSource for PreparingFacts {
+        fn inspect(
+            &self,
+            deadline: std::time::Instant,
+        ) -> Result<translator_daemon::RuntimeFacts, translator_daemon::FactsError> {
+            translator_daemon::RuntimeFactsSource::inspect(&self.inner, deadline)
+        }
+    }
+    impl RuntimeMaintenance for PreparingFacts {
+        fn refresh(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+            self.inner.refresh(store)
+        }
+        fn refresh_bypass_facts(&self, store: &RuntimeStore) -> Result<(), ControlFailure> {
+            self.inner.refresh_bypass_facts(store)
+        }
+        fn verify_bypass_custody(
+            &self,
+            snapshot: &translator_daemon::RuntimeSnapshot,
+            permit: bool,
+        ) -> Result<(), ControlFailure> {
+            self.inner.verify_bypass_custody(snapshot, permit)
+        }
+        fn prepare_start(
+            &self,
+            snapshot: &translator_daemon::RuntimeSnapshot,
+        ) -> Result<(), ControlFailure> {
+            assert!(
+                snapshot
+                    .devices
+                    .as_ref()
+                    .unwrap()
+                    .acoustic
+                    .mode
+                    .is_headphones()
+            );
+            self.prepares.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    for mode in [
+        translator_audio::OutputMode::Headphones,
+        translator_audio::OutputMode::OpenSpeaker,
+    ] {
+        let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
+        let mix = Arc::new(TestMix::default());
+        let facts = Arc::new(PreparingFacts {
+            inner: SwitchableBypassFacts {
+                mode: Mutex::new(translator_audio::OutputMode::Headphones),
+                mic_custody: AtomicBool::new(true),
+            },
+            prepares: AtomicUsize::new(0),
+        });
+        let application = ControlApplication::spawn(
+            store.clone(),
+            Arc::new(TestRunner::default()),
+            gate.clone(),
+            facts.clone(),
+            facts.clone(),
+            Some(mix.clone()),
+        );
+        application.execute(ControlCommand::Start).await.unwrap();
+        application.execute(ControlCommand::Stop).await.unwrap();
+        facts.prepares.store(0, Ordering::SeqCst);
+        *facts.inner.mode.lock().unwrap() = mode;
+        mix.preflight
+            .lock()
+            .unwrap()
+            .push_back(Err(mix_error("microphone_original_unavailable")));
+        if !mode.is_headphones() {
+            mix.preflight
+                .lock()
+                .unwrap()
+                .push_back(Err(mix_error("microphone_original_unavailable")));
+        }
+        let result = application
+            .execute(ControlCommand::PatchAudioMix(AudioMixPatch {
+                microphone_original_percent: Some(35),
+                microphone_translation_percent: None,
+                speaker_original_percent: None,
+                speaker_translation_percent: None,
+            }))
+            .await;
+        if mode.is_headphones() {
+            result.unwrap();
+            assert_eq!(facts.prepares.load(Ordering::SeqCst), 1);
+            assert_eq!(store.snapshot().audio_mix.microphone_original_percent, 35);
+        } else {
+            assert_eq!(result.unwrap_err().code, "microphone_original_unavailable");
+            assert_eq!(
+                facts.prepares.load(Ordering::SeqCst),
+                0,
+                "revoked headphones cannot open raw capture"
+            );
+            assert_eq!(store.snapshot().audio_mix.microphone_original_percent, 0);
+        }
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+        application.shutdown().await.unwrap();
     }
 }
 
@@ -1569,7 +1970,7 @@ async fn speaker_only_start_skips_microphone_quarantine_and_lost_route_stops_run
     application.execute(ControlCommand::Start).await.unwrap();
     assert_eq!(
         mix.calls(),
-        [("reconcile", TranslationMixMode::Translating)]
+        [("reconcile", TranslationMixMode::TranslatingMicrophoneMuted)]
     );
     assert_eq!(runner.state.active.load(Ordering::SeqCst), 1);
     assert_eq!(

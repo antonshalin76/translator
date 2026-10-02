@@ -207,6 +207,7 @@ def package(output: Path, cache: Path, source_tree: str, cuda_root: Path) -> Pat
         "host_dependencies": [
             "Python 3.12",
             "PipeWire/Pulse",
+            "libpulse.so.0 (libpulse0)",
             "Ollama llama-server/CUDA12",
             "NVIDIA driver",
         ],

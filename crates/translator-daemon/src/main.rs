@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use serde::Deserialize;
@@ -154,6 +155,7 @@ impl<R: CommandRunner> PulseResources<R> {
     fn cleanup_graph(&mut self) {
         if let Err(error) = self.original_loopbacks.cleanup_all() {
             tracing::warn!(event = "original_loopback_cleanup_failed", code = ?error.code());
+            return;
         }
         if let Some(graph) = self.graph.as_mut()
             && let Err(error) = graph.cleanup_owned()
@@ -266,6 +268,25 @@ impl<R: CommandRunner + Send + Sync> AecProjectedRoutes<R> {
             .ok_or(native_route_failure())?
             .map_err(|_| native_route_failure())
     }
+
+    fn prepare_existing(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if native_pair_selected(snapshot) {
+            self.prepare_native(snapshot)
+        } else {
+            self.routes
+                .resources
+                .with_active(|resources| {
+                    resources
+                        .original_loopbacks
+                        .ensure_without_new_mic(snapshot)
+                })
+                .ok_or(native_route_failure())?
+                .map_err(|_| native_route_failure())
+        }
+    }
 }
 
 impl<R: CommandRunner + Send + Sync> RuntimeFactsSource for AecProjectedRoutes<R> {
@@ -328,7 +349,7 @@ impl<R: CommandRunner + Send + Sync> RuntimeMaintenance for AecProjectedRoutes<R
             .with_active(|resources| resources.refresh_facts_only(store))
             .ok_or(native_route_failure())?;
         self.project(store);
-        self.prepare_start(&store.snapshot())
+        self.prepare_existing(&store.snapshot())
     }
 
     fn refresh_bypass_facts(
@@ -390,6 +411,13 @@ impl<R: CommandRunner + Send + Sync> RuntimeMaintenance for AecProjectedRoutes<R
         } else {
             self.routes.prepare_bypass(snapshot)
         }
+    }
+
+    fn cleanup_originals(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        self.routes.cleanup_originals(deadline)
     }
 }
 
@@ -1396,7 +1424,7 @@ impl<R: CommandRunner + Send> RuntimeMaintenance for PulseManualRoutes<R> {
         candidate: &RuntimeSnapshot,
     ) -> Result<(), translator_daemon::ControlFailure> {
         self.resources
-            .with_active(|resources| resources.original_loopbacks.ensure_without_new_mic(candidate))
+            .with_active(|resources| resources.original_loopbacks.prepare_for_start(candidate))
             .ok_or(translator_daemon::ControlFailure {
                 status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 code: "original_loopback_custody_unknown",
@@ -1442,6 +1470,20 @@ impl<R: CommandRunner + Send> RuntimeMaintenance for PulseManualRoutes<R> {
                     code: "original_loopback_custody_unknown",
                 }
             })
+    }
+
+    fn cleanup_originals(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), translator_daemon::ControlFailure> {
+        if self.operation_gate.state() != AudioOperationState::Production {
+            return Err(native_route_failure());
+        }
+        self.resources
+            .with_active(|resources| resources.original_loopbacks.cleanup_all_until(deadline))
+            .ok_or(native_route_failure())?
+            .map(|_| ())
+            .map_err(|_| native_route_failure())
     }
 }
 
@@ -1697,14 +1739,28 @@ struct RawPulseEndpoint {
 
 struct PulseOriginalLoopbacks<R = SystemCommandRunner> {
     runner: R,
+    microphone: Option<Mutex<translator_audio::PulseOriginalMicrophone>>,
 }
 
 impl<R> PulseOriginalLoopbacks<R>
 where
     R: CommandRunner,
 {
+    #[cfg(test)]
     const fn new(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            microphone: None,
+        }
+    }
+
+    fn with_microphone(runner: R, registry: translator_audio::OriginalMicrophoneRegistry) -> Self {
+        Self {
+            runner,
+            microphone: Some(Mutex::new(translator_audio::PulseOriginalMicrophone::new(
+                registry,
+            ))),
+        }
     }
 
     #[cfg(test)]
@@ -1727,8 +1783,13 @@ where
         self.ensure_requests(
             snapshot,
             allow_new_mic,
+            false,
             original_loopback_requests(snapshot),
         )
+    }
+
+    fn prepare_for_start(&self, snapshot: &RuntimeSnapshot) -> Result<(), OriginalLoopbackError> {
+        self.ensure_requests(snapshot, false, true, original_loopback_requests(snapshot))
     }
 
     fn ensure_with_native_speaker(
@@ -1738,6 +1799,7 @@ where
         self.ensure_requests(
             snapshot,
             false,
+            false,
             pulse_requests_with_native_speaker(snapshot),
         )
     }
@@ -1746,20 +1808,68 @@ where
         &self,
         snapshot: &RuntimeSnapshot,
         allow_new_mic: bool,
-        requests: Vec<OriginalLoopbackRequest>,
+        allow_native_mic: bool,
+        mut requests: Vec<OriginalLoopbackRequest>,
     ) -> Result<(), OriginalLoopbackError> {
+        let native_request = self.microphone.as_ref().and_then(|_| {
+            requests
+                .iter()
+                .find(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
+                .cloned()
+        });
+        requests.retain(|request| {
+            request.media_name != MICROPHONE_ORIGINAL_LOOPBACK
+                || (self.microphone.is_none() && snapshot.audio_mix.microphone_original_percent > 0)
+        });
+        if let Some(microphone) = &self.microphone {
+            let mut microphone = microphone.lock().map_err(|_| discovery_error())?;
+            if native_request.is_none() {
+                microphone
+                    .stop(Instant::now() + Duration::from_secs(1))
+                    .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup))?;
+            }
+        }
         let sink_inputs: Vec<RawPulseStream> =
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
         let source_outputs: Vec<RawPulseStream> =
             self.run_json(&["--format=json", "list", "source-outputs"])?;
         let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
-        let (sources, sinks) = if requests.is_empty() {
+        let (sources, sinks) = if requests.is_empty() && native_request.is_none() {
             (HashMap::new(), HashMap::new())
         } else {
             let sources = endpoint_names(self.run_json(&["--format=json", "list", "sources"])?)?;
             let sinks = endpoint_names(self.run_json(&["--format=json", "list", "sinks"])?)?;
             (sources, sinks)
         };
+        let native_pair = native_request
+            .as_ref()
+            .map(|request| native_microphone_pair(snapshot, request, &sources, &sinks))
+            .transpose();
+        let native_pair = match native_pair {
+            Ok(pair) => pair,
+            Err(error) => {
+                if let Some(microphone) = &self.microphone {
+                    microphone
+                        .lock()
+                        .map_err(|_| discovery_error())?
+                        .stop(Instant::now() + Duration::from_secs(1))
+                        .map_err(|_| {
+                            OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup)
+                        })?;
+                }
+                return Err(error);
+            }
+        };
+        if let (Some(microphone), Some(request), Some((source, sink))) =
+            (&self.microphone, &native_request, native_pair)
+        {
+            let mut microphone = microphone.lock().map_err(|_| discovery_error())?;
+            if microphone.verify(&request.source, source, sink).is_err() {
+                microphone
+                    .stop(Instant::now() + Duration::from_secs(1))
+                    .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup))?;
+            }
+        }
         if requests.iter().any(|request| {
             !sources.values().any(|name| name == &request.source)
                 || !sinks.values().any(|name| name == &request.sink)
@@ -1827,6 +1937,25 @@ where
             ));
         }
 
+        if let (Some(microphone), Some(request), Some((source, sink))) =
+            (&self.microphone, &native_request, native_pair)
+        {
+            let mut microphone = microphone.lock().map_err(|_| discovery_error())?;
+            if allow_native_mic {
+                microphone.prepare(&request.source, source, sink, Instant::now() + Duration::from_secs(2))
+                    .map_err(|error| {
+                        tracing::warn!(event = "original_microphone_preparation_failed", code = ?error);
+                        OriginalLoopbackError::new(OriginalLoopbackErrorCode::Load)
+                    })?;
+            } else if snapshot.translation_running
+                || snapshot.audio_mix.microphone_original_percent > 0
+            {
+                microphone
+                    .verify(&request.source, source, sink)
+                    .map_err(|_| discovery_error())?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1860,6 +1989,16 @@ where
         permit_mic_original: bool,
         mut requests: Vec<OriginalLoopbackRequest>,
     ) -> Result<(), OriginalLoopbackError> {
+        let native_request = self
+            .microphone
+            .as_ref()
+            .filter(|_| permit_mic_original)
+            .and_then(|_| {
+                requests
+                    .iter()
+                    .find(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
+                    .cloned()
+            });
         if permit_mic_original {
             if direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
                 && snapshot
@@ -1884,6 +2023,9 @@ where
         } else {
             requests.retain(|request| request.media_name != MICROPHONE_ORIGINAL_LOOPBACK);
         }
+        if self.microphone.is_some() {
+            requests.retain(|request| request.media_name != MICROPHONE_ORIGINAL_LOOPBACK);
+        }
         let sink_inputs: Vec<RawPulseStream> =
             self.run_json(&["--format=json", "list", "sink-inputs"])?;
         let source_outputs: Vec<RawPulseStream> =
@@ -1892,7 +2034,7 @@ where
         if discovered.len() != requests.len() {
             return Err(discovery_error());
         }
-        if requests.is_empty() {
+        if requests.is_empty() && native_request.is_none() {
             return Ok(());
         }
         let sources = endpoint_names(self.run_json(&["--format=json", "list", "sources"])?)?;
@@ -1903,19 +2045,38 @@ where
         }) {
             return Err(discovery_error());
         }
+        if let (Some(microphone), Some(request)) = (&self.microphone, &native_request) {
+            let (source, sink) = native_microphone_pair(snapshot, request, &sources, &sinks)?;
+            microphone
+                .lock()
+                .map_err(|_| discovery_error())?
+                .verify(&request.source, source, sink)
+                .map_err(|_| discovery_error())?;
+        }
         Ok(())
     }
 
     fn cleanup_all(&self) -> Result<Vec<String>, OriginalLoopbackError> {
+        self.cleanup_all_until(Instant::now() + Duration::from_secs(2))
+    }
+
+    fn cleanup_all_until(&self, deadline: Instant) -> Result<Vec<String>, OriginalLoopbackError> {
+        if let Some(microphone) = &self.microphone {
+            microphone
+                .lock()
+                .map_err(|_| discovery_error())?
+                .stop(deadline)
+                .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup))?;
+        }
         let sink_inputs: Vec<RawPulseStream> =
-            self.run_json(&["--format=json", "list", "sink-inputs"])?;
+            self.run_json_until(&["--format=json", "list", "sink-inputs"], deadline)?;
         let source_outputs: Vec<RawPulseStream> =
-            self.run_json(&["--format=json", "list", "source-outputs"])?;
+            self.run_json_until(&["--format=json", "list", "source-outputs"], deadline)?;
         let discovered = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
         let mut module_ids: Vec<_> = discovered.keys().cloned().collect();
         module_ids.sort();
         for module_id in &module_ids {
-            self.unload_module(module_id)?;
+            self.unload_module_until(module_id, deadline)?;
         }
         Ok(module_ids)
     }
@@ -1927,16 +2088,26 @@ where
     }
 
     fn unload_module(&self, module_id: &str) -> Result<(), OriginalLoopbackError> {
-        self.run_pactl_owned(
+        self.unload_module_until(module_id, Instant::now() + Duration::from_secs(2))
+    }
+
+    fn unload_module_until(
+        &self,
+        module_id: &str,
+        deadline: Instant,
+    ) -> Result<(), OriginalLoopbackError> {
+        self.run_pactl_owned_until(
             &["unload-module".to_owned(), module_id.to_owned()],
             OriginalLoopbackErrorCode::Cleanup,
+            deadline,
         )?;
         let module_id = module_id
             .parse::<u32>()
             .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup))?;
-        let result = self.run_pactl(
-            &["list", "short", "modules"],
+        let result = self.run_pactl_owned_until(
+            &["list".to_owned(), "short".to_owned(), "modules".to_owned()],
             OriginalLoopbackErrorCode::Cleanup,
+            deadline,
         )?;
         let present = translator_audio::module_id_present(result.stdout(), module_id)
             .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Cleanup))?;
@@ -1952,18 +2123,25 @@ where
     where
         T: for<'de> Deserialize<'de>,
     {
-        let result = self.run_pactl(args, OriginalLoopbackErrorCode::Discovery)?;
-        serde_json::from_slice(result.stdout())
-            .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Discovery))
+        self.run_json_until(args, Instant::now() + Duration::from_secs(2))
     }
 
-    fn run_pactl(
+    fn run_json_until<T>(
         &self,
         args: &[&str],
-        failure_code: OriginalLoopbackErrorCode,
-    ) -> Result<CommandResult, OriginalLoopbackError> {
-        let owned: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
-        self.run_pactl_owned(&owned, failure_code)
+        deadline: Instant,
+    ) -> Result<T, OriginalLoopbackError>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let args = args
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>();
+        let result =
+            self.run_pactl_owned_until(&args, OriginalLoopbackErrorCode::Discovery, deadline)?;
+        serde_json::from_slice(result.stdout())
+            .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Discovery))
     }
 
     fn run_pactl_owned(
@@ -1971,9 +2149,18 @@ where
         args: &[String],
         failure_code: OriginalLoopbackErrorCode,
     ) -> Result<CommandResult, OriginalLoopbackError> {
+        self.run_pactl_owned_until(args, failure_code, Instant::now() + Duration::from_secs(2))
+    }
+
+    fn run_pactl_owned_until(
+        &self,
+        args: &[String],
+        failure_code: OriginalLoopbackErrorCode,
+        deadline: Instant,
+    ) -> Result<CommandResult, OriginalLoopbackError> {
         let result = self
             .runner
-            .run("pactl", args)
+            .run_until("pactl", args, deadline)
             .map_err(|_| OriginalLoopbackError::new(failure_code))?;
         if result.is_success() {
             Ok(result)
@@ -2001,7 +2188,7 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
 
     if direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
         && devices.acoustic.mode.is_headphones()
-        && snapshot.audio_mix.microphone_original_percent > 0
+        && devices.acoustic.full_duplex_allowed
         && let Some(source) = devices.source.selected.as_ref()
     {
         requests.push(OriginalLoopbackRequest {
@@ -2012,6 +2199,34 @@ fn original_loopback_requests(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbac
     }
 
     requests
+}
+
+fn native_microphone_pair(
+    snapshot: &RuntimeSnapshot,
+    request: &OriginalLoopbackRequest,
+    sources: &HashMap<u32, String>,
+    sinks: &HashMap<u32, String>,
+) -> Result<(u32, u32), OriginalLoopbackError> {
+    let devices = snapshot.devices.as_ref().ok_or_else(discovery_error)?;
+    let source = devices
+        .source
+        .selected
+        .as_ref()
+        .ok_or_else(discovery_error)?;
+    if !source.available
+        || devices.source.health != translator_audio::DeviceHealth::Available
+        || devices.source.pinned_name.as_deref() != Some(source.name.as_str())
+        || source.name != request.source
+        || sources.get(&source.id) != Some(&source.name)
+    {
+        return Err(discovery_error());
+    }
+    let mut matching = sinks.iter().filter(|(_, name)| *name == MIC_OUT_SINK);
+    let (&sink, _) = matching.next().ok_or_else(discovery_error)?;
+    if matching.next().is_some() {
+        return Err(discovery_error());
+    }
+    Ok((source.id, sink))
 }
 
 fn pulse_requests_with_native_speaker(snapshot: &RuntimeSnapshot) -> Vec<OriginalLoopbackRequest> {
@@ -2317,17 +2532,24 @@ async fn async_main() -> ExitCode {
         .map(|journal| PulseAudioGraph::new(SystemCommandRunner, journal));
     let device_watcher = build_device_watcher(AecCapability::Unavailable);
     let operation_gate = AudioOperationGate::new();
+    let original_microphone_registry = translator_audio::OriginalMicrophoneRegistry::default();
     let manual_routes = Arc::new(PulseManualRoutes {
         resources: LifecycleProtected::new(PulseResources {
             routing: build_routing_watcher(),
             devices: device_watcher,
-            original_loopbacks: PulseOriginalLoopbacks::new(SystemCommandRunner),
+            original_loopbacks: PulseOriginalLoopbacks::with_microphone(
+                SystemCommandRunner,
+                original_microphone_registry.clone(),
+            ),
             graph: audio_graph,
         }),
         operation_gate: operation_gate.clone(),
     });
     manual_routes.initialize(&store);
-    let audio_mix_application = Arc::new(AudioMixApplication::new(SystemCommandRunner));
+    let audio_mix_application = Arc::new(AudioMixApplication::with_original_microphone(
+        SystemCommandRunner,
+        original_microphone_registry,
+    ));
     let audio_mix: Arc<dyn AudioMixController> = audio_mix_application.clone();
     let duplex_config = build_duplex_config(lease.token_path());
     let mut aec_calibration = None;
@@ -3386,6 +3608,28 @@ mod tests {
     }
 
     #[test]
+    fn zero_gain_headphone_microphone_has_a_pinned_original_acquisition_request() {
+        let snapshot = RuntimeSnapshot {
+            audio_mix: AudioMixState::default(),
+            devices: Some(selected_devices()),
+            ..RuntimeSnapshot::default()
+        };
+        assert_eq!(snapshot.audio_mix.microphone_original_percent, 0);
+        let requests = original_loopback_requests(&snapshot);
+        let microphones: Vec<_> = requests
+            .iter()
+            .filter(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
+            .collect();
+        assert_eq!(
+            microphones.len(),
+            1,
+            "zero gain must not suppress acquisition"
+        );
+        assert_eq!(microphones[0].source, "alsa_input.microphone");
+        assert_eq!(microphones[0].sink, MIC_OUT_SINK);
+    }
+
+    #[test]
     fn original_loopback_requests_follow_original_mix_and_devices() {
         let snapshot = RuntimeSnapshot {
             translation_running: true,
@@ -3432,7 +3676,7 @@ mod tests {
             },
             ..snapshot
         };
-        assert_eq!(original_loopback_requests(&muted_originals).len(), 1);
+        assert_eq!(original_loopback_requests(&muted_originals).len(), 2);
         assert_eq!(
             original_loopback_requests(&muted_originals)[0].media_name,
             SPEAKER_ORIGINAL_LOOPBACK
@@ -3444,11 +3688,18 @@ mod tests {
         };
         assert_eq!(
             original_loopback_requests(&stopped_muted),
-            [OriginalLoopbackRequest {
-                media_name: SPEAKER_ORIGINAL_LOOPBACK,
-                source: format!("{REMOTE_IN_SINK}.monitor"),
-                sink: "alsa_output.headphones".to_owned(),
-            }]
+            [
+                OriginalLoopbackRequest {
+                    media_name: SPEAKER_ORIGINAL_LOOPBACK,
+                    source: format!("{REMOTE_IN_SINK}.monitor"),
+                    sink: "alsa_output.headphones".to_owned(),
+                },
+                OriginalLoopbackRequest {
+                    media_name: MICROPHONE_ORIGINAL_LOOPBACK,
+                    source: "alsa_input.microphone".to_owned(),
+                    sink: MIC_OUT_SINK.to_owned(),
+                },
+            ]
         );
     }
 
@@ -3569,6 +3820,7 @@ mod tests {
     struct LoopbackFixture {
         modules: Vec<LoopbackModule>,
         calls: Vec<Vec<String>>,
+        deadlines: Vec<Instant>,
         fail_unload: bool,
         retain_after_unload_ack: bool,
         hide_streams_after_unload_ack: bool,
@@ -3610,11 +3862,12 @@ mod tests {
             &self,
             program: &str,
             args: &[String],
-            _: Instant,
+            deadline: Instant,
         ) -> Result<CommandResult, CommandRunError> {
             assert_eq!(program, "pactl");
             let mut state = self.0.lock().unwrap();
             state.calls.push(args.to_vec());
+            state.deadlines.push(deadline);
             match args {
                 [list, short, kind] if list == "list" && short == "short" && kind == "modules" => {
                     let inventory = state
@@ -3836,6 +4089,30 @@ mod tests {
                 .iter()
                 .any(|arg| arg.contains(MICROPHONE_ORIGINAL_LOOPBACK))
         );
+    }
+
+    #[test]
+    fn native_microphone_muted_bypass_does_not_require_capture_before_start() {
+        let runner = LoopbackRunner::new(Vec::new());
+        let registry = translator_audio::OriginalMicrophoneRegistry::default();
+        let originals = PulseOriginalLoopbacks::with_microphone(runner.clone(), registry.clone());
+        let mut snapshot = loopback_snapshot(OutputMode::Headphones);
+        snapshot.translation_running = false;
+        snapshot.audio_mix.microphone_original_percent = 0;
+        snapshot
+            .devices
+            .as_mut()
+            .unwrap()
+            .source
+            .selected
+            .as_mut()
+            .unwrap()
+            .id = 0;
+        originals.ensure_without_new_mic(&snapshot).unwrap();
+        assert!(registry.current().unwrap().is_none());
+        originals.verify_existing(&snapshot, false).unwrap();
+        assert!(originals.verify_existing(&snapshot, true).is_err());
+        assert_eq!(runner.module_ids().len(), 1);
     }
 
     #[test]
@@ -4275,6 +4552,102 @@ mod tests {
     }
 
     #[test]
+    fn projected_original_cleanup_forwards_custody_and_one_absolute_deadline() {
+        let runner = LoopbackRunner::new(vec![speaker_module(43)]);
+        let store = RuntimeStore::default();
+        let gate = AudioOperationGate::new();
+        let _lease = gate.acquire_production().unwrap();
+        let registry = translator_audio::OriginalMicrophoneRegistry::default();
+        let projection = super::AecProjectedRoutes {
+            routes: Arc::new(super::PulseManualRoutes {
+                resources: LifecycleProtected::new(super::PulseResources {
+                    routing: translator_audio::PulseRoutingWatcher::new(
+                        runner.clone(),
+                        translator_audio::RoutingProfile::Production,
+                    ),
+                    devices: translator_audio::PulseDeviceWatcher::new(
+                        runner.clone(),
+                        AecCapability::Unavailable,
+                    ),
+                    original_loopbacks: PulseOriginalLoopbacks::with_microphone(
+                        runner.clone(),
+                        registry.clone(),
+                    ),
+                    graph: None,
+                }),
+                operation_gate: gate,
+            }),
+            coordinator: Arc::new(translator_daemon::AecCalibrationCoordinator::new()),
+            environment: Arc::new(super::PulseNativeAecEnvironment {
+                runner: runner.clone(),
+                facts_server: "unix:/test/unused-read-only-facts".into(),
+                mix: Arc::new(
+                    translator_daemon::AudioMixApplication::with_original_microphone(
+                        runner.clone(),
+                        registry.clone(),
+                    ),
+                ),
+                store,
+            }),
+        };
+        let mut snapshot = loopback_snapshot(OutputMode::Headphones);
+        snapshot.audio_mix.microphone_original_percent = 0;
+        assert!(projection.prepare_existing(&snapshot).is_err());
+        snapshot
+            .devices
+            .as_mut()
+            .unwrap()
+            .source
+            .selected
+            .as_mut()
+            .unwrap()
+            .id = 0;
+        snapshot
+            .devices
+            .as_mut()
+            .unwrap()
+            .sink
+            .selected
+            .as_mut()
+            .unwrap()
+            .id = 0;
+        projection.prepare_existing(&snapshot).unwrap();
+        assert!(
+            registry.current().unwrap().is_none(),
+            "projected refresh must not acquire raw microphone"
+        );
+        assert_eq!(runner.module_ids(), vec![43]);
+        assert!(runner.calls().iter().all(|args| args[0] != "load-module"));
+        runner.0.lock().unwrap().calls.clear();
+        runner.0.lock().unwrap().deadlines.clear();
+        runner
+            .0
+            .lock()
+            .unwrap()
+            .modules
+            .push(microphone_module(41, true));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        translator_daemon::RuntimeMaintenance::cleanup_originals(&projection, deadline).unwrap();
+        assert!(runner.module_ids().is_empty());
+        assert!(
+            runner
+                .0
+                .lock()
+                .unwrap()
+                .deadlines
+                .iter()
+                .all(|observed| *observed == deadline)
+        );
+        runner.0.lock().unwrap().modules.push(speaker_module(45));
+        runner.0.lock().unwrap().fail_unload = true;
+        assert!(
+            translator_daemon::RuntimeMaintenance::cleanup_originals(&projection, deadline)
+                .is_err()
+        );
+        assert_eq!(runner.module_ids(), vec![45]);
+    }
+
+    #[test]
     #[ignore = "requires a disposable private PulseAudio socket and virtual fixture sinks"]
     fn private_pulse_original_loopback_load_discover_and_cleanup() {
         let server = std::env::var("PULSE_SERVER").expect("private PULSE_SERVER is required");
@@ -4338,6 +4711,667 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires a disposable private PulseAudio socket and virtual fixture sinks"]
+    async fn private_pulse_native_original_zero_gain_gain_changes_and_cleanup() {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::WARN)
+            .try_init();
+        use std::os::unix::fs::FileTypeExt;
+        use std::sync::atomic::AtomicU8;
+        use translator_audio::{
+            OriginalMicrophoneRegistry, PcmFrame, PulsePcmCapture, PulsePcmCommand,
+            PulsePcmPlayback, StreamPcmFormat,
+        };
+        use translator_daemon::{
+            AudioMixApplication, AudioMixController, PlaybackMixAuthority, TranslationMixMode,
+        };
+
+        let server = std::env::var("PULSE_SERVER").expect("private PULSE_SERVER required");
+        assert!(
+            server.starts_with("unix:/tmp/translator-loopback-") && server.ends_with("/native"),
+            "refusing non-fixture Pulse server"
+        );
+        assert!(
+            std::fs::symlink_metadata(server.strip_prefix("unix:").unwrap())
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        let registry = OriginalMicrophoneRegistry::default();
+        let originals =
+            PulseOriginalLoopbacks::with_microphone(SystemCommandRunner, registry.clone());
+        let mix =
+            AudioMixApplication::with_original_microphone(SystemCommandRunner, registry.clone());
+        let endpoint = |kind: &str, name: &str| -> u32 {
+            let result = std::process::Command::new("pactl")
+                .args(["--format=json", "list", kind])
+                .output()
+                .unwrap();
+            assert!(result.status.success());
+            let values: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            values
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|value| value["name"] == name)
+                .unwrap()["index"]
+                .as_u64()
+                .unwrap() as u32
+        };
+        let mut devices = selected_devices();
+        let microphone = "translator_test_mic.monitor";
+        devices.source.selected.as_mut().unwrap().name = microphone.into();
+        devices.source.selected.as_mut().unwrap().id = endpoint("sources", microphone);
+        devices.source.pinned_name = Some(microphone.into());
+        devices.sink.selected.as_mut().unwrap().name = "translator_test_out".into();
+        devices.sink.selected.as_mut().unwrap().id = endpoint("sinks", "translator_test_out");
+        devices.sink.pinned_name = Some("translator_test_out".into());
+        let snapshot = RuntimeSnapshot {
+            devices: Some(devices),
+            ..RuntimeSnapshot::default()
+        };
+        let mut tone = PulsePcmPlayback::spawn(&PulsePcmCommand::playback(
+            "translator_test_mic",
+            "synthetic-microphone-input",
+        ))
+        .unwrap();
+        let tone_registration = tone
+            .wait_registered_muted(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(
+            std::process::Command::new("pactl")
+                .args([
+                    "set-sink-input-volume",
+                    &tone_registration.index().to_string(),
+                    "100%"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let done = Arc::new(AtomicBool::new(false));
+        let tone_done = done.clone();
+        let tone_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(20));
+            let pcm: Vec<u8> = (0..320)
+                .flat_map(|index| {
+                    let sample = (8_000.0
+                        * (std::f64::consts::TAU * 500.0 * index as f64 / 16_000.0).sin())
+                        as i16;
+                    sample.to_le_bytes()
+                })
+                .collect();
+            let mut sequence = 0;
+            while !tone_done.load(Ordering::Acquire) {
+                interval.tick().await;
+                let frame = PcmFrame::try_new(
+                    sequence,
+                    sequence * 20_000_000,
+                    StreamPcmFormat::provider_default(),
+                    pcm.clone(),
+                )
+                .unwrap();
+                tone.write_frame(&frame).await.unwrap();
+                sequence += 1;
+            }
+            tone.stop().await.unwrap();
+        });
+        let mut reference = PulsePcmCapture::spawn(&PulsePcmCommand::capture(
+            microphone,
+            "synthetic-original-input-reference",
+        ))
+        .unwrap();
+        let mut reference_rms = Vec::new();
+        for sequence in 0..40 {
+            let frame = tokio::time::timeout(
+                Duration::from_secs(2),
+                reference.read_frame(sequence, sequence * 20_000_000),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if sequence >= 20 {
+                let energy = frame
+                    .pcm()
+                    .chunks_exact(2)
+                    .map(|value| f64::from(i16::from_le_bytes([value[0], value[1]])).powi(2))
+                    .sum::<f64>();
+                reference_rms.push((energy / (frame.pcm().len() / 2) as f64).sqrt());
+            }
+        }
+        reference.stop().await.unwrap();
+        let reference_mean = reference_rms.iter().sum::<f64>() / reference_rms.len() as f64;
+        eprintln!(
+            "PRIVATE_ORIGINAL_INPUT rms={reference_mean:.3} min={:.3} max={:.3}",
+            reference_rms.iter().copied().reduce(f64::min).unwrap(),
+            reference_rms.iter().copied().reduce(f64::max).unwrap()
+        );
+        let capture = PulsePcmCapture::spawn(&PulsePcmCommand::capture(
+            &format!("{MIC_OUT_SINK}.monitor"),
+            "synthetic-original-observer",
+        ))
+        .unwrap();
+        let phase = Arc::new(AtomicU8::new(0));
+        let observations = Arc::new(Mutex::new(Vec::<(u8, f64, i32)>::new()));
+        let capture_phase = phase.clone();
+        let capture_done = done.clone();
+        let capture_observations = observations.clone();
+        let capture_task = tokio::spawn(async move {
+            let mut capture = capture;
+            let mut sequence = 0;
+            while !capture_done.load(Ordering::Acquire) {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    capture.read_frame(sequence, sequence * 20_000_000),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let samples: Vec<i32> = frame
+                    .pcm()
+                    .chunks_exact(2)
+                    .map(|value| i16::from_le_bytes([value[0], value[1]]) as i32)
+                    .collect();
+                let peak = samples.iter().map(|value| value.abs()).max().unwrap();
+                let rms = (samples
+                    .iter()
+                    .map(|value| f64::from(*value).powi(2))
+                    .sum::<f64>()
+                    / samples.len() as f64)
+                    .sqrt();
+                capture_observations.lock().unwrap().push((
+                    capture_phase.load(Ordering::Acquire),
+                    rms,
+                    peak,
+                ));
+                sequence += 1;
+            }
+            capture.stop().await.unwrap();
+        });
+        let capture_ready = Instant::now() + Duration::from_secs(2);
+        loop {
+            let outputs = std::process::Command::new("pactl")
+                .args(["--format=json", "list", "source-outputs"])
+                .output()
+                .unwrap();
+            assert!(outputs.status.success());
+            let values: serde_json::Value = serde_json::from_slice(&outputs.stdout).unwrap();
+            if values
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stream| stream["properties"]["media.name"] == "synthetic-original-observer")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < capture_ready,
+                "continuous observer must be connected before bridge creation"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let before_connect_frames = observations.lock().unwrap().len();
+        originals.ensure_without_new_mic(&snapshot).unwrap();
+        assert!(
+            registry.current().unwrap().is_none(),
+            "background refresh cannot start raw capture"
+        );
+        originals.prepare_for_start(&snapshot).unwrap();
+        originals.verify_existing(&snapshot, true).unwrap();
+        let first = registry.current().unwrap().unwrap();
+        let zero_window = Instant::now() + Duration::from_secs(2);
+        while observations.lock().unwrap().len() < before_connect_frames + 20
+            && Instant::now() < zero_window
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(observations.lock().unwrap().len() >= before_connect_frames + 20);
+        assert!(
+            observations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _, _)| *p == 0)
+                .all(|(_, _, peak)| *peak == 0),
+            "initial zero must apply before the first microphone frame"
+        );
+        assert!(
+            first.is_live(),
+            "zero-gain bridge must remain live before gain admission"
+        );
+        originals.verify_existing(&snapshot, true).unwrap();
+        let mut translation_playbacks = Vec::new();
+        for (device, name) in [
+            (MIC_OUT_SINK, translator_audio::OUTGOING_TRANSLATION_STREAM),
+            (
+                "translator_test_out",
+                translator_audio::INCOMING_TRANSLATION_STREAM,
+            ),
+        ] {
+            let mut playback =
+                PulsePcmPlayback::spawn(&PulsePcmCommand::playback(device, name)).unwrap();
+            let identity = playback
+                .wait_registered_muted(Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+            translation_playbacks.push((playback, identity));
+        }
+        let desired = AudioMixState {
+            microphone_translation_percent: 75,
+            speaker_translation_percent: 63,
+            ..AudioMixState::default()
+        };
+        for (stage, percent) in [(1, 100), (2, 35), (3, 0)] {
+            mix.apply_desired(
+                AudioMixState {
+                    microphone_original_percent: percent,
+                    ..desired
+                },
+                TranslationMixMode::Translating,
+            )
+            .unwrap();
+            assert_eq!(
+                mix.committed().unwrap().microphone_original_percent,
+                percent
+            );
+            phase.store(stage, Ordering::Release);
+            tokio::time::sleep(Duration::from_millis(950)).await;
+            originals.ensure_without_new_mic(&snapshot).unwrap();
+            assert!(
+                first.same_session(&registry.current().unwrap().unwrap()),
+                "gain must not respawn acquisition"
+            );
+            let inputs = std::process::Command::new("pactl")
+                .args(["--format=json", "list", "sink-inputs"])
+                .output()
+                .unwrap();
+            let values: serde_json::Value = serde_json::from_slice(&inputs.stdout).unwrap();
+            for ((_, identity), expected) in translation_playbacks.iter().zip([75_u32, 63]) {
+                let stream = values
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|stream| stream["index"] == identity.index())
+                    .unwrap();
+                for channel in stream["volume"].as_object().unwrap().values() {
+                    assert!(
+                        channel["value"]
+                            .as_u64()
+                            .unwrap()
+                            .abs_diff(u64::from((expected * 65_536 + 50) / 100))
+                            <= 1
+                    );
+                }
+            }
+        }
+        let settled = |stage| {
+            observations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(phase, _, _)| *phase == stage)
+                .skip(12)
+                .take(20)
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let full = settled(1);
+        let partial = settled(2);
+        let silent = settled(3);
+        assert_eq!(full.len(), 20);
+        assert_eq!(partial.len(), 20);
+        assert_eq!(silent.len(), 20);
+        let mean = |samples: &[(u8, f64, i32)]| {
+            samples.iter().map(|(_, rms, _)| *rms).sum::<f64>() / samples.len() as f64
+        };
+        let expected = libpulse_binding::volume::VolumeLinear::from(
+            libpulse_binding::volume::Volume((35 * 65_536 + 50) / 100),
+        )
+        .0;
+        eprintln!(
+            "PRIVATE_ORIGINAL_PCM full_rms={:.3} min={:.3} max={:.3} partial_rms={:.3} zero_peak={} expected_ratio={:.8}",
+            mean(&full),
+            full.iter()
+                .map(|(_, rms, _)| *rms)
+                .reduce(f64::min)
+                .unwrap(),
+            full.iter()
+                .map(|(_, rms, _)| *rms)
+                .reduce(f64::max)
+                .unwrap(),
+            mean(&partial),
+            silent.iter().map(|(_, _, peak)| *peak).max().unwrap(),
+            expected
+        );
+        assert!(
+            mean(&full) > 5_000.0,
+            "nonzero signal must prove a connected microphone path"
+        );
+        assert!(
+            full.iter()
+                .all(|(_, rms, _)| (rms / reference_mean - 1.0).abs() < 0.10),
+            "every settled full-gain frame must preserve the continuous input signal"
+        );
+        assert!(
+            partial
+                .iter()
+                .all(|(_, rms, _)| (rms / reference_mean / expected - 1.0).abs() < 0.10),
+            "every settled partial-gain frame must preserve the scaled input signal"
+        );
+        assert!(
+            (mean(&partial) / mean(&full) / expected - 1.0).abs() < 0.10,
+            "original gain must follow Pulse's amplitude mapping"
+        );
+        assert!(silent.iter().all(|(_, _, peak)| *peak == 0));
+        assert!(
+            !std::process::Command::new("pactl")
+                .args([
+                    "move-source-output",
+                    &first.capture_index().to_string(),
+                    &format!("{REMOTE_IN_SINK}.monitor")
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            !std::process::Command::new("pactl")
+                .args([
+                    "move-sink-input",
+                    &first.playback_index().to_string(),
+                    "translator_test_out"
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        originals.verify_existing(&snapshot, true).unwrap();
+        struct AcknowledgeWithoutZero(u32);
+        mix.reconcile_committed(TranslationMixMode::TranslatingMicrophoneMuted)
+            .unwrap();
+        translation_playbacks[1].0.stop().await.unwrap();
+        let mut incoming = PulsePcmPlayback::spawn(&PulsePcmCommand::playback(
+            "translator_test_out",
+            translator_audio::INCOMING_TRANSLATION_STREAM,
+        ))
+        .unwrap();
+        let incoming_registration = incoming
+            .wait_registered_muted(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        translation_playbacks[1] = (incoming, incoming_registration);
+        mix.admit_registered(
+            &translation_playbacks[1].1,
+            translator_daemon::PlaybackRegistrationPhase::Running,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(
+            mix.admit_registered(
+                &translation_playbacks[0].1,
+                translator_daemon::PlaybackRegistrationPhase::Running,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_err(),
+            "disabled microphone cannot re-admit outgoing translated playback"
+        );
+        impl CommandRunner for AcknowledgeWithoutZero {
+            fn run_until(
+                &self,
+                program: &str,
+                args: &[String],
+                deadline: Instant,
+            ) -> Result<CommandResult, CommandRunError> {
+                if args
+                    == [
+                        "set-sink-input-volume".to_owned(),
+                        self.0.to_string(),
+                        "0%".to_owned(),
+                    ]
+                {
+                    Ok(CommandResult::success(Vec::new()))
+                } else {
+                    SystemCommandRunner.run_until(program, args, deadline)
+                }
+            }
+        }
+        let fault_mix = AudioMixApplication::with_original_microphone(
+            AcknowledgeWithoutZero(first.playback_index()),
+            registry.clone(),
+        );
+        fault_mix
+            .apply_desired(
+                AudioMixState {
+                    microphone_original_percent: 35,
+                    ..desired
+                },
+                TranslationMixMode::Translating,
+            )
+            .unwrap();
+        assert_eq!(
+            fault_mix
+                .reconcile_committed(TranslationMixMode::Quarantine {
+                    mic_original_expected: true
+                })
+                .unwrap_err()
+                .code,
+            "audio_mix_state_unknown"
+        );
+        assert!(
+            !first.is_live(),
+            "unverified zero must cancel actual raw forwarding"
+        );
+        assert!(
+            registry.current().is_err(),
+            "cancel must not pretend unjoined custody is released"
+        );
+        originals
+            .cleanup_all_until(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            registry.current().unwrap().is_none(),
+            "joined cleanup permits explicit recovery"
+        );
+        fault_mix
+            .recover_committed(TranslationMixMode::Quarantine {
+                mic_original_expected: false,
+            })
+            .unwrap();
+        assert_eq!(
+            fault_mix.committed().unwrap().microphone_original_percent,
+            35
+        );
+        phase.store(5, Ordering::Release);
+        let silence_observation_deadline = Instant::now() + Duration::from_secs(3);
+        while observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(stage, _, _)| *stage == 5)
+            .count()
+            < 32
+            && Instant::now() < silence_observation_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let cancelled_silent = settled(5);
+        assert_eq!(cancelled_silent.len(), 20);
+        assert!(
+            cancelled_silent.iter().all(|(_, _, peak)| *peak == 0),
+            "unknown raw gain cannot keep forwarding after cancellation/join"
+        );
+        let mut disabled = snapshot.clone();
+        disabled
+            .directions
+            .iter_mut()
+            .find(|direction| direction.direction_id == translator_core::AudioDirection::Microphone)
+            .unwrap()
+            .enabled = false;
+        originals.ensure_without_new_mic(&disabled).unwrap();
+        assert!(registry.current().unwrap().is_none());
+        assert!(!first.is_live());
+        assert!(
+            mix.apply_desired(
+                AudioMixState {
+                    microphone_original_percent: 35,
+                    ..desired
+                },
+                TranslationMixMode::Translating
+            )
+            .is_err()
+        );
+        originals.prepare_for_start(&snapshot).unwrap();
+        let replacement = registry.current().unwrap().unwrap();
+        assert_ne!(first.session_id(), replacement.session_id());
+        phase.store(4, Ordering::Release);
+        tokio::time::sleep(Duration::from_millis(950)).await;
+        let replacement_silent = settled(4);
+        assert_eq!(replacement_silent.len(), 20);
+        assert!(
+            replacement_silent.iter().all(|(_, _, peak)| *peak == 0),
+            "replacement starts silent without replaying old PCM"
+        );
+        for mode in [OutputMode::UnknownUnsafe, OutputMode::OpenSpeaker] {
+            let mut unsafe_snapshot = snapshot.clone();
+            unsafe_snapshot.devices.as_mut().unwrap().acoustic.mode = mode;
+            originals.ensure_without_new_mic(&unsafe_snapshot).unwrap();
+            assert!(
+                registry.current().unwrap().is_none(),
+                "unsafe output must disconnect an existing raw path"
+            );
+            originals.prepare_for_start(&snapshot).unwrap();
+        }
+        originals.cleanup_all().unwrap();
+        assert!(registry.current().unwrap().is_none());
+        done.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), tone_task)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), capture_task)
+            .await
+            .unwrap()
+            .unwrap();
+        for (mut playback, _) in translation_playbacks {
+            playback.stop().await.unwrap();
+        }
+        assert!(!replacement.is_live());
+
+        let failed_registry = OriginalMicrophoneRegistry::default();
+        let mut failed = translator_audio::PulseOriginalMicrophone::new(failed_registry.clone());
+        assert!(
+            failed
+                .prepare(
+                    microphone,
+                    snapshot
+                        .devices
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .selected
+                        .as_ref()
+                        .unwrap()
+                        .id,
+                    endpoint("sinks", MIC_OUT_SINK) + 100_000,
+                    Instant::now() + Duration::from_secs(2)
+                )
+                .is_err()
+        );
+        failed
+            .stop(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            failed_registry.current().unwrap().is_none(),
+            "partial startup must release joined custody"
+        );
+
+        for name in ["translator_test_mic", MIC_OUT_SINK] {
+            let mut current = snapshot.clone();
+            current
+                .devices
+                .as_mut()
+                .unwrap()
+                .source
+                .selected
+                .as_mut()
+                .unwrap()
+                .id = endpoint("sources", microphone);
+            originals.prepare_for_start(&current).unwrap();
+            let before_removal = registry.current().unwrap().unwrap();
+            let inventory = std::process::Command::new("pactl")
+                .args(["--format=json", "list", "sinks"])
+                .output()
+                .unwrap();
+            let values: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+            let module = &values
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|value| value["name"] == name)
+                .unwrap()["owner_module"];
+            let module = module
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| module.as_u64().unwrap().to_string());
+            assert!(
+                std::process::Command::new("pactl")
+                    .args(["unload-module", &module])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let expiry = Instant::now() + Duration::from_secs(1);
+            while before_removal.is_live() && Instant::now() < expiry {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                !before_removal.is_live(),
+                "device loss must invalidate the lease without another command"
+            );
+            assert!(registry.current().is_err());
+            assert!(originals.ensure_without_new_mic(&current).is_err());
+            assert!(registry.current().unwrap().is_none());
+            assert!(
+                std::process::Command::new("pactl")
+                    .args([
+                        "load-module",
+                        "module-null-sink",
+                        &format!("sink_name={name}"),
+                        "rate=48000",
+                        "channels=1"
+                    ])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            if name == "translator_test_mic" {
+                assert!(
+                    originals.prepare_for_start(&current).is_err(),
+                    "reused name cannot preserve the old source identity"
+                );
+                current
+                    .devices
+                    .as_mut()
+                    .unwrap()
+                    .source
+                    .selected
+                    .as_mut()
+                    .unwrap()
+                    .id = endpoint("sources", microphone);
+            }
+            originals.prepare_for_start(&current).unwrap();
+            let recreated = registry.current().unwrap().unwrap();
+            assert_ne!(before_removal.session_id(), recreated.session_id());
+            originals.cleanup_all().unwrap();
+        }
     }
 
     #[test]

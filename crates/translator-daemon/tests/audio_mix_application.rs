@@ -152,6 +152,46 @@ fn sink_input(
 }
 
 #[test]
+fn disabled_microphone_preserves_positive_desired_without_requiring_or_opening_raw_path() {
+    let runner = FakeRunner::new(vec![
+        CommandResult::success(b"[]".to_vec()),
+        CommandResult::success(b"[]".to_vec()),
+    ]);
+    let app = AudioMixApplication::new(runner.clone());
+    let desired = AudioMixState {
+        microphone_original_percent: 35,
+        microphone_translation_percent: 75,
+        speaker_original_percent: 0,
+        speaker_translation_percent: 63,
+    };
+    app.validate_desired_for_mode(desired, TranslationMixMode::TranslatingMicrophoneMuted)
+        .unwrap();
+    assert!(runner.calls().is_empty());
+    app.apply_desired(desired, TranslationMixMode::TranslatingMicrophoneMuted)
+        .unwrap();
+    assert_eq!(app.committed().unwrap(), desired);
+    assert_eq!(app.native_playback_percent(false).unwrap(), 63);
+    assert!(runner.calls().iter().all(|args| args[0] == "--format=json"));
+}
+
+#[test]
+fn disabled_microphone_bypass_accepts_retained_desired_without_raw_capture() {
+    let runner = FakeRunner::new(vec![
+        CommandResult::success(b"[]".to_vec()),
+        CommandResult::success(b"[]".to_vec()),
+    ]);
+    let app = AudioMixApplication::new(runner.clone());
+    let desired = AudioMixState {
+        microphone_original_percent: 35,
+        ..AudioMixState::default()
+    };
+    app.apply_desired(desired, TranslationMixMode::MicrophoneMutedBypass)
+        .unwrap();
+    assert_eq!(app.committed().unwrap(), desired);
+    assert!(runner.calls().iter().all(|args| args[0] == "--format=json"));
+}
+
+#[test]
 fn failed_second_set_restores_uncertain_target_then_first_in_exact_channel_order() {
     let inputs = serde_json::json!([
         sink_input(
@@ -336,12 +376,12 @@ fn requested_raw_microphone_volume_requires_a_discovered_owned_target() {
 
     assert_eq!(
         app.validate_desired(candidate).unwrap_err().code,
-        "audio_mix_discovery_failed"
+        "microphone_original_unavailable"
     );
-    for mode in [Translating, TranslationMixMode::MicrophoneMutedBypass] {
+    for mode in [Translating, TranslationMixMode::Bypass] {
         assert_eq!(
             app.apply_desired(candidate, mode).unwrap_err().code,
-            "audio_mix_discovery_failed"
+            "microphone_original_unavailable"
         );
     }
     assert_eq!(app.committed().unwrap(), AudioMixState::default());
@@ -372,7 +412,7 @@ fn active_mix_reconcile_fails_if_committed_raw_microphone_target_disappears() {
         .count();
     assert_eq!(
         app.reconcile_committed(Translating).unwrap_err().code,
-        "audio_mix_discovery_failed"
+        "microphone_original_unavailable"
     );
     assert_eq!(app.committed().unwrap(), candidate);
     assert_eq!(

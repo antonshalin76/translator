@@ -1,10 +1,11 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use axum::http::StatusCode;
 use translator_audio::{
     AudioMixTarget, AudioMixVolumes, CommandRunner, INCOMING_TRANSLATION_STREAM, MixPercent,
-    OUTGOING_TRANSLATION_STREAM, PulseAudioMix, PulsePlaybackRegistration,
+    OUTGOING_TRANSLATION_STREAM, OriginalMicrophoneRegistry, PulseAudioMix,
+    PulsePlaybackRegistration,
 };
 
 use crate::translation_runtime::{PlaybackMixAuthority, PlaybackRegistrationPhase};
@@ -16,12 +17,18 @@ pub enum TranslationMixMode {
     MicrophoneMutedBypass,
     Quarantine { mic_original_expected: bool },
     Translating,
+    TranslatingMicrophoneMuted,
 }
 
 impl TranslationMixMode {
     fn effective(self, desired: AudioMixState) -> AudioMixState {
         match self {
             Self::Translating => desired,
+            Self::TranslatingMicrophoneMuted => AudioMixState {
+                microphone_original_percent: 0,
+                microphone_translation_percent: 0,
+                ..desired
+            },
             Self::Quarantine { .. } => AudioMixState {
                 microphone_original_percent: 0,
                 microphone_translation_percent: 0,
@@ -57,8 +64,16 @@ struct MixState {
 
 impl<R: CommandRunner> AudioMixApplication<R> {
     pub fn new(runner: R) -> Self {
+        Self::with_device(PulseAudioMix::new(runner))
+    }
+
+    pub fn with_original_microphone(runner: R, registry: OriginalMicrophoneRegistry) -> Self {
+        Self::with_device(PulseAudioMix::with_original_microphone(runner, registry))
+    }
+
+    fn with_device(device: PulseAudioMix<R>) -> Self {
         Self {
-            device: PulseAudioMix::new(runner),
+            device,
             state: Mutex::new(MixState {
                 committed: AudioMixState::default(),
                 mode: TranslationMixMode::Bypass,
@@ -68,7 +83,7 @@ impl<R: CommandRunner> AudioMixApplication<R> {
     }
 
     pub fn committed(&self) -> Result<AudioMixState, ControlFailure> {
-        let state = self.state.lock().map_err(|_| unknown())?;
+        let state = self.lock_state()?;
         if state.unknown {
             return Err(unknown());
         }
@@ -76,12 +91,35 @@ impl<R: CommandRunner> AudioMixApplication<R> {
     }
 
     fn reconcile(&self, mode: TranslationMixMode, recovery: bool) -> Result<(), ControlFailure> {
-        let mut state = self.state.lock().map_err(|_| unknown())?;
+        let mut state = self.lock_state()?;
         if state.unknown && !recovery {
             return Err(unknown());
         }
         let candidate = state.committed;
         self.apply_locked(&mut state, candidate, mode, false)
+    }
+
+    fn lock_state(&self) -> Result<MutexGuard<'_, MixState>, ControlFailure> {
+        self.state.lock().map_err(|_| {
+            self.device.quarantine_original_microphone();
+            unknown()
+        })
+    }
+
+    fn mark_unknown(&self, state: &mut MixState) {
+        self.device.quarantine_original_microphone();
+        state.unknown = true;
+    }
+
+    fn discovery_failure(&self, state: &mut MixState) -> ControlFailure {
+        if self.device.quarantine_original_microphone() {
+            state.unknown = true;
+        }
+        if state.unknown {
+            unknown()
+        } else {
+            failure("audio_mix_discovery_failed")
+        }
     }
 
     fn apply_locked(
@@ -106,14 +144,12 @@ impl<R: CommandRunner> AudioMixApplication<R> {
             speaker_original_percent: effective.speaker_original_percent,
             speaker_translation_percent: effective.speaker_translation_percent,
         };
-        let plan = self.device.discover().map_err(|_| {
-            if state.unknown {
-                unknown()
-            } else {
-                failure("audio_mix_discovery_failed")
-            }
-        })?;
-        if (require_candidate_targets || mode == TranslationMixMode::Translating)
+        let plan = self
+            .device
+            .discover()
+            .map_err(|_| self.discovery_failure(state))?;
+        if effective.microphone_original_percent > 0
+            && (require_candidate_targets || mode == TranslationMixMode::Translating)
             && candidate.microphone_original_percent > 0
             && !plan
                 .entries()
@@ -132,7 +168,7 @@ impl<R: CommandRunner> AudioMixApplication<R> {
             .iter()
             .any(|entry| entry.target() == AudioMixTarget::MicrophoneOriginal)
         {
-            state.unknown = true;
+            self.mark_unknown(state);
             return Err(unknown());
         }
         let mut emergency_mute_failed = false;
@@ -144,13 +180,14 @@ impl<R: CommandRunner> AudioMixApplication<R> {
                     mode,
                     TranslationMixMode::Quarantine { .. }
                         | TranslationMixMode::MicrophoneMutedBypass
+                        | TranslationMixMode::TranslatingMicrophoneMuted
                 ) {
                     emergency_mute_failed = true;
                     continue;
                 }
                 for attempted in plan.entries()[..=index].iter().rev() {
                     if self.device.restore_raw(attempted).is_err() {
-                        state.unknown = true;
+                        self.mark_unknown(state);
                     }
                 }
                 return Err(if state.unknown {
@@ -161,7 +198,7 @@ impl<R: CommandRunner> AudioMixApplication<R> {
             }
         }
         if emergency_mute_failed {
-            state.unknown = true;
+            self.mark_unknown(state);
             return Err(unknown());
         }
         let zero_targets: Vec<_> = [
@@ -174,7 +211,9 @@ impl<R: CommandRunner> AudioMixApplication<R> {
         .filter(|target| {
             (matches!(
                 mode,
-                TranslationMixMode::Quarantine { .. } | TranslationMixMode::MicrophoneMutedBypass
+                TranslationMixMode::Quarantine { .. }
+                    | TranslationMixMode::MicrophoneMutedBypass
+                    | TranslationMixMode::TranslatingMicrophoneMuted
             ) || *target == AudioMixTarget::MicrophoneOriginal)
                 && target.percent_from(volumes) == 0
                 && plan.entries().iter().any(|entry| entry.target() == *target)
@@ -186,7 +225,7 @@ impl<R: CommandRunner> AudioMixApplication<R> {
                 .verify_zero_targets(&plan, &zero_targets)
                 .is_err()
         {
-            state.unknown = true;
+            self.mark_unknown(state);
             return Err(unknown());
         }
         state.committed = candidate;
@@ -199,8 +238,7 @@ impl<R: CommandRunner> AudioMixApplication<R> {
 impl<R: CommandRunner + Send + Sync> PlaybackMixAuthority for AudioMixApplication<R> {
     fn native_playback_percent(&self, original: bool) -> Result<u8, DuplexRuntimeError> {
         let state = self
-            .state
-            .lock()
+            .lock_state()
             .map_err(|_| DuplexRuntimeError::StartFailed)?;
         if state.unknown {
             return Err(DuplexRuntimeError::StartFailed);
@@ -224,8 +262,7 @@ impl<R: CommandRunner + Send + Sync> PlaybackMixAuthority for AudioMixApplicatio
         deadline: Instant,
     ) -> Result<(), DuplexRuntimeError> {
         let mut state = self
-            .state
-            .lock()
+            .lock_state()
             .map_err(|_| DuplexRuntimeError::StartFailed)?;
         if state.unknown {
             return Err(DuplexRuntimeError::StartFailed);
@@ -235,7 +272,10 @@ impl<R: CommandRunner + Send + Sync> PlaybackMixAuthority for AudioMixApplicatio
                 self.device.verify_registered_zero(registration, deadline)
             }
             PlaybackRegistrationPhase::Running => {
-                if state.mode != TranslationMixMode::Translating {
+                if state.mode != TranslationMixMode::Translating
+                    && !(state.mode == TranslationMixMode::TranslatingMicrophoneMuted
+                        && registration.stream_name() == INCOMING_TRANSLATION_STREAM)
+                {
                     return Err(DuplexRuntimeError::StartFailed);
                 }
                 let target = match registration.stream_name() {
@@ -257,7 +297,7 @@ impl<R: CommandRunner + Send + Sync> PlaybackMixAuthority for AudioMixApplicatio
             }
         };
         if result.is_err() {
-            state.unknown = true;
+            self.mark_unknown(&mut state);
             return Err(DuplexRuntimeError::StartFailed);
         }
         Ok(())
@@ -266,15 +306,23 @@ impl<R: CommandRunner + Send + Sync> PlaybackMixAuthority for AudioMixApplicatio
 
 impl<R: CommandRunner + Send + Sync> AudioMixController for AudioMixApplication<R> {
     fn validate_desired(&self, volumes: AudioMixState) -> Result<(), ControlFailure> {
-        let state = self.state.lock().map_err(|_| unknown())?;
+        self.validate_desired_for_mode(volumes, TranslationMixMode::Translating)
+    }
+
+    fn validate_desired_for_mode(
+        &self,
+        volumes: AudioMixState,
+        mode: TranslationMixMode,
+    ) -> Result<(), ControlFailure> {
+        let mut state = self.lock_state()?;
         if state.unknown {
             return Err(unknown());
         }
-        if volumes.microphone_original_percent > 0 {
+        if mode.effective(volumes).microphone_original_percent > 0 {
             let plan = self
                 .device
                 .discover()
-                .map_err(|_| failure("audio_mix_discovery_failed"))?;
+                .map_err(|_| self.discovery_failure(&mut state))?;
             if !plan
                 .entries()
                 .iter()
@@ -291,7 +339,7 @@ impl<R: CommandRunner + Send + Sync> AudioMixController for AudioMixApplication<
         volumes: AudioMixState,
         mode: TranslationMixMode,
     ) -> Result<(), ControlFailure> {
-        let mut state = self.state.lock().map_err(|_| unknown())?;
+        let mut state = self.lock_state()?;
         if state.unknown {
             return Err(unknown());
         }

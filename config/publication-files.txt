@@ -59,6 +59,7 @@ crates/translator-audio/src/lib.rs
 crates/translator-audio/src/mix.rs
 crates/translator-audio/src/model.rs
 crates/translator-audio/src/module_list.rs
+crates/translator-audio/src/original_microphone.rs
 crates/translator-audio/src/pcm.rs
 crates/translator-audio/src/pulse.rs
 crates/translator-audio/src/routing.rs

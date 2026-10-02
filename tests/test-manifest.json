@@ -7459,7 +7459,7 @@
       ]
     },
     "rust": {
-      "external_skip_count": 12,
+      "external_skip_count": 14,
       "file_count": 50,
       "files": [
         "apps/translator-ui/src-tauri/src/main.rs",
@@ -7513,7 +7513,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1012,
+      "node_count": 1052,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -7612,12 +7612,162 @@
         },
         {
           "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::copied_native_metadata_without_retained_registry_fails_discovery",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::duplicate_native_streams_clients_and_pinned_endpoints_fail_discovery",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::expired_or_replaced_lease_prevents_gain_rollback_and_zero_acknowledgement",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::identity_change_after_write_rejects_acknowledgement_and_blocks_rollback",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::native_original_identity_and_channel_mismatches_fail_discovery",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::native_original_uses_live_registration_and_verifies_gain_and_restore",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::native_sample_format_is_owned_by_typed_transport_not_display_text",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::owned_legacy_microphone_conflicts_with_native_registration",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::replacement_or_removal_after_discovery_prevents_gain_and_rollback_writes",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::mix::tests::successful_write_without_gain_change_fails_zero_and_nonzero_readback",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::module_list::tests::malformed_nonempty_inventory_never_becomes_absence",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::module_list::tests::renderer_records_preserve_foreign_multiline_and_empty_arguments",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::cancellation_prevents_publication_even_if_alive_was_previously_set",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::capture_overflow_or_partial_sample_does_not_mutate_pending_audio",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::claimed_or_dead_worker_custody_never_looks_like_an_empty_registry",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::expired_prepare_and_invalid_source_never_claim_or_spawn",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::identical_metadata_without_the_original_lease_is_not_the_same_session",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::inspection_rejects_empty_duplicate_mismatched_and_failed_results",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::native_activation_requires_success_acknowledgement_and_uncancelled_budget",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::native_format_change_revokes_live_lease_and_blocks_replacement",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::native_properties_bind_both_streams_and_context_to_one_session",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::native_streams_pin_devices_and_request_bounded_device_latency",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::negotiated_buffers_and_bridge_total_at_most_two_hundred_ms",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::pending_absorbs_two_capture_windows_within_the_fixed_total_budget",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::poisoned_registry_can_cancel_but_cannot_publish_or_release_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::private_pulse_cancellation_at_native_phases_confirms_cleanup",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::ready_dispatch_drains_queued_events_without_an_unbounded_turn",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::registry_cancellation_revokes_clones_and_preserves_cleanup_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::registry_requires_a_live_retained_native_lease",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::stop_invalidates_immediately_and_retains_unjoined_worker",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::unconfirmed_disconnect_retains_custody_after_worker_join",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::worker_cancelled_before_connect_creates_no_native_context",
           "status": "deterministic"
         },
         {
@@ -9112,6 +9262,11 @@
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::native_microphone_muted_bypass_does_not_require_capture_before_start",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::original_loopback_discovery_ignores_name_matched_foreign_streams",
           "status": "deterministic"
         },
@@ -9152,12 +9307,22 @@
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_native_original_zero_gain_gain_changes_and_cleanup",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_original_loopback_load_discover_and_cleanup",
           "status": "external_skip"
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::production_reconcile_never_creates_a_new_raw_microphone_loopback",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::projected_original_cleanup_forwards_custody_and_one_absolute_deadline",
           "status": "deterministic"
         },
         {
@@ -9203,6 +9368,11 @@
         {
           "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::wrong_source_or_sink_is_replaced_after_owned_unload",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::zero_gain_headphone_microphone_has_a_pinned_original_acquisition_request",
           "status": "deterministic"
         },
         {
@@ -11207,6 +11377,16 @@
         },
         {
           "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::disabled_microphone_bypass_accepts_retained_desired_without_raw_capture",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
+          "id": "translator-daemon::test::audio_mix_application::disabled_microphone_preserves_positive_desired_without_requiring_or_opening_raw_path",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/audio_mix_application.rs",
           "id": "translator-daemon::test::audio_mix_application::empty_live_plan_commits_desired_but_invalid_volume_never_discovers",
           "status": "deterministic"
         },
@@ -11387,6 +11567,11 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::disabled_microphone_keeps_desired_gains_but_uses_muted_running_policy",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::dropping_last_application_handle_drains_active_runtime_and_mix",
           "status": "deterministic"
         },
@@ -11457,6 +11642,16 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::original_start_faults_retain_exclusive_custody_until_joined_recovery",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::original_unknown_reconcile_joins_raw_custody_and_stops_translation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::output_switch_during_bypass_repair_never_unmutes_raw_microphone",
           "status": "deterministic"
         },
@@ -11493,6 +11688,11 @@
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::stopped_audio_reconciliation_does_not_project_nonexistent_runtime_cleanup",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stopped_missing_original_creation_uses_fresh_headphone_facts",
           "status": "deterministic"
         },
         {
@@ -15362,6 +15562,11 @@
       "id": "sidecar/tests/test_model_manifest.py::test_repository_reused_assets_resolve_through_pinned_integrity_policy"
     },
     {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-audio::lib::translator_audio::original_microphone::tests::private_pulse_cancellation_at_native_phases_confirms_cleanup"
+    },
+    {
       "code": "missing_external_prerequisite:physical_audio_graph",
       "framework": "rust",
       "id": "translator-audio::test::aec_graph::workstation_aec_graph_is_owned_and_tears_down"
@@ -15375,6 +15580,11 @@
       "code": "missing_external_prerequisite:private_pulse_fixture",
       "framework": "rust",
       "id": "translator-audio::test::pcm_stream::private_pulse_production_playback_is_muted_from_first_frame"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_native_original_zero_gain_gain_changes_and_cleanup"
     },
     {
       "code": "missing_external_prerequisite:private_pulse_fixture",

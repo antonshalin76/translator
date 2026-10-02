@@ -128,6 +128,14 @@ pub trait AudioMixController: Send + Sync {
         Ok(())
     }
 
+    fn validate_desired_for_mode(
+        &self,
+        volumes: AudioMixState,
+        _mode: crate::TranslationMixMode,
+    ) -> Result<(), ControlFailure> {
+        self.validate_desired(volumes)
+    }
+
     fn apply_desired(
         &self,
         volumes: AudioMixState,

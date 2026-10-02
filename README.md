@@ -36,6 +36,7 @@ The daemon owns audio routing and device selection. The Python sidecar owns prov
 
 - Ubuntu 24.04 or a comparable Linux desktop with PipeWire and PulseAudio compatibility.
 - `pactl`, `pw-link`, and `wpctl` available in the user session.
+- PulseAudio client library (`libpulse0`); `libpulse-dev` provides SDK discovery for Rust builds.
 - Rust 1.88+.
 - Python 3.12 and `uv`.
 - Bun for the Tauri/Vite frontend.

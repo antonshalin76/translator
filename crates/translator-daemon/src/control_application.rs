@@ -79,6 +79,10 @@ pub trait RuntimeMaintenance: Send + Sync {
     fn prepare_bypass(&self, _snapshot: &RuntimeSnapshot) -> Result<(), ControlFailure> {
         Ok(())
     }
+
+    fn cleanup_originals(&self, _deadline: std::time::Instant) -> Result<(), ControlFailure> {
+        Ok(())
+    }
 }
 
 pub struct ControlApplication {
@@ -776,16 +780,16 @@ impl RuntimeSupervisor {
         self.state = SupervisorState::CleanupPending(active);
     }
 
-    fn mix_mode(&self) -> TranslationMixMode {
-        match self.state {
+    fn mix_mode(&self, snapshot: &RuntimeSnapshot) -> Result<TranslationMixMode, ControlFailure> {
+        Ok(match self.state {
             SupervisorState::Stopped => TranslationMixMode::Bypass,
             SupervisorState::Running(_) | SupervisorState::CleanupPending(_) => {
-                TranslationMixMode::Translating
+                translating_mix_mode(snapshot)?
             }
             SupervisorState::BypassPending { .. } => TranslationMixMode::Quarantine {
                 mic_original_expected: false,
             },
-        }
+        })
     }
 
     fn status(&self) -> RuntimeStatus {
@@ -1061,8 +1065,14 @@ impl ControlOwner {
                     .prepare_start(&candidate)
                     .and_then(|()| admission_deadline(deadline))
                 {
-                    supervisor.return_start_lease(lease);
-                    return Err(error);
+                    return Err(fail_prepared_start(
+                        supervisor,
+                        store,
+                        maintenance.as_ref(),
+                        lease,
+                        error,
+                        deadline,
+                    ));
                 }
                 if microphone_enabled {
                     if let Some(audio_mix) = audio_mix {
@@ -1076,15 +1086,14 @@ impl ControlOwner {
                                 mic_original_expected,
                             })
                         {
-                            if error.code == "audio_mix_state_unknown" {
-                                commit_projection(
-                                    store,
-                                    RuntimeStatus::Failed,
-                                    Some(AudioMixKnowledge::AudioMixStateUnknown),
-                                );
-                            }
-                            supervisor.return_start_lease(lease);
-                            return Err(error);
+                            return Err(fail_prepared_start(
+                                supervisor,
+                                store,
+                                maintenance.as_ref(),
+                                lease,
+                                error,
+                                deadline,
+                            ));
                         }
                     }
                 }
@@ -1102,21 +1111,17 @@ impl ControlOwner {
                     .flatten();
                 if let Some(audio_mix) = audio_mix
                     && let Err(error) =
-                        audio_mix.reconcile_committed(TranslationMixMode::Translating)
+                        audio_mix.reconcile_committed(translating_mix_mode(&candidate)?)
                 {
                     *aec_runtime_generation = None;
                     if error.code == "audio_mix_state_unknown" {
-                        let cleanup = supervisor.stop(deadline);
-                        commit_projection(
+                        return Err(handle_mix_failure(
+                            supervisor,
                             store,
-                            RuntimeStatus::CleanupPending,
-                            Some(AudioMixKnowledge::AudioMixStateUnknown),
-                        );
-                        return Err(if cleanup.is_err() {
-                            cleanup_pending()
-                        } else {
-                            error
-                        });
+                            maintenance.as_ref(),
+                            error,
+                            deadline,
+                        ));
                     }
                     stop_and_bypass(supervisor, store, bypass_services, false, deadline, None)?;
                     return Err(error);
@@ -1188,7 +1193,38 @@ impl ControlOwner {
                 let audio_mix = audio_mix.ok_or_else(audio_mix_unavailable)?;
                 if supervisor.status() == RuntimeStatus::Stopped {
                     supervisor.reserve_bypass()?;
-                    if let Err(error) = audio_mix.validate_desired(candidate.audio_mix) {
+                    let mut validated = audio_mix.validate_desired_for_mode(
+                        candidate.audio_mix,
+                        translating_mix_mode(&candidate)?,
+                    );
+                    if validated
+                        .as_ref()
+                        .is_err_and(|error| error.code == "microphone_original_unavailable")
+                    {
+                        validated = (|| {
+                            let (mut fresh, headphones) =
+                                admitted_bypass_snapshot(store, bypass_services, deadline)?;
+                            if headphones {
+                                fresh.audio_mix = candidate.audio_mix;
+                                maintenance.prepare_start(&fresh)?;
+                                admission_deadline(deadline)?;
+                            }
+                            audio_mix.validate_desired_for_mode(
+                                candidate.audio_mix,
+                                translating_mix_mode(&candidate)?,
+                            )
+                        })();
+                    }
+                    if let Err(error) = validated {
+                        if error.code == "audio_mix_state_unknown" {
+                            return Err(handle_mix_failure(
+                                supervisor,
+                                store,
+                                maintenance.as_ref(),
+                                error,
+                                deadline,
+                            ));
+                        }
                         supervisor.complete_bypass();
                         return Err(error);
                     }
@@ -1204,10 +1240,16 @@ impl ControlOwner {
                     if supervisor.status() == RuntimeStatus::CleanupPending {
                         return Err(cleanup_pending());
                     }
-                    if let Err(error) =
-                        audio_mix.apply_desired(candidate.audio_mix, supervisor.mix_mode())
+                    if let Err(error) = audio_mix
+                        .apply_desired(candidate.audio_mix, supervisor.mix_mode(&candidate)?)
                     {
-                        return Err(handle_mix_failure(supervisor, store, error, deadline));
+                        return Err(handle_mix_failure(
+                            supervisor,
+                            store,
+                            maintenance.as_ref(),
+                            error,
+                            deadline,
+                        ));
                     }
                 }
                 candidate.audio_mix_knowledge = AudioMixKnowledge::Known;
@@ -1250,8 +1292,14 @@ impl ControlOwner {
                 }
                 refreshed?;
                 let audio_mix = audio_mix.ok_or_else(audio_mix_unavailable)?;
-                if let Err(error) = audio_mix.reconcile_committed(supervisor.mix_mode()) {
-                    return Err(handle_mix_failure(supervisor, store, error, deadline));
+                if let Err(error) = audio_mix.reconcile_committed(supervisor.mix_mode(&current)?) {
+                    return Err(handle_mix_failure(
+                        supervisor,
+                        store,
+                        maintenance.as_ref(),
+                        error,
+                        deadline,
+                    ));
                 }
                 if store.snapshot().audio_mix_knowledge != AudioMixKnowledge::Known {
                     commit_projection(store, supervisor.status(), Some(AudioMixKnowledge::Known));
@@ -1471,6 +1519,24 @@ fn apply_candidate(
             admit_candidate(candidate, services.facts, services.aec_authority, deadline)?;
         let aec_protected = admitted.requires_aec_authority();
         candidate = admitted.snapshot().clone();
+        if let Err(error) = services
+            .maintenance
+            .prepare_start(&candidate)
+            .and_then(|()| admission_deadline(deadline))
+        {
+            let originals = services.maintenance.cleanup_originals(deadline.into_std());
+            let stopped = supervisor.stop(deadline);
+            commit_projection(
+                store,
+                RuntimeStatus::CleanupPending,
+                Some(AudioMixKnowledge::AudioMixStateUnknown),
+            );
+            return Err(if originals.is_err() || stopped.is_err() {
+                cleanup_pending()
+            } else {
+                error
+            });
+        }
         if let Err(error) = supervisor.reconfigure(admitted, deadline) {
             if supervisor.status() == RuntimeStatus::CleanupPending {
                 commit_projection(store, RuntimeStatus::CleanupPending, None);
@@ -1481,9 +1547,18 @@ fn apply_candidate(
             .then(|| supervisor.running_generation())
             .flatten();
         if let Some(audio_mix) = services.audio_mix
-            && let Err(error) = audio_mix.reconcile_committed(TranslationMixMode::Translating)
+            && let Err(error) = audio_mix.reconcile_committed(translating_mix_mode(&candidate)?)
         {
             *aec_runtime_generation = None;
+            if error.code == "audio_mix_state_unknown" {
+                return Err(handle_mix_failure(
+                    supervisor,
+                    store,
+                    services.maintenance,
+                    error,
+                    deadline,
+                ));
+            }
             stop_and_bypass(
                 supervisor,
                 store,
@@ -1515,9 +1590,58 @@ fn apply_candidate(
         }
         store.commit_admitted_control(candidate);
     } else {
+        if !enabled_directions(&candidate)?.microphone {
+            supervisor.reserve_bypass()?;
+            if let Err(error) = services.maintenance.prepare_bypass(&candidate) {
+                commit_projection(
+                    store,
+                    RuntimeStatus::CleanupPending,
+                    Some(AudioMixKnowledge::AudioMixStateUnknown),
+                );
+                return Err(error);
+            }
+            supervisor.complete_bypass();
+        }
         store.commit_control(candidate);
     }
     Ok(())
+}
+
+fn translating_mix_mode(snapshot: &RuntimeSnapshot) -> Result<TranslationMixMode, ControlFailure> {
+    Ok(if enabled_directions(snapshot)?.microphone {
+        TranslationMixMode::Translating
+    } else {
+        TranslationMixMode::TranslatingMicrophoneMuted
+    })
+}
+
+fn fail_prepared_start(
+    supervisor: &mut RuntimeSupervisor,
+    store: &RuntimeStore,
+    maintenance: &dyn RuntimeMaintenance,
+    lease: AudioOperationLease,
+    error: ControlFailure,
+    deadline: Instant,
+) -> ControlFailure {
+    if maintenance.cleanup_originals(deadline.into_std()).is_err() {
+        supervisor.state = SupervisorState::BypassPending { _lease: lease };
+        commit_projection(
+            store,
+            RuntimeStatus::CleanupPending,
+            Some(AudioMixKnowledge::AudioMixStateUnknown),
+        );
+        cleanup_pending()
+    } else {
+        supervisor.return_start_lease(lease);
+        if error.code == "audio_mix_state_unknown" {
+            commit_projection(
+                store,
+                RuntimeStatus::Failed,
+                Some(AudioMixKnowledge::AudioMixStateUnknown),
+            );
+        }
+        error
+    }
 }
 
 fn admission_deadline(deadline: Instant) -> Result<(), ControlFailure> {
@@ -1632,7 +1756,12 @@ fn stop_and_bypass(
         return Ok(());
     }
     supervisor.reserve_bypass()?;
+    let mut original_cleanup =
+        recover_unknown.then(|| services.maintenance.cleanup_originals(deadline.into_std()));
     let quarantine = services.audio_mix.map(|mix| {
+        if let Some(Err(error)) = original_cleanup.as_ref() {
+            return Err(*error);
+        }
         let mode = TranslationMixMode::Quarantine {
             mic_original_expected: false,
         };
@@ -1647,6 +1776,9 @@ fn stop_and_bypass(
             result
         }
     });
+    if original_cleanup.is_none() && quarantine.as_ref().is_some_and(Result::is_err) {
+        original_cleanup = Some(services.maintenance.cleanup_originals(deadline.into_std()));
+    }
     if let Err(error) = supervisor.stop(deadline) {
         commit_projection(
             store,
@@ -1658,6 +1790,14 @@ fn stop_and_bypass(
                 .map(|_| AudioMixKnowledge::AudioMixStateUnknown),
         );
         return Err(error);
+    }
+    if original_cleanup.as_ref().is_some_and(Result::is_err) {
+        commit_projection(
+            store,
+            RuntimeStatus::CleanupPending,
+            Some(AudioMixKnowledge::AudioMixStateUnknown),
+        );
+        return Err(cleanup_pending());
     }
     if services.audio_mix.is_none() {
         commit_projection(store, RuntimeStatus::CleanupPending, None);
@@ -1719,13 +1859,18 @@ fn stop_and_bypass(
             Ok(())
         }
         Err(error) => {
+            let originals = services.maintenance.cleanup_originals(deadline.into_std());
             commit_projection(
                 store,
                 RuntimeStatus::CleanupPending,
                 (error.code == "audio_mix_state_unknown")
                     .then_some(AudioMixKnowledge::AudioMixStateUnknown),
             );
-            Err(error)
+            Err(if originals.is_err() {
+                cleanup_pending()
+            } else {
+                error
+            })
         }
     }
 }
@@ -1739,6 +1884,7 @@ fn verified_bypass_mode(
     services.maintenance.prepare_bypass(&before_repair)?;
     let (current, headphones) = admitted_bypass_snapshot(store, services, deadline)?;
     let mode = if headphones
+        && enabled_directions(&current)?.microphone
         && services
             .maintenance
             .verify_bypass_custody(&current, true)
@@ -1811,16 +1957,21 @@ fn admitted_bypass_snapshot(
 fn handle_mix_failure(
     supervisor: &mut RuntimeSupervisor,
     store: &RuntimeStore,
+    maintenance: &dyn RuntimeMaintenance,
     error: ControlFailure,
     deadline: Instant,
 ) -> ControlFailure {
     if error.code == "audio_mix_state_unknown" {
-        let _ = supervisor.stop(deadline);
+        let originals = maintenance.cleanup_originals(deadline.into_std());
+        let stopped = supervisor.stop(deadline);
         commit_projection(
             store,
             RuntimeStatus::CleanupPending,
             Some(AudioMixKnowledge::AudioMixStateUnknown),
         );
+        if originals.is_err() || stopped.is_err() {
+            return cleanup_pending();
+        }
     }
     error
 }

@@ -42,4 +42,5 @@ translator-ipc = { path = "../translator-ipc" }
 uuid.workspace = true
 
 [dev-dependencies]
+libpulse-binding.workspace = true
 tempfile = "3.23"

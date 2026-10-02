@@ -2,6 +2,11 @@ schema_version = 1
 
 [[skip]]
 framework = "rust"
+id = "translator-daemon::bin::translator-daemon::tests::private_pulse_native_original_zero_gain_gain_changes_and_cleanup"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
 id = "translator-audio::test::aec_graph::workstation_aec_graph_is_owned_and_tears_down"
 code = "missing_external_prerequisite:physical_audio_graph"
 
@@ -194,3 +199,8 @@ code = "missing_external_prerequisite:private_human_evidence"
 framework = "unittest"
 id = "test_task9_desktop_run_mode.Task9DesktopRunModeTests.test_task9_validation_report_carries_task7_latency_debt"
 code = "missing_external_prerequisite:private_human_evidence"
+
+[[skip]]
+framework = "rust"
+id = "translator-audio::lib::translator_audio::original_microphone::tests::private_pulse_cancellation_at_native_phases_confirms_cleanup"
+code = "missing_external_prerequisite:private_pulse_fixture"
