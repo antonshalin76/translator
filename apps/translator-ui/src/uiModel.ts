@@ -455,7 +455,7 @@ export function currentAudioMixPatchIntent(
 ): ReturnType<typeof audioMixPatchIntent> | null {
   const current = normalizeAudioMix(snapshot.audio_mix)[field];
   const next = clampVolume(value);
-  if (current !== next) {
+  if (current === next) {
     return null;
   }
   return audioMixPatchIntent(field, next);

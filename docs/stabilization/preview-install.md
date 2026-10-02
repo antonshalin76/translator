@@ -78,6 +78,20 @@ The two direction loops read capture while awaiting playback writes, with bounde
 PCM queues. Shared GPU inference remains serialized and translation waits for
 speech segmentation; full duplex does not mean token-streamed ASR/MT or zero
 latency. A failed/partial playback cannot be reused before cleanup.
+Volume controls display acknowledged daemon values, not a successful-looking
+local snapshot before the request completes. A missing-original rejection
+preserves the previous mix and running translation; its error remains visible until another
+control command or the daemon reconnects. Status results obtained before a
+control command cannot overwrite that command's acknowledgement.
+An unknown physical mixer state still stops/quarantines translation for safety.
+
+Leave `Microphone original` at 0% in a fresh preview session. Safe creation of
+that raw-microphone loopback is not implemented: a positive value is rejected
+with `microphone_original_unavailable`, rather than creating a briefly unmuted
+stream. This limitation does not disable RU-to-EN microphone translation or
+EN-to-RU incoming translation; their two translation sliders remain usable.
+The preview does not claim that the original-volume mixer is fully implemented.
+
 Cold Start uses the existing runtime's bounded 130-second readiness budget;
 Stop keeps its separate eight-second cleanup budget. Models are not retained
 after Stop, so another Start is cold again. Before opening PCM after readiness,
@@ -128,7 +142,7 @@ or physical acoustic latency. Runtime regressions separately verify capture
 and provider acceptance during a held playback write, payload order, queue
 overflow, capture EOF and cancellation.
 
-The final embedded native UI passed all five isolated checks: asset loading,
+The earlier embedded native UI passed all five isolated checks: asset loading,
 disconnected admission, three viewports, keyboard focus across polling and
 negative focus-identity cases. Window/driver cleanup completed. This is not
 real-call app routing, a soak result or a stable-release approval.
@@ -152,3 +166,10 @@ of embedding the frontend. The packager checks the actual UI binary with
 `--check-bundled-ui` before creating output or copying models. This check needs
 no display, daemon connection or audio. It does not replace the separate native
 window test or translation acceptance.
+
+The volume correction adds three connected checks to that native window suite:
+rejection without optimistic volume state, successful translated-volume change
+with a held older native status result, and separation of unavailable AEC from
+command errors. All eight checks pass against the rebuilt UI using a private
+authenticated HTTP fixture, with no audio or model calls and complete cleanup.
+This does not validate a real microphone-original stream or live call quality.

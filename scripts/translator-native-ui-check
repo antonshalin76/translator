@@ -14,7 +14,9 @@ import os
 import signal
 import socket
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from selenium import webdriver
@@ -38,6 +40,7 @@ def arguments():
     parser.add_argument("--driver-port", type=int, default=45697)
     parser.add_argument("--native-port", type=int, default=45698)
     parser.add_argument("--daemon-port", type=int, default=45699)
+    parser.add_argument("--connected-mix-fixture", action="store_true")
     args = parser.parse_args()
     ports = (args.driver_port, args.native_port, args.daemon_port)
     if len(set(ports)) != 3 or any(not 1024 <= port <= 65535 for port in ports):
@@ -74,6 +77,213 @@ def check(name, fn, rows):
         )
 
 
+class MixFixture:
+    """Private HTTP fixture: no audio, models, processes or daemon forwarding."""
+
+    def __init__(self, port, runtime):
+        self.token = os.urandom(32).hex()
+        token_dir = runtime / "translator"
+        token_dir.mkdir(mode=0o700)
+        (token_dir / "control.token").write_text(self.token, encoding="ascii")
+        self.snapshot = dict(
+            runtime_status="running",
+            translation_running=True,
+            debug_text_enabled=False,
+            debug_capture_enabled=False,
+            provider_id="local",
+            audio_leaves_machine=False,
+            audio_mix=dict(
+                microphone_original_percent=0,
+                microphone_translation_percent=100,
+                speaker_original_percent=0,
+                speaker_translation_percent=100,
+            ),
+            directions=[
+                dict(
+                    direction_id=direction,
+                    source_language=source,
+                    target_language=target,
+                    enabled=True,
+                    runtime_status="running",
+                    voice_profile=dict(language=target, gender="male", engine="piper"),
+                )
+                for direction, source, target in (
+                    ("microphone", "ru", "en"),
+                    ("speaker", "en", "ru"),
+                )
+            ],
+        )
+        self.patches = []
+        self.auth_errors = 0
+        self.patch_entered = threading.Event()
+        self.lock = threading.Lock()
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, status, value):
+                payload = json.dumps(value).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def authenticated(self):
+                if self.headers.get("Authorization") == "Bearer " + fixture.token:
+                    return True
+                with fixture.lock:
+                    fixture.auth_errors += 1
+                self.reply(401, dict(code="invalid_bearer"))
+                return False
+
+            def do_GET(self):
+                if not self.authenticated():
+                    return
+                if self.path == "/v1/status":
+                    with fixture.lock:
+                        snapshot = json.loads(json.dumps(fixture.snapshot))
+                    self.reply(200, snapshot)
+                elif self.path == "/v1/aec-calibration":
+                    self.reply(503, dict(code="aec_calibration_controller_unavailable"))
+                else:
+                    self.reply(404, dict(code="not_found"))
+
+            def do_PATCH(self):
+                if not self.authenticated():
+                    return
+                if self.path != "/v1/audio-mix":
+                    self.reply(404, dict(code="not_found"))
+                    return
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 1024:
+                    self.reply(413, dict(code="body_too_large"))
+                    return
+                patch = json.loads(self.rfile.read(size))
+                patch = {
+                    key: value for key, value in patch.items() if value is not None
+                }
+                if any(
+                    key not in fixture.snapshot["audio_mix"]
+                    or type(value) is not int
+                    or not 0 <= value <= 100
+                    for key, value in patch.items()
+                ):
+                    self.reply(400, dict(code="invalid_audio_mix_volume"))
+                    return
+                with fixture.lock:
+                    fixture.patches.append(patch)
+                fixture.patch_entered.set()
+                if patch.get("microphone_original_percent", 0) > 0:
+                    self.reply(409, dict(code="microphone_original_unavailable"))
+                    return
+                with fixture.lock:
+                    fixture.snapshot["audio_mix"].update(patch)
+                    snapshot = json.loads(json.dumps(fixture.snapshot))
+                self.reply(200, snapshot)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        return not self.thread.is_alive()
+
+
+def connected_mix_checks(browser, wait, fixture, rows):
+    def slider_value(field):
+        return browser.find_element(By.ID, f"audio-mix-{field}").get_attribute("value")
+
+    def change(field, value):
+        return browser.execute_script(
+            "const input=document.getElementById(arguments[0]);input.value=arguments[1];"
+            "input.dispatchEvent(new Event('input',{bubbles:true}));"
+            "input.dispatchEvent(new Event('change',{bubbles:true}));"
+            "return {value:document.getElementById(arguments[0]).value,"
+            "otherDisabled:document.getElementById('audio-mix-speaker_translation_percent').disabled}",
+            f"audio-mix-{field}",
+            str(value),
+        )
+
+    def rejection():
+        wait.until(
+            lambda page: (
+                page.find_element(By.CSS_SELECTOR, ".build-state").text
+                == "Daemon connected"
+            )
+        )
+        pending = change("microphone_original_percent", 100)
+        assert fixture.patch_entered.wait(3)
+        assert pending == dict(value="0", otherDisabled=True)
+        wait.until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, ".warning-error"))
+        )
+        warning = browser.find_element(By.CSS_SELECTOR, ".warning-error").text
+        assert "Оригинал микрофона недоступен" in warning
+        assert "daemon_request_failed" not in warning
+        assert slider_value("microphone_original_percent") == "0"
+        assert browser.find_element(By.ID, "command-translation").text == "Stop"
+        assert fixture.patches == [dict(microphone_original_percent=100)]
+        return dict(acknowledged_original=0, running_preserved=True, mutations=1)
+
+    check("connected_mix_rejection_projection", rejection, rows)
+
+    def accepted_and_stale_poll():
+        # Hold one actual native result at Tauri's debug callback registry. Its
+        # invoke/global descriptors are immutable; no production IPC is changed.
+        browser.execute_script(
+            "const registry=window.__TAURI_INTERNALS__.callbacks;"
+            "const original=registry.set;"
+            "window.__translatorTestPoll={entered:false};"
+            "registry.set=function(id,callback){return original.call(this,id,value=>{"
+            "if(window.__translatorTestPoll.entered||!value?.audio_mix){callback(value);return}"
+            "window.__translatorTestPoll.entered=true;"
+            "registry.set=original;"
+            "window.__translatorTestPoll.release=()=>callback(value)})};"
+            "if(registry.set===original)throw new Error('native_test_seam_unavailable')"
+        )
+        wait.until(
+            lambda page: page.execute_script(
+                "return window.__translatorTestPoll.entered"
+            )
+        )
+        before = len(fixture.patches)
+        change("microphone_translation_percent", 70)
+        wait.until(lambda _: slider_value("microphone_translation_percent") == "70")
+        browser.execute_script("window.__translatorTestPoll.release()")
+        values = browser.execute_async_script(
+            "const done=arguments[arguments.length-1],values=[];"
+            "const timer=setInterval(()=>values.push(document.getElementById('audio-mix-microphone_translation_percent').value),10);"
+            "setTimeout(()=>{clearInterval(timer);done(values)},400)"
+        )
+        assert values and all(value == "70" for value in values)
+        assert len(fixture.patches) == before + 1
+        assert fixture.patches[-1] == dict(microphone_translation_percent=70)
+        assert slider_value("microphone_original_percent") == "0"
+        return dict(
+            acknowledged_translation=70,
+            stale_native_promise_discarded=True,
+            mutations=1,
+        )
+
+    check("connected_mix_acknowledgement_and_stale_poll", accepted_and_stale_poll, rows)
+
+    def calibration_separation():
+        assert not browser.find_elements(By.CSS_SELECTOR, ".warning-error")
+        assert "Контроллер недоступен" in browser.find_element(By.TAG_NAME, "body").text
+        assert fixture.auth_errors == 0
+        return dict(
+            aec_unavailable_not_command_error=True, authentication_enforced=True
+        )
+
+    check("connected_calibration_error_separate", calibration_separation, rows)
+
+
 def main() -> int:
     args, PORTS = arguments()
     PACKET = args.output_dir.resolve()
@@ -89,6 +299,7 @@ def main() -> int:
         str(path.relative_to(ROOT)): digest(path)
         for path in (
             ROOT / "apps/translator-ui/src/main.ts",
+            ROOT / "apps/translator-ui/src/uiModel.ts",
             ROOT / "apps/translator-ui/src/styles.css",
             ROOT / "apps/translator-ui/src-tauri/src/main.rs",
             ROOT / "apps/translator-ui/src-tauri/tauri.conf.json",
@@ -115,6 +326,7 @@ def main() -> int:
     rows = []
     browser = None
     cleanup = "COMPLETE"
+    fixture = None
     with (PACKET / "driver.log").open("xb") as log:
         process = subprocess.Popen(
             [
@@ -283,6 +495,9 @@ def main() -> int:
                 )
 
             check("semantic_focus_identity_negatives", identity_negatives, rows)
+            if args.connected_mix_fixture:
+                fixture = MixFixture(PORTS[2], runtime)
+                connected_mix_checks(browser, wait, fixture, rows)
         except Exception as error:
             message = (
                 str(getattr(error, "msg", ""))
@@ -299,6 +514,8 @@ def main() -> int:
                 )
             )
         finally:
+            if fixture is not None and not fixture.close():
+                cleanup = "UNCERTAIN"
             if browser is not None:
                 try:
                     browser.quit()
@@ -327,7 +544,9 @@ def main() -> int:
         cleanup = "UNCERTAIN"
     receipt = dict(
         schema=1,
-        scope="native_asset_disconnected_diagnostic",
+        scope="native_asset_disconnected_and_isolated_mix"
+        if args.connected_mix_fixture
+        else "native_asset_disconnected_diagnostic",
         build_profile=args.build_profile,
         bindings=bindings,
         checks=rows,

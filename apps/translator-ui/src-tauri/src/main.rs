@@ -1103,9 +1103,16 @@ fn problem_code(body: &str) -> Option<&'static str> {
         "routing_controller_failed" => Some("routing_controller_failed"),
         "manual_route_failed" => Some("manual_route_failed"),
         "audio_mix_apply_failed" => Some("audio_mix_apply_failed"),
+        "microphone_original_unavailable" => Some("microphone_original_unavailable"),
+        "audio_mix_discovery_failed" => Some("audio_mix_discovery_failed"),
+        "audio_mix_state_unknown" => Some("audio_mix_state_unknown"),
+        "audio_mix_controller_unavailable" => Some("audio_mix_controller_unavailable"),
+        "original_loopback_custody_unknown" => Some("original_loopback_custody_unknown"),
+        "aec_original_mix_unavailable" => Some("aec_original_mix_unavailable"),
         "audio_mix_controller_failed" => Some("audio_mix_controller_failed"),
         "invalid_audio_mix_volume" => Some("invalid_audio_mix_volume"),
         "self_test_unavailable" => Some("self_test_unavailable"),
+        "aec_calibration_controller_unavailable" => Some("aec_calibration_controller_unavailable"),
         "self_test_controller_failed" => Some("self_test_controller_failed"),
         "debug_capture_unavailable" => Some("debug_capture_unavailable"),
         "debug_capture_stopped" => Some("debug_capture_stopped"),
@@ -1185,6 +1192,29 @@ mod tests {
             problem_code(r#"{"code":"translation_precondition_failed"}"#),
             Some("translation_precondition_failed")
         );
+    }
+
+    #[test]
+    fn problem_code_preserves_known_mix_rejections_without_private_details() {
+        for code in [
+            "microphone_original_unavailable",
+            "audio_mix_discovery_failed",
+            "audio_mix_state_unknown",
+            "audio_mix_controller_unavailable",
+            "original_loopback_custody_unknown",
+            "aec_original_mix_unavailable",
+            "aec_calibration_controller_unavailable",
+        ] {
+            let body = json!({"code": code, "detail": "PRIVATE_DETAIL_SENTINEL"}).to_string();
+            assert_eq!(problem_code(&body), Some(code));
+        }
+        for body in [
+            r#"{"code":"PRIVATE_UNKNOWN_CODE","detail":"PRIVATE_DETAIL_SENTINEL"}"#,
+            r#"{"code":null}"#,
+            "PRIVATE_NON_JSON_SENTINEL",
+        ] {
+            assert_eq!(problem_code(body), None);
+        }
     }
 
     #[test]

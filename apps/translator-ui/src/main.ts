@@ -19,7 +19,6 @@ import {
   type AudioDirection,
   type AecCalibrationStatus,
   type AudioMixField,
-  type AudioMixVolumes,
   type DebugControl,
   type DirectionState,
   type Language,
@@ -52,6 +51,7 @@ const audioMixTimers: Partial<Record<AudioMixField, number>> = {};
 let lastDebugTextKey: string | null = null;
 let wasDisconnected = true;
 let calibrationRevision = 0;
+let controlRevision = 0;
 
 const state: AppState = {
   snapshot: defaultSnapshot(),
@@ -751,6 +751,7 @@ async function invokeAction(
     return;
   }
   state.busy = busyKey;
+  controlRevision += 1;
   state.error = null;
   render();
   try {
@@ -760,9 +761,17 @@ async function invokeAction(
     }
     applySnapshot(snapshot);
   } catch (error) {
-    state.error = safeErrorMessage(error);
-    render();
+    const message = safeErrorMessage(error);
+    try {
+      applySnapshot(await invokeDaemon<RuntimeSnapshot>("translator_status"));
+    } catch {
+      state.connected = false;
+      wasDisconnected = true;
+      clearDebugText("daemon_restart");
+    }
+    state.error = message;
   } finally {
+    controlRevision += 1;
     state.busy = null;
     render();
   }
@@ -773,6 +782,7 @@ async function invokeCalibrationAction(
   attemptId?: string,
 ): Promise<void> {
   calibrationRevision += 1;
+  controlRevision += 1;
   state.busy = "aec-calibration";
   state.calibrationError = null;
   if (command === "translator_cancel_aec_calibration") {
@@ -792,6 +802,7 @@ async function invokeCalibrationAction(
     }
   } finally {
     calibrationRevision += 1;
+    controlRevision += 1;
     state.busy = null;
     render();
   }
@@ -805,7 +816,6 @@ function applyCalibrationStatus(status: AecCalibrationStatus): void {
 }
 
 function queueAudioMixChange(field: AudioMixField, value: number): void {
-  updateLocalAudioMix(field, value);
   if (audioMixTimers[field] !== undefined) {
     window.clearTimeout(audioMixTimers[field]);
   }
@@ -816,7 +826,6 @@ function queueAudioMixChange(field: AudioMixField, value: number): void {
 }
 
 function flushAudioMixChange(field: AudioMixField, value: number): void {
-  updateLocalAudioMix(field, value);
   if (audioMixTimers[field] !== undefined) {
     window.clearTimeout(audioMixTimers[field]);
     delete audioMixTimers[field];
@@ -825,29 +834,21 @@ function flushAudioMixChange(field: AudioMixField, value: number): void {
 }
 
 async function invokeAudioMixChange(field: AudioMixField, value: number): Promise<void> {
-  if (!state.connected) {
+  if (!state.connected || state.busy !== null) {
     return;
   }
   const intent = currentAudioMixPatchIntent(field, value, state.snapshot);
   if (!intent) {
     return;
   }
-  try {
-    const snapshot = await invokeDaemon<RuntimeSnapshot>(intent.command, intent.args);
-    applySnapshot(snapshot);
-  } catch (error) {
-    state.error = safeErrorMessage(error);
-    state.lastUpdated = new Date();
-    render();
-  }
-}
-
-function updateLocalAudioMix(field: AudioMixField, value: number): void {
-  const current: AudioMixVolumes = buildUiModel(state.snapshot).audioMix;
-  state.snapshot.audio_mix = { ...current, [field]: value };
+  await invokeAction(intent.command, intent.args, "audio-mix");
 }
 
 async function refreshStatus(): Promise<void> {
+  if (state.busy !== null) {
+    return;
+  }
+  const revision = controlRevision;
   if (!tauriRuntimeAvailable()) {
     state.connected = false;
     state.error = "Tauri runtime недоступен: открыт browser preview.";
@@ -858,14 +859,20 @@ async function refreshStatus(): Promise<void> {
 
   try {
     const snapshot = await invokeDaemon<RuntimeSnapshot>("translator_status");
+    if (revision !== controlRevision || state.busy !== null) {
+      return;
+    }
     if (wasDisconnected) {
       clearDebugText("daemon_restart");
+      state.error = null;
     }
     wasDisconnected = false;
     state.connected = true;
-    state.error = null;
     applySnapshot(snapshot);
   } catch (error) {
+    if (revision !== controlRevision || state.busy !== null) {
+      return;
+    }
     if (!wasDisconnected) {
       clearDebugText("daemon_restart");
     }
@@ -1111,7 +1118,14 @@ function preconditionsList(preconditions: Record<string, unknown> | null): HTMLE
 
 function safeErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "code" in error) {
-    return String((error as { code: unknown }).code);
+    const code = String((error as { code: unknown }).code);
+    if (code === "microphone_original_unavailable") {
+      return "Оригинал микрофона недоступен: безопасный аудиопоток не создан. Громкость не изменена.";
+    }
+    if (code === "audio_mix_discovery_failed") {
+      return "Аудиопоток для изменения громкости недоступен. Громкость не изменена.";
+    }
+    return code;
   }
   if (error instanceof Error) {
     return error.message;

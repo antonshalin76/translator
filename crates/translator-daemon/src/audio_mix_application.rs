@@ -120,7 +120,7 @@ impl<R: CommandRunner> AudioMixApplication<R> {
                 .iter()
                 .any(|entry| entry.target() == AudioMixTarget::MicrophoneOriginal)
         {
-            return Err(failure("audio_mix_discovery_failed"));
+            return Err(failure("microphone_original_unavailable"));
         }
         if matches!(
             mode,
@@ -280,7 +280,7 @@ impl<R: CommandRunner + Send + Sync> AudioMixController for AudioMixApplication<
                 .iter()
                 .any(|entry| entry.target() == AudioMixTarget::MicrophoneOriginal)
             {
-                return Err(failure("audio_mix_discovery_failed"));
+                return Err(failure("microphone_original_unavailable"));
             }
         }
         Ok(())

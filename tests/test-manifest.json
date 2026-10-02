@@ -118,7 +118,7 @@
         },
         {
           "file": "apps/translator-ui/src/uiModel.test.ts",
-          "id": "apps/translator-ui/src/uiModel.test.ts::audio mix controls::stale audio mix slider intent is dropped after snapshot refresh",
+          "id": "apps/translator-ui/src/uiModel.test.ts::audio mix controls::volume intent compares against acknowledged state without mutating it",
           "reason": "",
           "status": "deterministic"
         },
@@ -7513,7 +7513,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1009,
+      "node_count": 1012,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -11536,6 +11536,16 @@
           "status": "deterministic"
         },
         {
+          "file": "crates/translator-daemon/tests/control_audio_mix.rs",
+          "id": "translator-daemon::test::control_audio_mix::missing_original_rejection_preserves_running_mix_and_translated_controls",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_audio_mix.rs",
+          "id": "translator-daemon::test::control_audio_mix::missing_original_rejection_preserves_stopped_mix",
+          "status": "deterministic"
+        },
+        {
           "file": "crates/translator-daemon/tests/control_token.rs",
           "id": "translator-daemon::test::control_token::concurrent_lease_fails_without_rotating_token_then_succeeds_after_drop",
           "status": "deterministic"
@@ -12548,6 +12558,11 @@
         {
           "file": "apps/translator-ui/src-tauri/src/main.rs",
           "id": "translator-ui::bin::translator-ui::tests::problem_code_keeps_translation_precondition_visible",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src-tauri/src/main.rs",
+          "id": "translator-ui::bin::translator-ui::tests::problem_code_preserves_known_mix_rejections_without_private_details",
           "status": "deterministic"
         },
         {

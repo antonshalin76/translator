@@ -421,7 +421,7 @@ describe("audio mix controls", () => {
     });
   });
 
-  test("stale audio mix slider intent is dropped after snapshot refresh", () => {
+  test("volume intent compares against acknowledged state without mutating it", () => {
     const refreshed: RuntimeSnapshot = {
       ...snapshotWithRawDebugText,
       audio_mix: {
@@ -434,13 +434,14 @@ describe("audio mix controls", () => {
 
     expect(
       currentAudioMixPatchIntent("speaker_translation_percent", 52, refreshed),
-    ).toBeNull();
-    expect(
-      currentAudioMixPatchIntent("speaker_translation_percent", 100, refreshed),
     ).toEqual({
       command: "translator_set_audio_mix",
-      args: { speakerTranslationPercent: 100 },
+      args: { speakerTranslationPercent: 52 },
     });
+    expect(
+      currentAudioMixPatchIntent("speaker_translation_percent", 100, refreshed),
+    ).toBeNull();
+    expect(refreshed.audio_mix?.speaker_translation_percent).toBe(100);
   });
 });
 

@@ -27,6 +27,7 @@ const DEADLINE: Duration = Duration::from_secs(2);
 struct PulseState {
     volumes: [u32; 3],
     sets: Vec<Vec<String>>,
+    microphone_original_present: bool,
 }
 
 struct Pulse {
@@ -43,6 +44,7 @@ impl Default for Pulse {
             state: Mutex::new(PulseState {
                 volumes: [32768, 49152, 32768],
                 sets: Vec::new(),
+                microphone_original_present: true,
             }),
             fail_at: AtomicUsize::new(0),
             block_at: AtomicUsize::new(0),
@@ -74,20 +76,23 @@ impl CommandRunner for PulseRunner {
                                 "volume": {"mono": {"value": state.volumes[index]}},
                                 "properties": {"application.name": "translator-daemon", "media.name": media},
                             })).collect();
-                    inputs.push(json!({
+                    if state.microphone_original_present {
+                        inputs.push(json!({
                         "index": 45,
                         "owner_module": "9002",
                         "sink": 1,
                         "channel_map": "mono",
                         "volume": {"mono": {"value": state.volumes[2]}},
                         "properties": {"translator.owner": "true", "media.name": "loopback-microphone-original"},
-                    }));
+                        }));
+                    }
                     inputs
                 }
-                "source-outputs" => vec![json!({
+                "source-outputs" if state.microphone_original_present => vec![json!({
                     "owner_module": "9002", "source": 0,
                     "properties": {"translator.owner": "true", "media.name": "loopback-microphone-original"},
                 })],
+                "source-outputs" => Vec::new(),
                 "sources" => vec![json!({"index": 0, "name": "alsa_input.physical"})],
                 "sinks" => vec![json!({"index": 1, "name": "translator_mic_out"})],
                 other => panic!("unexpected pactl list: {other}"),
@@ -266,6 +271,80 @@ async fn snapshot_event(body: &mut Body) -> Value {
             .unwrap(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn missing_original_rejection_preserves_running_mix_and_translated_controls() {
+    let (pulse, store, control, router) = fixture();
+    pulse.state.lock().unwrap().microphone_original_present = false;
+    control.execute(ControlCommand::Start).await.unwrap();
+    let before = store.snapshot();
+    let writes_before = pulse.state.lock().unwrap().sets.len();
+    let mut events = router
+        .clone()
+        .oneshot(request(Method::GET, "/v1/events/stream", ""))
+        .await
+        .unwrap()
+        .into_body();
+    let _ = snapshot_event(&mut events).await;
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            "/v1/audio-mix",
+            r#"{"microphone_original_percent":100}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let problem: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(problem["code"], "microphone_original_unavailable");
+    assert_eq!(store.snapshot().audio_mix, before.audio_mix);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Running);
+    assert_eq!(pulse.state.lock().unwrap().sets.len(), writes_before);
+    assert!(futures_util::poll!(events.frame()).is_pending());
+    let response = router
+        .oneshot(request(
+            Method::PATCH,
+            "/v1/audio-mix",
+            r#"{"microphone_translation_percent":80,"speaker_translation_percent":90}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(store.snapshot().audio_mix.microphone_original_percent, 0);
+    assert_eq!(
+        store.snapshot().audio_mix.microphone_translation_percent,
+        80
+    );
+    assert_eq!(store.snapshot().audio_mix.speaker_translation_percent, 90);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Running);
+    drop(events);
+    control.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_original_rejection_preserves_stopped_mix() {
+    let (pulse, store, control, router) = fixture();
+    pulse.state.lock().unwrap().microphone_original_present = false;
+    let before = store.snapshot();
+    let response = router
+        .oneshot(request(
+            Method::PATCH,
+            "/v1/audio-mix",
+            r#"{"microphone_original_percent":100}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let problem: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(problem["code"], "microphone_original_unavailable");
+    assert_eq!(store.snapshot().audio_mix, before.audio_mix);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert!(pulse.state.lock().unwrap().sets.is_empty());
+    control.shutdown().await.unwrap();
 }
 
 #[tokio::test]
