@@ -7513,7 +7513,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1052,
+      "node_count": 1055,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -7682,6 +7682,11 @@
         },
         {
           "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::capture_request_remains_bounded_after_server_fragment_negotiation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::original_microphone::tests::claimed_or_dead_worker_custody_never_looks_like_an_empty_registry",
           "status": "deterministic"
         },
@@ -7713,6 +7718,16 @@
         {
           "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::original_microphone::tests::native_properties_bind_both_streams_and_context_to_one_session",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::native_session_identity_still_rejects_each_required_property_mismatch",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::native_session_identity_survives_server_restoration_policy_projection",
           "status": "deterministic"
         },
         {

@@ -1,4 +1,4 @@
-# Translator private preview, 2026-10-02
+# Translator private preview, 2026-10-03
 
 This is a personal, host-specific Linux x86-64 preview, not a stable release.
 It uses Whisper large-v3-turbo, Hy-MT2-1.8B Q4_K_M and four Piper medium voices.
@@ -32,6 +32,7 @@ but this is not an atomic cross-service audio lock.
 From the extracted short directory:
 
 ```bash
+set -e
 sha256sum -c SHA256SUMS --quiet
 ./scripts/translator-desktop --preview install
 translator-preview up
@@ -41,6 +42,31 @@ Installation creates only the preview command, unit and private configuration.
 It does not start/enable a service or create UI autostart. First installation
 only: uninstall an existing preview before installing a different payload.
 Production files and its configuration are not replaced.
+
+### Replace an installed preview
+
+The installer refuses an existing preview instead of overwriting it. Running
+`up` after a failed installation can restart the old payload. From the new
+verified, permanently extracted directory, use this fail-fast sequence:
+
+```bash
+set -e
+sha256sum -c SHA256SUMS --quiet
+translator-preview down
+translator-preview uninstall
+./scripts/translator-desktop --preview install
+translator-preview up
+pid="$(systemctl --user show translator-preview.service -p MainPID --value)"
+test "$pid" -gt 0
+test "$(readlink -f "/proc/$pid/exe")" = "$(pwd -P)/target/release/translator-daemon"
+sha256sum target/release/translator-daemon "/proc/$pid/exe"
+```
+
+The two hashes must match. This interrupts only preview translation and
+replaces its generated command/unit; keep the old extracted payload for
+rollback. Private settings and model payloads remain. After the restart,
+confirm the currently selected headphones again before bidirectional Start.
+An unchanged-looking UI does not identify the running daemon version.
 
 The preview API uses loopback port 47682 and a separate private control token.
 Runtime/state and graph journals are separated; audio endpoints are not.
@@ -192,6 +218,39 @@ with a held older native status result, and separation of unavailable AEC from
 command errors. All eight checks pass against the rebuilt UI using a private
 authenticated HTTP fixture, with no audio or model calls and complete cleanup.
 This does not validate a real microphone-original stream or live call quality.
+
+## R11 native identity on PipeWire
+
+The installed R10 passed packaging but still rejected actual host Start before
+model startup. Its native identity check incorrectly required the server to
+echo the requested `module-stream-restore.id` unchanged. PipeWire 1.0.5
+[projects that key as a server-generated stream group](https://github.com/PipeWire/pipewire/blob/1.0.5/src/modules/module-protocol-pulse/message.c#L473-L534).
+R11 uses the existing opaque session UUID, application/PID and stream media
+name for identity; it still checks the retained client, stream/endpoint indices,
+sample format/map, volumes, cancellation and custody. The requested restoration
+hint remains for PulseAudio but is not identity proof. First-frame zero gain,
+finite buffering and acoustic admission are unchanged.
+
+The original R9/R10 host failures remain failures, not successful startups.
+Use the exact installed binary/hash check above when replacing those packages.
+
+R11 also failed the actual Jieli headset Start: its native pending PCM queue
+exceeded the 9,600-byte bound after 551 ms; HTTP returned
+`audio_mix_state_unknown` instead of Running. The source/private-Pulse passes
+do not override this failure. R11 is a failed candidate, not a working upgrade.
+The installed fallback is R8 with microphone original at 0%; positive original
+microphone gain remains unavailable there. Keep the finite bounds and diagnose
+the native capture/activation/steady playback lifecycle as one transport scope,
+rather than increasing buffers or attributing the backlog to unproved clock drift.
+
+## R10 PipeWire capture request
+
+PipeWire 1.0.5 [reserves at least four capture fragments](https://github.com/PipeWire/pipewire/blob/1.0.5/src/modules/module-protocol-pulse/pulse-server.c#L627-L633).
+The earlier 1,920-byte fragment caused its negotiated capture maximum to exceed
+the fixed 4,800-byte bound. R10 requests 1,200-byte fragments while retaining
+the same capture/playback/pending limits and all identity, mute, activation,
+cancellation and cleanup checks. It does not raise the allowed buffering or
+change the speech models. Backend compatibility is separate from call quality.
 
 ## R9 original-microphone verification
 

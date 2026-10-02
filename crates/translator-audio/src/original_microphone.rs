@@ -1252,11 +1252,8 @@ fn properties_match(
             == Some(registration.process_id.to_string().as_str())
         && properties.get_str(SESSION_PROPERTY).as_deref()
             == Some(registration.session_id.to_string().as_str())
-        && name.is_none_or(|name| {
-            properties.get_str(properties::MEDIA_NAME).as_deref() == Some(name)
-                && properties.get_str("module-stream-restore.id").as_deref()
-                    == Some(format!("{name}.{}", registration.session_id).as_str())
-        })
+        && name
+            .is_none_or(|name| properties.get_str(properties::MEDIA_NAME).as_deref() == Some(name))
 }
 
 fn sample_spec() -> sample::Spec {
@@ -1302,7 +1299,8 @@ fn capture_buffer() -> BufferAttr {
         tlength: u32::MAX,
         prebuf: u32::MAX,
         minreq: u32::MAX,
-        fragsize: 1_920,
+        // PipeWire needs room for four fragments without increasing maxlength.
+        fragsize: CAPTURE_BYTES / 4,
     }
 }
 
@@ -1786,6 +1784,15 @@ mod tests {
     }
 
     #[test]
+    fn capture_request_remains_bounded_after_server_fragment_negotiation() {
+        let mut negotiated = capture_buffer();
+        assert_eq!(negotiated.maxlength, 4_800);
+        // PipeWire queues at least four capture fragments, even for a lower maxlength.
+        negotiated.maxlength = negotiated.maxlength.max(4 * negotiated.fragsize);
+        assert_eq!(validate_buffers(&negotiated, &playback_buffer()), Ok(()));
+    }
+
+    #[test]
     fn negotiated_buffers_and_bridge_total_at_most_two_hundred_ms() {
         let capture = capture_buffer();
         let playback = playback_buffer();
@@ -1796,6 +1803,18 @@ mod tests {
         oversized.maxlength += 2;
         assert_eq!(
             validate_buffers(&oversized, &playback),
+            Err(OriginalMicrophoneError::Buffer)
+        );
+        let mut unaligned = capture;
+        unaligned.maxlength -= 1;
+        assert_eq!(
+            validate_buffers(&unaligned, &playback),
+            Err(OriginalMicrophoneError::Buffer)
+        );
+        unaligned = capture;
+        unaligned.fragsize -= 1;
+        assert_eq!(
+            validate_buffers(&unaligned, &playback),
             Err(OriginalMicrophoneError::Buffer)
         );
         let mut oversized = playback;
@@ -1891,6 +1910,72 @@ mod tests {
         assert_eq!(sample_spec().channels, 1);
         assert_eq!(sample_spec().rate, 48_000);
         assert_eq!(sample_spec().format, sample::Format::S16le);
+    }
+
+    #[test]
+    fn native_session_identity_survives_server_restoration_policy_projection() {
+        let registry = OriginalMicrophoneRegistry::default();
+        let registration = fixture(&registry);
+        for (name, server_key) in [
+            (
+                MICROPHONE_ORIGINAL_CAPTURE,
+                "source-output-by-application-name:translator-daemon",
+            ),
+            (
+                MICROPHONE_ORIGINAL_PLAYBACK,
+                "sink-input-by-application-name:translator-daemon",
+            ),
+        ] {
+            let mut props = native_properties(registration.session_id, Some(name)).unwrap();
+            props
+                .set_str("module-stream-restore.id", server_key)
+                .unwrap();
+            assert!(properties_match(&props, &registration, Some(name)));
+            props.unset("module-stream-restore.id").unwrap();
+            assert!(properties_match(&props, &registration, Some(name)));
+        }
+    }
+
+    #[test]
+    fn native_session_identity_still_rejects_each_required_property_mismatch() {
+        let registry = OriginalMicrophoneRegistry::default();
+        let registration = fixture(&registry);
+        for name in [
+            None,
+            Some(MICROPHONE_ORIGINAL_CAPTURE),
+            Some(MICROPHONE_ORIGINAL_PLAYBACK),
+        ] {
+            let baseline = || {
+                let mut props = native_properties(registration.session_id, name).unwrap();
+                props
+                    .set_str("module-stream-restore.id", "server-owned-restoration-group")
+                    .unwrap();
+                assert!(properties_match(&props, &registration, name));
+                props
+            };
+            let mut required = vec![
+                (
+                    properties::APPLICATION_NAME,
+                    "foreign-application".to_owned(),
+                ),
+                (
+                    properties::APPLICATION_PROCESS_ID,
+                    (registration.process_id + 1).to_string(),
+                ),
+                (SESSION_PROPERTY, Uuid::new_v4().to_string()),
+            ];
+            if name.is_some() {
+                required.push((properties::MEDIA_NAME, "foreign-stream".to_owned()));
+            }
+            for (key, foreign) in required {
+                let mut corrupted = baseline();
+                corrupted.set_str(key, &foreign).unwrap();
+                assert!(!properties_match(&corrupted, &registration, name));
+                let mut missing = baseline();
+                missing.unset(key).unwrap();
+                assert!(!properties_match(&missing, &registration, name));
+            }
+        }
     }
 
     #[test]
