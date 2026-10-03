@@ -7661,12 +7661,26 @@ pub(crate) mod tests {
         let short = tokio::spawn(async move {
             wait_for_playback_deadline(short_deadline_ns, &mut short_stop_receiver).await
         });
+        // POSIX time still advances while Tokio time is paused.
+        std::thread::sleep(Duration::from_millis(2));
         tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(19)).await;
-        tokio::task::yield_now().await;
-        assert!(!short.is_finished());
-        tokio::time::advance(Duration::from_millis(1)).await;
-        assert_eq!(short.await.unwrap(), Ok(None));
+        tokio::time::advance(Duration::from_millis(20)).await;
+        for _ in 0..16 {
+            if short.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let bounded = short.is_finished();
+        if !bounded {
+            short.abort();
+        }
+        let result = short.await;
+        assert!(
+            bounded,
+            "the short drain must finish within twenty virtual milliseconds"
+        );
+        assert_eq!(result.unwrap(), Ok(None));
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

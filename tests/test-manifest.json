@@ -7459,7 +7459,7 @@
       ]
     },
     "rust": {
-      "external_skip_count": 14,
+      "external_skip_count": 19,
       "file_count": 50,
       "files": [
         "apps/translator-ui/src-tauri/src/main.rs",
@@ -7513,7 +7513,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1055,
+      "node_count": 1076,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -7672,6 +7672,31 @@
         },
         {
           "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::numbered_pcm_oracle_rejects_corruption_loss_duplicate_and_reordering",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_corked_endpoint_revokes",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_numbered_pcm_conservation_and_stall",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_pump_exhaustion_revokes",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_suspended_endpoint_revokes",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::original_microphone::tests::cancellation_prevents_publication_even_if_alive_was_previously_set",
           "status": "deterministic"
         },
@@ -7693,6 +7718,11 @@
         {
           "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::original_microphone::tests::expired_prepare_and_invalid_source_never_claim_or_spawn",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::failed_submission_never_discards_the_unwritten_prefix",
           "status": "deterministic"
         },
         {
@@ -7772,12 +7802,22 @@
         },
         {
           "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::returned_credit_services_wrapped_pcm_in_order_and_stops_at_whole_samples",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::original_microphone::tests::stop_invalidates_immediately_and_retains_unjoined_worker",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-audio/src/lib.rs",
           "id": "translator-audio::lib::translator_audio::original_microphone::tests::unconfirmed_disconnect_retains_custody_after_worker_join",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/src/lib.rs",
+          "id": "translator-audio::lib::translator_audio::original_microphone::tests::valid_capture_waits_for_credit_without_mutating_or_losing_the_fragment",
           "status": "deterministic"
         },
         {
@@ -9247,6 +9287,36 @@
         },
         {
           "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::fresh_loopback_existing_unbound_pair_has_no_readiness_grace",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::fresh_loopback_identical_duplicate_streams_are_not_one_pair",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::fresh_loopback_late_bound_inventory_cannot_certify_readiness",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::fresh_loopback_pending_expiry_retains_exact_cleanup_custody",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::fresh_loopback_waits_only_for_exact_unbound_target_and_reuses_module",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::fresh_loopback_wrong_ack_or_bound_target_fails_without_polling",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::graph_maintenance_recreates_virtual_endpoints_after_degraded_inspection",
           "status": "deterministic"
         },
@@ -9273,6 +9343,11 @@
         {
           "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::manual_route_admission_shares_production_but_rejects_self_test_and_stopping",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::native_bypass_custody_rejects_unadmitted_full_duplex_without_capture",
           "status": "deterministic"
         },
         {
@@ -9323,6 +9398,11 @@
         {
           "file": "crates/translator-daemon/src/main.rs",
           "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_native_original_zero_gain_gain_changes_and_cleanup",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/main.rs",
+          "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_native_z_composed_shutdown_releases_cancelled_custody",
           "status": "external_skip"
         },
         {
@@ -10032,6 +10112,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::control_application::corrective_mailbox_tests::shutdown_late_verified_mixer_cannot_publish_completed_stop",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::control_application::corrective_mailbox_tests::shutdown_quarantine_uncertainty_still_stops_runtime_and_retains_custody",
           "status": "deterministic"
         },
@@ -10133,6 +10218,11 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::slow_periodic_aec_inspection_does_not_starve_stop_command",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::stopped_bypass_fast_path_post_write_expiry_requires_fresh_recovery",
           "status": "deterministic"
         },
         {
@@ -11707,6 +11797,21 @@
         },
         {
           "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stopped_bypass_fast_path_retains_mixer_error_after_successful_repair",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stopped_bypass_reinspection_never_interrupts_verified_originals",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
+          "id": "translator-daemon::test::control_application::stopped_bypass_reinspection_quarantines_revoked_authorization",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/control_application.rs",
           "id": "translator-daemon::test::control_application::stopped_missing_original_creation_uses_fresh_headphone_facts",
           "status": "deterministic"
         },
@@ -12821,7 +12926,7 @@
         "tests/test_task9_desktop_run_mode.py",
         "tests/test_translator_ui_compact_layout.py"
       ],
-      "node_count": 407,
+      "node_count": 410,
       "nodes": [
         {
           "file": "tests/test_aec_backend_check.py",
@@ -14283,6 +14388,12 @@
         },
         {
           "file": "tests/test_preview_service.py",
+          "id": "test_preview_service.PreviewResourceLimitTests.test_compute_pools_are_bounded_within_the_service_cpu_quota",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_preview_service.py",
           "id": "test_preview_service.PreviewResourceLimitTests.test_host_uid_validation_keeps_initial_user_namespace",
           "reason": "",
           "status": "deterministic"
@@ -14290,6 +14401,12 @@
         {
           "file": "tests/test_preview_service.py",
           "id": "test_preview_service.PreviewResourceLimitTests.test_installed_service_bounds_models_and_reaps_the_whole_group",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_preview_service.py",
+          "id": "test_preview_service.PreviewResourceLimitTests.test_owned_cleanup_journal_survives_a_failed_explicit_stop",
           "reason": "",
           "status": "deterministic"
         },
@@ -14338,6 +14455,12 @@
         {
           "file": "tests/test_preview_service.py",
           "id": "test_preview_service.PreviewServiceTests.test_phonemizer_failure_blocks_install_before_owned_writes",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_preview_service.py",
+          "id": "test_preview_service.PreviewServiceTests.test_rejected_stop_does_not_launch_competing_audio_cleanup",
           "reason": "",
           "status": "deterministic"
         },
@@ -15579,6 +15702,26 @@
     {
       "code": "missing_external_prerequisite:private_pulse_fixture",
       "framework": "rust",
+      "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_corked_endpoint_revokes"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_numbered_pcm_conservation_and_stall"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_pump_exhaustion_revokes"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_suspended_endpoint_revokes"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
       "id": "translator-audio::lib::translator_audio::original_microphone::tests::private_pulse_cancellation_at_native_phases_confirms_cleanup"
     },
     {
@@ -15600,6 +15743,11 @@
       "code": "missing_external_prerequisite:private_pulse_fixture",
       "framework": "rust",
       "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_native_original_zero_gain_gain_changes_and_cleanup"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::bin::translator-daemon::tests::private_pulse_native_z_composed_shutdown_releases_cancelled_custody"
     },
     {
       "code": "missing_external_prerequisite:private_pulse_fixture",

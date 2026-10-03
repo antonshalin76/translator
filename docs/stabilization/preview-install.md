@@ -134,6 +134,13 @@ an explicit admitted command and prepares a fresh pair at zero. Unverified gain
 readback cancels raw forwarding; failed cleanup retains custody and requires
 explicit recovery before another pair can be created.
 
+Periodic reinspection of a known, unchanged bypass verifies fresh device/graph
+facts and existing custody without first muting healthy originals or preparing
+new capture. Uncertain or changed bindings still enter quarantine and the
+existing repair/cleanup path. Positive microphone bypass requires current
+headphone authorization and full-duplex permission. Explicit Stop, recovery
+and service shutdown retain their quarantine/join protections.
+
 Cold Start uses the existing runtime's bounded 130-second readiness budget;
 Stop keeps its separate eight-second cleanup budget. Models are not retained
 after Stop, so another Start is cold again. Before opening PCM after readiness,
@@ -238,10 +245,91 @@ R11 also failed the actual Jieli headset Start: its native pending PCM queue
 exceeded the 9,600-byte bound after 551 ms; HTTP returned
 `audio_mix_state_unknown` instead of Running. The source/private-Pulse passes
 do not override this failure. R11 is a failed candidate, not a working upgrade.
-The installed fallback is R8 with microphone original at 0%; positive original
-microphone gain remains unavailable there. Keep the finite bounds and diagnose
-the native capture/activation/steady playback lifecycle as one transport scope,
-rather than increasing buffers or attributing the backlog to unproved clock drift.
+R8 was retained as the fallback during this investigation, with microphone
+original at 0%; positive original microphone gain is unavailable in R8.
+
+## R12 bounded native microphone service
+
+R12 keeps the 4,800-byte capture/playback and 9,600-byte pending limits.
+A whole valid capture fragment that temporarily cannot fit pending remains
+undiscarded in libpulse's bounded capture queue until playback credit returns.
+Only successfully copied and discarded fragments are counted as accepted;
+playback is serviced both before and after capture. Full capture storage with
+an undiscardable fragment revokes the path conservatively: continuity cannot
+be assured, but saturation does not prove lost PCM. A failed write, hole,
+suspended/corked stream or identity failure also revokes
+the raw path. No new scheduler, resampler, clock-drift assumption or model change
+is introduced.
+
+Translated playback registration also waits for PipeWire's transient unlinked
+sink marker (`PA_INVALID_INDEX`) within the unchanged registration deadline.
+The owned stream must already have verified identity and zero volume, and the
+intended sink must exist uniquely. Playback is admitted only after exact sink
+binding; contradictory identities/targets or nonzero volume remain errors.
+
+Independent synthetic numbered-PCM observers passed 180 seconds on private
+PulseAudio and private PipeWire: 16,874 and 16,872 complete consecutive packets
+respectively, without loss, duplication, reordering or corruption. Final accepted
+packets reached the independent observer within 250 ms. These are PCM transport
+results, not recognition/translation quality or real-call acoustic latency.
+
+The private graph test changes raw gain through 100/35/0/35 while both translated
+PCM producers and observers run. It checks translated gains independently,
+healthy microphone disable/join, fresh post-disable incoming PCM, and every
+first-frame observation during zero-gain re-enable. Reproduce backend tests with:
+
+```bash
+./scripts/translator-native-pcm-check all all /absolute/private/receipt-directory
+```
+
+This creates isolated software-only audio servers, with no hardware monitors
+or connection to the production user bus. The PipeWire fixture uses the installed
+WirePlumber 0.4 policy scripts. `lifecycle` instead of the second `all` runs the
+short fault/graph checks; the full scope also runs both 180-second observers.
+PipeWire 1.0.5 does not emit Pulse stream-suspension notifications; that fault
+injection is explicitly `UNAVAILABLE`, not PASS, on this backend. Suspension is
+checked on PulseAudio; real cork, bounded pressure and endpoint removal are
+checked on both backends.
+The existing native window runner now accepts `--live-preview` to exercise actual
+preview Start/Stop and raw 35/100/0 commands through the packaged Tauri bridge.
+It cleans up only its own window/drivers, not the preview daemon. Installed
+binary, actual device readbacks and cleanup must still be checked separately;
+private fixtures cannot approve an installed package or a stable release.
+
+R12's first installed cold Start still failed with capture saturation during
+model bootstrap; a second identical Start and gain/mode sequence passed. Keep
+that failure receipt. The preview unit now bounds library compute pools with
+`OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=2`, and `MKL_NUM_THREADS=2` under the
+unchanged 200% CPU quota. The installed environment otherwise created 32 NumPy
+threads. A bounded metadata-only same-quota diagnostic reproduced saturation
+with 32 busy workers; two-worker runs continued with unchanged audio buffers.
+These observations establish a scheduling-pressure mechanism, not a definitive
+explanation of every earlier failure. The quota period, model hashes, acoustic
+admission and all deadlines remain unchanged. R13 includes this resource-policy
+correction. Installed acceptance requires an exact-package cold-start and
+lifecycle receipt, separate from deterministic and virtual-audio checks.
+
+R13 also closes the original-audio shutdown dependency: cancellation alone does
+not release native custody. Shutdown attempts model stop and original-stream
+cleanup even when initial mute/readback fails, joins the native owner, and only
+then verifies mixer recovery. The stopping gate remains closed to new Start,
+bypass preparation and fact refresh. A failed cleanup or late recovery cannot
+publish a completed stop.
+
+The preview unit preserves its private runtime directory across explicit stop
+so a forced process-group termination cannot erase the ownership journal before
+recovery. Permissions remain 0700/0600; the control token is rotated on the next
+daemon start. Post-stop CLI cleanup removes original loopbacks before their
+journal-owned graph, sharing the existing eight-second graph cleanup budget.
+A failed systemctl stop returns failure without starting competing audio cleanup.
+
+Fresh original loopbacks are certified against the module ID acknowledged by
+the audio server. A complete, uniquely owned pair may briefly await target
+binding within one fixed two-second load/readback budget. Missing or one-sided
+streams, malformed IDs, foreign ownership, wrong targets and duplicate streams
+fail immediately. Existing routes receive no such readiness grace. Native
+microphone preparation follows successful certification only; a reply arriving
+after the deadline cannot certify a route.
 
 ## R10 PipeWire capture request
 

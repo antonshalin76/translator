@@ -64,6 +64,8 @@ pub enum OriginalMicrophoneError {
 struct Lease {
     alive: AtomicBool,
     cancelled: AtomicBool,
+    #[cfg(test)]
+    failure: Mutex<Option<(OriginalMicrophoneError, &'static str)>>,
 }
 
 impl Lease {
@@ -79,6 +81,10 @@ impl Lease {
 
     fn fail(&self, code: OriginalMicrophoneError, component: &'static str) {
         if self.cancel_once() {
+            #[cfg(test)]
+            {
+                *self.failure.lock().unwrap() = Some((code, component));
+            }
             tracing::warn!(
                 event = "original_microphone_forwarding_failed",
                 ?code,
@@ -591,6 +597,8 @@ struct NativeTransport {
     forwarded_bytes: u64,
     #[cfg(test)]
     cancel_at: Option<NativePhase>,
+    #[cfg(test)]
+    accepted_pcm: Option<Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -624,6 +632,8 @@ impl NativeTransport {
             forwarded_bytes: 0,
             #[cfg(test)]
             cancel_at: None,
+            #[cfg(test)]
+            accepted_pcm: None,
         })
     }
 
@@ -747,6 +757,7 @@ impl NativeTransport {
         self.inspect(&registration, true, deadline)?;
         self.activate(&registration, deadline)?;
         self.inspect(&registration, true, deadline)?;
+        self.check_flow(&registration.lease)?;
         check_work(&registration.lease, deadline)?;
         #[cfg(test)]
         self.checkpoint(NativePhase::Verified, &registration.lease)?;
@@ -851,10 +862,29 @@ impl NativeTransport {
         dispatch_ready(|| {
             let events = self.iterate_once()?;
             self.check_streams(registration)?;
+            if ready {
+                self.check_flow(&registration.lease)?;
+            }
             captured += self.pump(ready, &registration.lease)?;
             Ok(events)
         })?;
         Ok(captured)
+    }
+
+    fn check_flow(&self, lease: &Lease) -> Result<(), OriginalMicrophoneError> {
+        for stream in [&self.playback, &self.capture] {
+            let stream = stream.as_ref().ok_or(OriginalMicrophoneError::Transport)?;
+            for (unavailable, component) in [
+                (stream.is_suspended(), "stream_suspended"),
+                (stream.is_corked(), "stream_corked"),
+            ] {
+                if unavailable.map_err(|_| OriginalMicrophoneError::Transport)? {
+                    lease.fail(OriginalMicrophoneError::Transport, component);
+                    return Err(OriginalMicrophoneError::Transport);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn check_streams(
@@ -908,26 +938,7 @@ impl NativeTransport {
         if !ready {
             self.pending.clear();
         }
-        let playback = self
-            .playback
-            .as_mut()
-            .ok_or(OriginalMicrophoneError::Transport)?;
-        for _ in 0..2 {
-            let writable = playback
-                .writable_size()
-                .ok_or(OriginalMicrophoneError::Transport)?;
-            let contiguous = self.pending.as_slices().0;
-            let length = writable.min(contiguous.len()).min(PLAYBACK_BYTES as usize) / FRAME_BYTES
-                * FRAME_BYTES;
-            if length == 0 {
-                break;
-            }
-            playback
-                .write_copy(&contiguous[..length], 0, SeekMode::Relative)
-                .map_err(|_| OriginalMicrophoneError::Transport)?;
-            self.forwarded_bytes = self.forwarded_bytes.saturating_add(length as u64);
-            self.pending.drain(..length);
-        }
+        self.write_pending()?;
         let capture = self
             .capture
             .as_mut()
@@ -941,10 +952,19 @@ impl NativeTransport {
                 break;
             }
             if readable > CAPTURE_BYTES as usize {
+                tracing::warn!(
+                    event = "original_microphone_capture_bound",
+                    elapsed_ms = self.streaming_started_at.elapsed().as_millis() as u64,
+                    captured_bytes = self.captured_bytes,
+                    forwarded_bytes = self.forwarded_bytes,
+                    pending_bytes = self.pending.len(),
+                    readable_bytes = readable,
+                    "Native original microphone capture storage exhausted"
+                );
                 lease.fail(OriginalMicrophoneError::Buffer, "capture_readable_bound");
                 return Err(OriginalMicrophoneError::Buffer);
             }
-            match capture
+            let fragment_bytes = match capture
                 .peek()
                 .map_err(|_| OriginalMicrophoneError::Transport)?
             {
@@ -955,68 +975,66 @@ impl NativeTransport {
                 }
                 PeekResult::Data(data) => {
                     let fragment_bytes = data.len();
-                    self.captured_bytes = self.captured_bytes.saturating_add(fragment_bytes as u64);
-                    captured += data.len();
-                    if captured > CAPTURE_BYTES as usize {
+                    if fragment_bytes % FRAME_BYTES != 0
+                        || fragment_bytes > CAPTURE_BYTES as usize - captured
+                    {
                         lease.fail(OriginalMicrophoneError::Buffer, "capture_turn_bound");
                         return Err(OriginalMicrophoneError::Buffer);
                     }
-                    if ready {
-                        if let Err(error) = append_capture(&mut self.pending, data) {
-                            if lease.cancel_once() {
-                                let playback_attr = playback.get_buffer_attr().copied();
-                                let playback_timing = playback.get_timing_info().map(|timing| {
-                                    (
-                                        timing.read_index,
-                                        timing.write_index,
-                                        timing.read_index_corrupt,
-                                        timing.write_index_corrupt,
-                                        timing.playing,
-                                        timing.configured_sink_usec,
-                                    )
-                                });
-                                let capture_timing = capture.get_timing_info().map(|timing| {
-                                    (
-                                        timing.read_index,
-                                        timing.write_index,
-                                        timing.read_index_corrupt,
-                                        timing.write_index_corrupt,
-                                        timing.configured_source_usec,
-                                    )
-                                });
-                                tracing::warn!(
-                                    event = "original_microphone_forwarding_failed",
-                                    code = ?error,
-                                    component = "pending_capture_bound",
-                                    elapsed_ms = self.streaming_started_at.elapsed().as_millis() as u64,
-                                    captured_bytes = self.captured_bytes,
-                                    forwarded_bytes = self.forwarded_bytes,
-                                    pending_bytes = self.pending.len(),
-                                    fragment_bytes,
-                                    writable_bytes = ?playback.writable_size(),
-                                    playback_target_bytes = ?playback_attr.map(|attr| attr.tlength),
-                                    playback_prebuffer_bytes = ?playback_attr.map(|attr| attr.prebuf),
-                                    playback_min_request_bytes = ?playback_attr.map(|attr| attr.minreq),
-                                    playback_corked = ?playback.is_corked().ok(),
-                                    playback_suspended = ?playback.is_suspended().ok(),
-                                    playback_underflow_index = ?playback.get_underflow_index(),
-                                    playback_latency = ?playback.get_latency().ok(),
-                                    capture_latency = ?capture.get_latency().ok(),
-                                    playback_timing = ?playback_timing,
-                                    capture_timing = ?capture_timing,
-                                    "Native original microphone forwarding stopped"
-                                );
-                            }
-                            return Err(error);
+                    if ready && !append_capture(&mut self.pending, data)? {
+                        let limit = capture
+                            .get_buffer_attr()
+                            .ok_or(OriginalMicrophoneError::Buffer)?
+                            .maxlength as usize;
+                        if readable >= limit {
+                            lease.fail(
+                                OriginalMicrophoneError::Buffer,
+                                "capture_backpressure_exhausted",
+                            );
+                            return Err(OriginalMicrophoneError::Buffer);
                         }
+                        // The whole fragment stays in libpulse's bounded queue until credit returns.
+                        break;
                     }
+                    fragment_bytes
                 }
-            }
+            };
             capture
                 .discard()
                 .map_err(|_| OriginalMicrophoneError::Transport)?;
+            captured += fragment_bytes;
+            if ready {
+                self.captured_bytes = self.captured_bytes.saturating_add(fragment_bytes as u64);
+                #[cfg(test)]
+                if let Some(accepted) = &mut self.accepted_pcm {
+                    accepted.extend(
+                        self.pending
+                            .iter()
+                            .skip(self.pending.len() - fragment_bytes),
+                    );
+                }
+            }
         }
+        // Use existing credit immediately, including when dispatch reports no further events.
+        self.write_pending()?;
         Ok(captured)
+    }
+
+    fn write_pending(&mut self) -> Result<(), OriginalMicrophoneError> {
+        let playback = self
+            .playback
+            .as_mut()
+            .ok_or(OriginalMicrophoneError::Transport)?;
+        let writable = playback
+            .writable_size()
+            .ok_or(OriginalMicrophoneError::Transport)?;
+        forward_pending(&mut self.pending, writable, |data| {
+            playback
+                .write_copy(data, 0, SeekMode::Relative)
+                .map_err(|_| OriginalMicrophoneError::Transport)?;
+            self.forwarded_bytes = self.forwarded_bytes.saturating_add(data.len() as u64);
+            Ok(())
+        })
     }
 
     fn inspect(
@@ -1371,11 +1389,36 @@ fn activation_ready(
     }
 }
 
-fn append_capture(pending: &mut VecDeque<u8>, data: &[u8]) -> Result<(), OriginalMicrophoneError> {
-    if data.len() % FRAME_BYTES != 0 || data.len() > PENDING_BYTES.saturating_sub(pending.len()) {
+fn append_capture(
+    pending: &mut VecDeque<u8>,
+    data: &[u8],
+) -> Result<bool, OriginalMicrophoneError> {
+    if data.len() % FRAME_BYTES != 0 || data.len() > CAPTURE_BYTES as usize {
         return Err(OriginalMicrophoneError::Buffer);
     }
+    if data.len() > PENDING_BYTES.saturating_sub(pending.len()) {
+        return Ok(false);
+    }
     pending.extend(data);
+    Ok(true)
+}
+
+fn forward_pending(
+    pending: &mut VecDeque<u8>,
+    writable: usize,
+    mut submit: impl FnMut(&[u8]) -> Result<(), OriginalMicrophoneError>,
+) -> Result<(), OriginalMicrophoneError> {
+    let mut credit = writable.min(PLAYBACK_BYTES as usize) / FRAME_BYTES * FRAME_BYTES;
+    for _ in 0..2 {
+        let contiguous = pending.as_slices().0;
+        let length = credit.min(contiguous.len());
+        if length == 0 {
+            break;
+        }
+        submit(&contiguous[..length])?;
+        pending.drain(..length);
+        credit -= length;
+    }
     Ok(())
 }
 
@@ -1838,6 +1881,86 @@ mod tests {
     }
 
     #[test]
+    fn valid_capture_waits_for_credit_without_mutating_or_losing_the_fragment() {
+        let original: Vec<u8> = (0..8_416).map(|index| (index % 251) as u8).collect();
+        let fragment: Vec<u8> = (0..1_200).map(|index| (index % 239) as u8).collect();
+        let mut pending = VecDeque::with_capacity(PENDING_BYTES);
+        pending.extend(&original);
+        for _ in 0..3 {
+            assert_eq!(
+                append_capture(&mut pending, &fragment),
+                Ok(false),
+                "a valid whole fragment must remain in libpulse until credit returns"
+            );
+            assert_eq!(pending.iter().copied().collect::<Vec<_>>(), original);
+        }
+        let mut submitted: Vec<u8> = pending.drain(..1_024).collect();
+        assert_eq!(append_capture(&mut pending, &fragment), Ok(true));
+        submitted.extend(pending.drain(..));
+        assert_eq!(submitted, [original, fragment].concat());
+        assert!(pending.is_empty());
+        assert_eq!(pending.capacity(), PENDING_BYTES);
+    }
+
+    #[test]
+    fn returned_credit_services_wrapped_pcm_in_order_and_stops_at_whole_samples() {
+        let input: Vec<u8> = (0..PENDING_BYTES)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut pending = VecDeque::with_capacity(PENDING_BYTES);
+        pending.extend(&input);
+        let mut submitted: Vec<u8> = pending.drain(..8_416).collect();
+        assert_eq!(append_capture(&mut pending, &input[..4_800]), Ok(true));
+        assert!(
+            !pending.as_slices().1.is_empty(),
+            "exercise actual wraparound"
+        );
+        let capacity = pending.capacity();
+        for credit in [0, 1, 17, 1_024, 4_800, 9_600] {
+            let before = submitted.len();
+            forward_pending(&mut pending, credit, |data| {
+                assert_eq!(data.len() % FRAME_BYTES, 0);
+                submitted.extend_from_slice(data);
+                Ok(())
+            })
+            .unwrap();
+            assert!(submitted.len() - before <= credit.min(4_800) / 2 * 2);
+        }
+        assert!(pending.is_empty());
+        assert_eq!(submitted, [input.clone(), input[..4_800].to_vec()].concat());
+        assert_eq!(pending.capacity(), capacity);
+    }
+
+    #[test]
+    fn failed_submission_never_discards_the_unwritten_prefix() {
+        let mut pending = VecDeque::from(vec![5_u8; 1_200]);
+        let before = pending.clone();
+        assert_eq!(
+            forward_pending(&mut pending, 1_024, |_| Err(
+                OriginalMicrophoneError::Transport
+            )),
+            Err(OriginalMicrophoneError::Transport)
+        );
+        assert_eq!(pending, before);
+        let mut submitted = Vec::new();
+        forward_pending(&mut pending, 1_024, |data| {
+            submitted.extend_from_slice(data);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(submitted.len(), 1_024);
+        assert_eq!(pending.len(), 176);
+        assert_eq!(append_capture(&mut pending, &[1, 2]), Ok(true));
+        forward_pending(&mut pending, 178, |data| {
+            submitted.extend_from_slice(data);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(submitted, [vec![5_u8; 1_200], vec![1, 2]].concat());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
     fn pending_absorbs_two_capture_windows_within_the_fixed_total_budget() {
         let mut pending = VecDeque::with_capacity(PENDING_BYTES);
         let captured = vec![7; CAPTURE_BYTES as usize];
@@ -1847,26 +1970,30 @@ mod tests {
         assert_eq!(PENDING_BYTES, CAPTURE_BYTES as usize * 2);
         assert_eq!(PLAYBACK_BYTES, CAPTURE_BYTES);
         let before = pending.clone();
-        assert_eq!(
-            append_capture(&mut pending, &[1, 2]),
-            Err(OriginalMicrophoneError::Buffer)
-        );
+        assert_eq!(append_capture(&mut pending, &[1, 2]), Ok(false));
         assert_eq!(pending, before);
     }
 
     #[test]
     fn capture_overflow_or_partial_sample_does_not_mutate_pending_audio() {
         let mut pending = VecDeque::with_capacity(PENDING_BYTES);
-        append_capture(&mut pending, &vec![5; PENDING_BYTES]).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                append_capture(&mut pending, &vec![5; CAPTURE_BYTES as usize]),
+                Ok(true)
+            );
+        }
         let before = pending.clone();
-        assert_eq!(
-            append_capture(&mut pending, &[1, 2]),
-            Err(OriginalMicrophoneError::Buffer)
-        );
+        assert_eq!(append_capture(&mut pending, &[1, 2]), Ok(false));
         assert_eq!(pending, before);
         pending.clear();
         assert_eq!(
             append_capture(&mut pending, &[1]),
+            Err(OriginalMicrophoneError::Buffer)
+        );
+        assert!(pending.is_empty());
+        assert_eq!(
+            append_capture(&mut pending, &vec![5; CAPTURE_BYTES as usize + 2]),
             Err(OriginalMicrophoneError::Buffer)
         );
         assert!(pending.is_empty());
@@ -2151,3 +2278,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "original_microphone/native_pcm_fixture.rs"]
+mod native_pcm_fixture;

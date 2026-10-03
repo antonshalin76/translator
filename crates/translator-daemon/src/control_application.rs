@@ -1260,7 +1260,48 @@ impl ControlOwner {
                     return Err(cleanup_pending());
                 }
                 if supervisor.status() == RuntimeStatus::Stopped {
-                    let _ = audio_mix.ok_or_else(audio_mix_unavailable)?;
+                    let mix = audio_mix.ok_or_else(audio_mix_unavailable)?;
+                    let previous = store.snapshot();
+                    supervisor.reserve_bypass()?;
+                    let existing = (|| {
+                        let (current, headphones) =
+                            admitted_bypass_snapshot(store, bypass_services, deadline)?;
+                        if supervisor.retained_bypass_verified
+                            || previous.audio_mix_knowledge != AudioMixKnowledge::Known
+                            || current.audio_mix_knowledge != AudioMixKnowledge::Known
+                            || active_acoustic_path_changed(&previous, &current)
+                            || previous.audio_graph != current.audio_graph
+                        {
+                            return Err(cleanup_pending());
+                        }
+                        existing_bypass_mode(&current, headphones, bypass_services, deadline)
+                    })();
+                    if let Ok(mode) = existing {
+                        match mix
+                            .reconcile_committed(mode)
+                            .and_then(|()| admission_deadline(deadline))
+                        {
+                            Ok(()) => {
+                                complete_verified_bypass(
+                                    supervisor,
+                                    store,
+                                    Some(AudioMixKnowledge::Known),
+                                )?;
+                                return Ok(store.snapshot());
+                            }
+                            Err(error) => {
+                                stop_and_bypass(
+                                    supervisor,
+                                    store,
+                                    bypass_services,
+                                    false,
+                                    deadline,
+                                    None,
+                                )?;
+                                return Err(error);
+                            }
+                        }
+                    }
                     stop_and_bypass(supervisor, store, bypass_services, false, deadline, None)?;
                     return Ok(store.snapshot());
                 }
@@ -1391,22 +1432,25 @@ impl ControlOwner {
     }
 
     fn shutdown_owned(&mut self, deadline: Instant) -> Result<(), ControlFailure> {
-        let quarantine = self.audio_mix.as_deref().map(|mix| {
-            let mode = TranslationMixMode::Quarantine {
-                mic_original_expected: false,
-            };
-            match mix.reconcile_committed(mode) {
-                Err(error) if error.code == "audio_mix_state_unknown" => {
-                    mix.recover_committed(mode)
-                }
-                result => result,
-            }
+        let mode = TranslationMixMode::Quarantine {
+            mic_original_expected: false,
+        };
+        let mut quarantine = self.audio_mix.as_deref().map(|mix| {
+            admission_deadline(deadline)?;
+            mix.reconcile_committed(mode)
         });
-        // Quarantine uncertainty must not prevent stopping the runtime we already own.
+        // Failed mute/readback cannot skip either already-owned cleanup boundary.
         let stopped = self.supervisor.stop(deadline);
+        let originals = self.maintenance.cleanup_originals(deadline.into_std());
+        if originals.is_ok()
+            && let Some(mix) = self.audio_mix.as_deref()
+        {
+            quarantine =
+                Some(admission_deadline(deadline).and_then(|()| mix.recover_committed(mode)));
+        }
         self.aec_runtime_generation = None;
         let knowledge = quarantine.as_ref().map(|result| {
-            if result.is_err() {
+            if result.is_err() || originals.is_err() {
                 AudioMixKnowledge::AudioMixStateUnknown
             } else {
                 AudioMixKnowledge::Known
@@ -1414,9 +1458,11 @@ impl ControlOwner {
         });
         commit_projection(&self.store, RuntimeStatus::CleanupPending, knowledge);
         stopped?;
+        originals?;
         if let Some(result) = quarantine {
             result?;
         }
+        admission_deadline(deadline)?;
         self.supervisor.complete_bypass();
         if self.supervisor.status() != RuntimeStatus::Stopped {
             return Err(cleanup_pending());
@@ -1802,9 +1848,7 @@ fn stop_and_bypass(
     if services.audio_mix.is_none() {
         commit_projection(store, RuntimeStatus::CleanupPending, None);
         services.maintenance.refresh_bypass_facts(store)?;
-        supervisor.complete_bypass();
-        commit_projection(store, RuntimeStatus::Stopped, None);
-        return Ok(());
+        return complete_verified_bypass(supervisor, store, None);
     }
     if store.snapshot().runtime_status != RuntimeStatus::Stopped {
         commit_projection(store, RuntimeStatus::CleanupPending, None);
@@ -1845,19 +1889,11 @@ fn stop_and_bypass(
         }
     })();
     match result {
-        Ok(()) => {
-            supervisor.complete_bypass();
-            if supervisor.status() != RuntimeStatus::Stopped {
-                commit_projection(store, RuntimeStatus::CleanupPending, None);
-                return Err(cleanup_pending());
-            }
-            commit_projection(
-                store,
-                RuntimeStatus::Stopped,
-                services.audio_mix.map(|_| AudioMixKnowledge::Known),
-            );
-            Ok(())
-        }
+        Ok(()) => complete_verified_bypass(
+            supervisor,
+            store,
+            services.audio_mix.map(|_| AudioMixKnowledge::Known),
+        ),
         Err(error) => {
             let originals = services.maintenance.cleanup_originals(deadline.into_std());
             commit_projection(
@@ -1883,22 +1919,47 @@ fn verified_bypass_mode(
     let (before_repair, _) = admitted_bypass_snapshot(store, services, deadline)?;
     services.maintenance.prepare_bypass(&before_repair)?;
     let (current, headphones) = admitted_bypass_snapshot(store, services, deadline)?;
+    existing_bypass_mode(&current, headphones, services, deadline)
+}
+
+fn existing_bypass_mode(
+    current: &RuntimeSnapshot,
+    headphones: bool,
+    services: BypassServices<'_>,
+    deadline: Instant,
+) -> Result<TranslationMixMode, ControlFailure> {
     let mode = if headphones
-        && enabled_directions(&current)?.microphone
+        && current
+            .devices
+            .as_ref()
+            .is_some_and(|devices| devices.acoustic.full_duplex_allowed)
+        && enabled_directions(current)?.microphone
         && services
             .maintenance
-            .verify_bypass_custody(&current, true)
+            .verify_bypass_custody(current, true)
             .is_ok()
     {
         TranslationMixMode::Bypass
     } else {
-        services
-            .maintenance
-            .verify_bypass_custody(&current, false)?;
+        services.maintenance.verify_bypass_custody(current, false)?;
         TranslationMixMode::MicrophoneMutedBypass
     };
     admission_deadline(deadline)?;
     Ok(mode)
+}
+
+fn complete_verified_bypass(
+    supervisor: &mut RuntimeSupervisor,
+    store: &RuntimeStore,
+    knowledge: Option<AudioMixKnowledge>,
+) -> Result<(), ControlFailure> {
+    supervisor.complete_bypass();
+    if supervisor.status() != RuntimeStatus::Stopped {
+        commit_projection(store, RuntimeStatus::CleanupPending, None);
+        return Err(cleanup_pending());
+    }
+    commit_projection(store, RuntimeStatus::Stopped, knowledge);
+    Ok(())
 }
 
 fn admitted_bypass_snapshot(
@@ -2329,6 +2390,113 @@ pub(crate) mod safe_admission_tests {
 
     fn deadline() -> Instant {
         Instant::now() + crate::DIRECTION_CLEANUP_BUDGET
+    }
+
+    #[derive(Default)]
+    struct ExpiringBypassMix {
+        calls: StdMutex<Vec<TranslationMixMode>>,
+        bypass_deadline: StdMutex<Option<std::time::Instant>>,
+    }
+
+    impl AudioMixController for ExpiringBypassMix {
+        fn apply_desired(
+            &self,
+            _: AudioMixState,
+            mode: TranslationMixMode,
+        ) -> Result<(), ControlFailure> {
+            self.reconcile_committed(mode)
+        }
+
+        fn reconcile_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            self.calls.lock().unwrap().push(mode);
+            if mode == TranslationMixMode::Bypass
+                && let Some(deadline) = self.bypass_deadline.lock().unwrap().take()
+            {
+                std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+            }
+            Ok(())
+        }
+
+        fn recover_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            self.reconcile_committed(mode)
+        }
+    }
+
+    #[test]
+    fn stopped_bypass_fast_path_post_write_expiry_requires_fresh_recovery() {
+        let store = RuntimeStore::default();
+        let effects = Arc::new(Effects::default());
+        let mix = Arc::new(ExpiringBypassMix::default());
+        let mut owner = owner(
+            store.clone(),
+            Arc::new(Runner(effects.clone())),
+            effects.clone(),
+        );
+        owner.audio_mix = Some(mix.clone());
+        owner.execute(ControlCommand::Start, deadline()).unwrap();
+        owner.execute(ControlCommand::Stop, deadline()).unwrap();
+        let desired = store.snapshot().audio_mix;
+        mix.calls.lock().unwrap().clear();
+        let short_deadline = Instant::now() + Duration::from_millis(30);
+        *mix.bypass_deadline.lock().unwrap() = Some(short_deadline.into_std());
+
+        let error = owner
+            .execute(ControlCommand::ReconcileAudio, short_deadline)
+            .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "audio_facts_expired");
+        assert_eq!(
+            mix.calls.lock().unwrap().as_slice(),
+            [
+                TranslationMixMode::Bypass,
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                },
+            ],
+            "expiry after the successful direct write must quarantine, not publish bypass"
+        );
+        assert_eq!(
+            store.snapshot().runtime_status,
+            RuntimeStatus::CleanupPending
+        );
+        assert_eq!(store.snapshot().audio_mix, desired);
+        assert_eq!(
+            owner.supervisor.gate.state(),
+            crate::AudioOperationState::Production
+        );
+        assert_eq!(effects.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(effects.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            owner
+                .execute(ControlCommand::ReconcileAudio, deadline())
+                .unwrap_err()
+                .code,
+            "translation_cleanup_pending"
+        );
+        assert_eq!(mix.calls.lock().unwrap().len(), 2);
+
+        let recovered = owner
+            .execute(ControlCommand::RecoverAudioMix, deadline())
+            .unwrap();
+        assert_eq!(recovered.runtime_status, RuntimeStatus::Stopped);
+        assert_eq!(recovered.audio_mix_knowledge, AudioMixKnowledge::Known);
+        assert_eq!(recovered.audio_mix, desired);
+        assert_eq!(
+            owner.supervisor.gate.state(),
+            crate::AudioOperationState::Idle
+        );
+        assert_eq!(
+            &mix.calls.lock().unwrap()[2..],
+            [
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                },
+                TranslationMixMode::Bypass,
+            ]
+        );
+        assert_eq!(effects.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(effects.stops.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -4412,7 +4580,29 @@ mod corrective_mailbox_tests {
     #[derive(Default)]
     struct ShutdownFaultMix {
         fail: AtomicBool,
+        cleanup_fail: AtomicBool,
+        recovery_delay_ms: std::sync::atomic::AtomicUsize,
+        cleanup_deadlines: StdMutex<Vec<std::time::Instant>>,
         modes: StdMutex<Vec<TranslationMixMode>>,
+    }
+
+    impl RuntimeMaintenance for ShutdownFaultMix {
+        fn refresh(&self, _: &RuntimeStore) -> Result<(), ControlFailure> {
+            Ok(())
+        }
+
+        fn prepare_start(&self, _: &RuntimeSnapshot) -> Result<(), ControlFailure> {
+            Ok(())
+        }
+
+        fn cleanup_originals(&self, deadline: std::time::Instant) -> Result<(), ControlFailure> {
+            self.cleanup_deadlines.lock().unwrap().push(deadline);
+            if self.cleanup_fail.load(Ordering::SeqCst) {
+                Err(cleanup_pending())
+            } else {
+                Ok(())
+            }
+        }
     }
 
     impl AudioMixController for ShutdownFaultMix {
@@ -4434,8 +4624,45 @@ mod corrective_mailbox_tests {
         }
 
         fn recover_committed(&self, mode: TranslationMixMode) -> Result<(), ControlFailure> {
+            std::thread::sleep(std::time::Duration::from_millis(
+                self.recovery_delay_ms.load(Ordering::SeqCst) as u64,
+            ));
             self.reconcile_committed(mode)
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_late_verified_mixer_cannot_publish_completed_stop() {
+        let state = Arc::new(BlockingStopState::default());
+        *state.release.0.lock().unwrap() = true;
+        let mix = Arc::new(ShutdownFaultMix::default());
+        let gate = AudioOperationGate::new();
+        let store = RuntimeStore::default();
+        let application = ControlApplication::spawn(
+            store.clone(),
+            Arc::new(BlockingStopRunner(state)),
+            gate.clone(),
+            Arc::new(NoopFacts),
+            mix.clone(),
+            Some(mix.clone()),
+        );
+        application.execute(ControlCommand::Start).await.unwrap();
+        gate.begin_stopping();
+        mix.recovery_delay_ms.store(30, Ordering::SeqCst);
+        let result = lock_recovering(&application._owner)
+            .shutdown_owned(Instant::now() + Duration::from_millis(10));
+        assert!(
+            result.is_err(),
+            "successful mixer commands cannot extend the original shutdown deadline"
+        );
+        assert_eq!(
+            store.snapshot().runtime_status,
+            RuntimeStatus::CleanupPending
+        );
+        assert_eq!(gate.state(), crate::AudioOperationState::Stopping);
+        assert!(application.execute(ControlCommand::Start).await.is_err());
+        mix.recovery_delay_ms.store(0, Ordering::SeqCst);
+        application.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -4450,15 +4677,22 @@ mod corrective_mailbox_tests {
             Arc::new(BlockingStopRunner(state.clone())),
             gate.clone(),
             Arc::new(NoopFacts),
-            Arc::new(NoopFacts),
+            mix.clone(),
             Some(mix.clone()),
         );
         application.execute(ControlCommand::Start).await.unwrap();
         mix.modes.lock().unwrap().clear();
         mix.fail.store(true, Ordering::SeqCst);
+        mix.cleanup_fail.store(true, Ordering::SeqCst);
         state.failures.store(1, Ordering::SeqCst);
         gate.begin_stopping();
-        assert!(application.shutdown().await.is_err());
+        let deadline = Instant::now() + crate::RUNTIME_CLEANUP_BUDGET;
+        assert!(application.shutdown_until(deadline).await.is_err());
+        assert_eq!(
+            mix.cleanup_deadlines.lock().unwrap().as_slice(),
+            &[deadline.into_std()],
+            "quarantine and runtime-stop errors cannot skip owned original cleanup"
+        );
         assert_eq!(
             state.calls.load(Ordering::SeqCst),
             1,
@@ -4474,14 +4708,20 @@ mod corrective_mailbox_tests {
             SupervisorState::CleanupPending(_)
         ));
         state.failures.store(0, Ordering::SeqCst);
-        assert!(application.shutdown().await.is_err());
+        assert!(application.shutdown_until(deadline).await.is_err());
         assert_eq!(state.calls.load(Ordering::SeqCst), 2);
         assert!(matches!(
             lock_recovering(&application._owner).supervisor.state,
             SupervisorState::BypassPending { .. }
         ));
         mix.fail.store(false, Ordering::SeqCst);
-        application.shutdown().await.unwrap();
+        mix.cleanup_fail.store(false, Ordering::SeqCst);
+        application.shutdown_until(deadline).await.unwrap();
+        assert_eq!(
+            mix.cleanup_deadlines.lock().unwrap().as_slice(),
+            &[deadline.into_std(); 3],
+            "cleanup retries must retain the original absolute deadline"
+        );
         assert_eq!(
             state.calls.load(Ordering::SeqCst),
             2,

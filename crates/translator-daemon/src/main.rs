@@ -1476,7 +1476,10 @@ impl<R: CommandRunner + Send> RuntimeMaintenance for PulseManualRoutes<R> {
         &self,
         deadline: Instant,
     ) -> Result<(), translator_daemon::ControlFailure> {
-        if self.operation_gate.state() != AudioOperationState::Production {
+        if !matches!(
+            self.operation_gate.state(),
+            AudioOperationState::Production | AudioOperationState::Stopping
+        ) {
             return Err(native_route_failure());
         }
         self.resources
@@ -1879,6 +1882,7 @@ where
             ));
         }
         let mut keep_module_ids = HashSet::new();
+        let mut expected = HashMap::new();
         let mut missing_requests = Vec::new();
 
         for request in &requests {
@@ -1887,6 +1891,7 @@ where
             matching_module_ids.sort();
             if let Some(module_id) = matching_module_ids.first() {
                 keep_module_ids.insert(module_id.clone());
+                expected.insert(module_id.clone(), request.clone());
             } else {
                 missing_requests.push(request.clone());
             }
@@ -1917,25 +1922,17 @@ where
             return Err(discovery_error());
         }
 
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut fresh_module_ids = HashSet::new();
         for request in missing_requests {
-            self.load_module(&request)?;
+            let module_id = self.load_module(&request, deadline)?;
+            if expected.insert(module_id.clone(), request).is_some()
+                || !fresh_module_ids.insert(module_id)
+            {
+                return Err(discovery_error());
+            }
         }
-
-        let sink_inputs: Vec<RawPulseStream> =
-            self.run_json(&["--format=json", "list", "sink-inputs"])?;
-        let source_outputs: Vec<RawPulseStream> =
-            self.run_json(&["--format=json", "list", "source-outputs"])?;
-        let verified = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
-        if verified.len() != requests.len()
-            || requests.iter().any(|request| {
-                !matching_original_loopbacks(&verified, request, &sources, &sinks)
-                    .is_ok_and(|matches| matches.len() == 1)
-            })
-        {
-            return Err(OriginalLoopbackError::new(
-                OriginalLoopbackErrorCode::Discovery,
-            ));
-        }
+        self.verify_loaded_requests(&expected, &fresh_module_ids, &sources, &sinks, deadline)?;
 
         if let (Some(microphone), Some(request), Some((source, sink))) =
             (&self.microphone, &native_request, native_pair)
@@ -1957,6 +1954,55 @@ where
         }
 
         Ok(())
+    }
+
+    fn verify_loaded_requests(
+        &self,
+        expected: &HashMap<String, OriginalLoopbackRequest>,
+        fresh_module_ids: &HashSet<String>,
+        sources: &HashMap<u32, String>,
+        sinks: &HashMap<u32, String>,
+        deadline: Instant,
+    ) -> Result<(), OriginalLoopbackError> {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(discovery_error());
+            }
+            let sink_inputs: Vec<RawPulseStream> =
+                self.run_json_until(&["--format=json", "list", "sink-inputs"], deadline)?;
+            let source_outputs: Vec<RawPulseStream> =
+                self.run_json_until(&["--format=json", "list", "source-outputs"], deadline)?;
+            let verified = discover_original_loopbacks(&sink_inputs, &source_outputs)?;
+            if verified.len() != expected.len() {
+                return Err(discovery_error());
+            }
+            let mut ready = true;
+            for (module_id, route) in &verified {
+                let request = expected.get(module_id).ok_or_else(discovery_error)?;
+                if route.media_name != request.media_name {
+                    return Err(discovery_error());
+                }
+                for (index, names, target) in [
+                    (route.source_index, sources, &request.source),
+                    (route.sink_index, sinks, &request.sink),
+                ] {
+                    match index {
+                        // A new, otherwise complete owned pair may await policy links.
+                        Some(u32::MAX) if fresh_module_ids.contains(module_id) => ready = false,
+                        Some(index) if names.get(&index) == Some(target) => {}
+                        _ => return Err(discovery_error()),
+                    }
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(discovery_error());
+            }
+            if ready {
+                return Ok(());
+            }
+            std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
+        }
     }
 
     fn verify_existing(
@@ -1989,6 +2035,17 @@ where
         permit_mic_original: bool,
         mut requests: Vec<OriginalLoopbackRequest>,
     ) -> Result<(), OriginalLoopbackError> {
+        if permit_mic_original
+            && (!direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
+                || snapshot.devices.as_ref().is_none_or(|devices| {
+                    !devices.acoustic.mode.is_headphones() || !devices.acoustic.full_duplex_allowed
+                })
+                || !requests
+                    .iter()
+                    .any(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK))
+        {
+            return Err(discovery_error());
+        }
         let native_request = self
             .microphone
             .as_ref()
@@ -1999,28 +2056,7 @@ where
                     .find(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
                     .cloned()
             });
-        if permit_mic_original {
-            if direction_enabled(snapshot, translator_core::AudioDirection::Microphone)
-                && snapshot
-                    .devices
-                    .as_ref()
-                    .is_some_and(|devices| devices.acoustic.mode.is_headphones())
-                && !requests
-                    .iter()
-                    .any(|request| request.media_name == MICROPHONE_ORIGINAL_LOOPBACK)
-            {
-                let source = snapshot
-                    .devices
-                    .as_ref()
-                    .and_then(|devices| devices.source.selected.as_ref())
-                    .ok_or_else(discovery_error)?;
-                requests.push(OriginalLoopbackRequest {
-                    media_name: MICROPHONE_ORIGINAL_LOOPBACK,
-                    source: source.name.clone(),
-                    sink: MIC_OUT_SINK.to_owned(),
-                });
-            }
-        } else {
+        if !permit_mic_original {
             requests.retain(|request| request.media_name != MICROPHONE_ORIGINAL_LOOPBACK);
         }
         if self.microphone.is_some() {
@@ -2081,10 +2117,24 @@ where
         Ok(module_ids)
     }
 
-    fn load_module(&self, request: &OriginalLoopbackRequest) -> Result<(), OriginalLoopbackError> {
+    fn load_module(
+        &self,
+        request: &OriginalLoopbackRequest,
+        deadline: Instant,
+    ) -> Result<String, OriginalLoopbackError> {
         let args = original_loopback_load_args(request);
-        self.run_pactl_owned(&args, OriginalLoopbackErrorCode::Load)?;
-        Ok(())
+        let result =
+            self.run_pactl_owned_until(&args, OriginalLoopbackErrorCode::Load, deadline)?;
+        let id = std::str::from_utf8(result.stdout())
+            .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Load))?
+            .trim();
+        if !id
+            .parse::<u32>()
+            .is_ok_and(|value| value != u32::MAX && value.to_string() == id)
+        {
+            return Err(OriginalLoopbackError::new(OriginalLoopbackErrorCode::Load));
+        }
+        Ok(id.to_owned())
     }
 
     fn unload_module(&self, module_id: &str) -> Result<(), OriginalLoopbackError> {
@@ -2142,14 +2192,6 @@ where
             self.run_pactl_owned_until(&args, OriginalLoopbackErrorCode::Discovery, deadline)?;
         serde_json::from_slice(result.stdout())
             .map_err(|_| OriginalLoopbackError::new(OriginalLoopbackErrorCode::Discovery))
-    }
-
-    fn run_pactl_owned(
-        &self,
-        args: &[String],
-        failure_code: OriginalLoopbackErrorCode,
-    ) -> Result<CommandResult, OriginalLoopbackError> {
-        self.run_pactl_owned_until(args, failure_code, Instant::now() + Duration::from_secs(2))
     }
 
     fn run_pactl_owned_until(
@@ -2280,16 +2322,11 @@ fn discover_original_loopbacks(
             continue;
         };
         let module_id = stream_module_id(input)?;
-        owned_sink_inputs.insert((module_id.clone(), media_name));
-        let module = discovered_loopback_entry(&mut modules, &module_id, media_name)?;
-        let sink_index = input.sink.ok_or_else(discovery_error)?;
-        if module
-            .sink_index
-            .replace(sink_index)
-            .is_some_and(|previous| previous != sink_index)
-        {
+        if !owned_sink_inputs.insert((module_id.clone(), media_name)) {
             return Err(discovery_error());
         }
+        let module = discovered_loopback_entry(&mut modules, &module_id, media_name)?;
+        module.sink_index = Some(input.sink.ok_or_else(discovery_error)?);
     }
 
     for output in source_outputs {
@@ -2297,16 +2334,11 @@ fn discover_original_loopbacks(
             continue;
         };
         let module_id = stream_module_id(output)?;
-        owned_source_outputs.insert((module_id.clone(), media_name));
-        let module = discovered_loopback_entry(&mut modules, &module_id, media_name)?;
-        let source_index = output.source.ok_or_else(discovery_error)?;
-        if module
-            .source_index
-            .replace(source_index)
-            .is_some_and(|previous| previous != source_index)
-        {
+        if !owned_source_outputs.insert((module_id.clone(), media_name)) {
             return Err(discovery_error());
         }
+        let module = discovered_loopback_entry(&mut modules, &module_id, media_name)?;
+        module.source_index = Some(output.source.ok_or_else(discovery_error)?);
     }
     if owned_sink_inputs != owned_source_outputs {
         return Err(discovery_error());
@@ -3025,10 +3057,25 @@ fn run_audio_graph_cleanup() -> ExitCode {
         Ok(path) => path,
         Err(error) => return print_graph_error(&error),
     };
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let originals = match PulseOriginalLoopbacks::with_microphone(
+        SystemCommandRunner,
+        translator_audio::OriginalMicrophoneRegistry::default(),
+    )
+    .cleanup_all_until(deadline)
+    {
+        Ok(module_ids) => module_ids,
+        Err(_) => {
+            return print_json_failure(&serde_json::json!({
+                "safe_error": "original_loopback_cleanup_failed"
+            }));
+        }
+    };
     let mut graph = PulseAudioGraph::new(SystemCommandRunner, journal_path);
-    match graph.cleanup_owned() {
+    match graph.cleanup_owned_until(deadline) {
         Ok(module_ids) => print_json(&serde_json::json!({
-            "unloaded_module_ids": module_ids
+            "unloaded_module_ids": module_ids,
+            "unloaded_original_module_ids": originals
         })),
         Err(error) => print_graph_error(&error),
     }
@@ -3376,7 +3423,9 @@ mod admission_adapter_tests {
         let unexpected_event =
             tokio::time::timeout(Duration::from_millis(20), events.frame()).await;
         let gate = adapter.operation_gate.state();
+        let start_command_count = runner.0.calls.lock().unwrap().len();
         drop(events);
+        adapter.operation_gate.begin_stopping();
         controller.shutdown().await.unwrap();
 
         assert_eq!(result.unwrap_err().code, "translation_precondition_failed");
@@ -3384,7 +3433,15 @@ mod admission_adapter_tests {
         assert!(unexpected_event.is_err());
         assert_eq!(native.0.load(Ordering::SeqCst), 0);
         assert_eq!(gate, AudioOperationState::Idle);
-        assert_eq!(runner.0.calls.lock().unwrap().len(), 10);
+        assert_eq!(start_command_count, 10);
+        assert_eq!(
+            runner.0.calls.lock().unwrap().len(),
+            start_command_count + 2
+        );
+        assert_eq!(
+            adapter.operation_gate.state(),
+            AudioOperationState::Stopping
+        );
         assert!(
             adapter
                 .resources
@@ -3832,6 +3889,12 @@ mod tests {
         malformed_module_id: bool,
         missing_sink_owner: bool,
         missing_source_owner: bool,
+        unbound_stream_reads: usize,
+        unbound_source_only: bool,
+        load_seen: bool,
+        load_ack_override: Option<String>,
+        wrong_loaded_sink: bool,
+        expire_after_load_inventory: bool,
     }
 
     impl LoopbackRunner {
@@ -3913,6 +3976,7 @@ mod tests {
                         }
                         return Ok(CommandResult::success(serde_json::to_vec(&sinks).unwrap()));
                     }
+                    let unbound = state.load_seen && state.unbound_stream_reads > 0;
                     let streams: Vec<_> = state
                         .modules
                         .iter()
@@ -3948,10 +4012,19 @@ mod tests {
                                 "owner_module": if state.malformed_module_id { "not-an-id".to_owned() } else { module.id.to_string() },
                                 "properties": properties,
                             });
-                            stream[endpoint] = index.into();
+                            stream[endpoint] = if unbound && (!state.unbound_source_only || kind == "source-outputs") { u32::MAX } else { index }.into();
                             stream
                         })
                         .collect();
+                    if unbound {
+                        state.unbound_stream_reads -= 1;
+                    }
+                    if state.load_seen
+                        && state.expire_after_load_inventory
+                        && kind == "source-outputs"
+                    {
+                        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    }
                     Ok(CommandResult::success(
                         serde_json::to_vec(&streams).unwrap(),
                     ))
@@ -3999,15 +4072,27 @@ mod tests {
                         .unwrap_or(40)
                         + 1;
                     if !state.omit_loaded_module_after_ack {
+                        let sink = if state.wrong_loaded_sink {
+                            "alsa_output.other".to_owned()
+                        } else {
+                            sink.to_owned()
+                        };
                         state.modules.push(LoopbackModule {
                             id,
                             media_name,
                             source,
-                            sink: sink.to_owned(),
+                            sink,
                             owned: true,
                         });
                     }
-                    Ok(CommandResult::success(id.to_string().into_bytes()))
+                    state.load_seen = true;
+                    Ok(CommandResult::success(
+                        state
+                            .load_ack_override
+                            .clone()
+                            .unwrap_or_else(|| id.to_string())
+                            .into_bytes(),
+                    ))
                 }
                 _ => panic!("unexpected pactl call: {args:?}"),
             }
@@ -4113,6 +4198,34 @@ mod tests {
         originals.verify_existing(&snapshot, false).unwrap();
         assert!(originals.verify_existing(&snapshot, true).is_err());
         assert_eq!(runner.module_ids().len(), 1);
+    }
+
+    #[test]
+    fn native_bypass_custody_rejects_unadmitted_full_duplex_without_capture() {
+        let runner = LoopbackRunner::new(Vec::new());
+        let registry = translator_audio::OriginalMicrophoneRegistry::default();
+        let originals = PulseOriginalLoopbacks::with_microphone(runner.clone(), registry.clone());
+        let mut snapshot = loopback_snapshot(OutputMode::Headphones);
+        snapshot.translation_running = false;
+        snapshot.audio_mix.microphone_original_percent = 0;
+        snapshot
+            .devices
+            .as_mut()
+            .unwrap()
+            .acoustic
+            .full_duplex_allowed = false;
+        originals.ensure_without_new_mic(&snapshot).unwrap();
+        let calls = runner.calls().len();
+        assert!(registry.current().unwrap().is_none());
+        originals.verify_existing(&snapshot, false).unwrap();
+        assert!(originals.verify_existing(&snapshot, true).is_err());
+        assert!(registry.current().unwrap().is_none());
+        assert!(runner.calls()[calls..].iter().all(|args| {
+            !matches!(
+                args.first().map(String::as_str),
+                Some("load-module" | "unload-module")
+            )
+        }));
     }
 
     #[test]
@@ -4361,6 +4474,194 @@ mod tests {
                 .iter()
                 .any(|args| { args.first().map(String::as_str) == Some("load-module") })
         );
+    }
+
+    #[test]
+    fn fresh_loopback_waits_only_for_exact_unbound_target_and_reuses_module() {
+        let runner = LoopbackRunner::new(Vec::new());
+        runner.0.lock().unwrap().unbound_stream_reads = 2;
+        let registry = translator_audio::OriginalMicrophoneRegistry::default();
+        let loopbacks = PulseOriginalLoopbacks::with_microphone(runner.clone(), registry.clone());
+        let mut snapshot = loopback_snapshot(OutputMode::Headphones);
+        snapshot.audio_mix.microphone_original_percent = 0;
+        snapshot
+            .devices
+            .as_mut()
+            .unwrap()
+            .source
+            .selected
+            .as_mut()
+            .unwrap()
+            .id = 0;
+
+        loopbacks.ensure_without_new_mic(&snapshot).unwrap();
+        assert!(registry.current().unwrap().is_none());
+        {
+            let state = runner.0.lock().unwrap();
+            let load = state
+                .calls
+                .iter()
+                .position(|args| args[0] == "load-module")
+                .unwrap();
+            assert_eq!(
+                state.calls[load + 1..].len(),
+                4,
+                "both sides must be read again after pending"
+            );
+            assert!(
+                state.deadlines[load..]
+                    .iter()
+                    .all(|deadline| *deadline == state.deadlines[load])
+            );
+        }
+        loopbacks.ensure_without_new_mic(&snapshot).unwrap();
+        assert_eq!(
+            runner
+                .calls()
+                .iter()
+                .filter(|args| args[0] == "load-module")
+                .count(),
+            1
+        );
+        assert!(registry.current().unwrap().is_none());
+    }
+
+    #[test]
+    fn fresh_loopback_wrong_ack_or_bound_target_fails_without_polling() {
+        for fault in [
+            "wrong_ack",
+            "malformed_ack",
+            "reserved_ack",
+            "wrong_target",
+            "foreign_owner",
+        ] {
+            let runner = LoopbackRunner::new(Vec::new());
+            {
+                let mut state = runner.0.lock().unwrap();
+                match fault {
+                    "wrong_ack" => state.load_ack_override = Some("42".to_owned()),
+                    "malformed_ack" => state.load_ack_override = Some("not-an-id".to_owned()),
+                    "reserved_ack" => state.load_ack_override = Some(u32::MAX.to_string()),
+                    "wrong_target" => {
+                        state.wrong_loaded_sink = true;
+                        state.unbound_source_only = true;
+                        state.unbound_stream_reads = 2;
+                    }
+                    "foreign_owner" => state.missing_sink_owner = true,
+                    _ => unreachable!(),
+                }
+            }
+            let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+            assert!(
+                loopbacks
+                    .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                    .is_err(),
+                "{fault}"
+            );
+            let calls = runner.calls();
+            let load = calls
+                .iter()
+                .position(|args| args[0] == "load-module")
+                .unwrap();
+            assert!(
+                calls[load + 1..].len() <= 2,
+                "contradiction must not be polled: {fault}"
+            );
+            assert_eq!(
+                calls.iter().filter(|args| args[0] == "load-module").count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_loopback_existing_unbound_pair_has_no_readiness_grace() {
+        let runner = LoopbackRunner::new(vec![speaker_module(43)]);
+        {
+            let mut state = runner.0.lock().unwrap();
+            state.load_seen = true;
+            state.unbound_stream_reads = 2;
+        }
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+        assert!(
+            loopbacks
+                .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                .is_err()
+        );
+        assert_eq!(runner.calls().len(), 4);
+        assert_eq!(runner.module_ids(), vec![43]);
+    }
+
+    #[test]
+    fn fresh_loopback_pending_expiry_retains_exact_cleanup_custody() {
+        let runner = LoopbackRunner::new(vec![microphone_module(42, false)]);
+        runner.0.lock().unwrap().unbound_stream_reads = usize::MAX;
+        let loopbacks = PulseOriginalLoopbacks::new(runner.clone());
+        assert!(
+            loopbacks
+                .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                .is_err()
+        );
+        {
+            let state = runner.0.lock().unwrap();
+            let load = state
+                .calls
+                .iter()
+                .position(|args| args[0] == "load-module")
+                .unwrap();
+            assert!(
+                state.calls[load + 1..].len() >= 4,
+                "expiry must occur after pending observations"
+            );
+            let deadline = state.deadlines[load];
+            assert!(
+                state.deadlines[load..]
+                    .iter()
+                    .all(|value| *value == deadline)
+            );
+            assert!(Instant::now() >= deadline);
+        }
+        assert_eq!(loopbacks.cleanup_all().unwrap(), vec!["43"]);
+        assert_eq!(
+            runner.module_ids(),
+            vec![42],
+            "foreign resource must survive cleanup"
+        );
+    }
+
+    #[test]
+    fn fresh_loopback_late_bound_inventory_cannot_certify_readiness() {
+        let runner = LoopbackRunner::new(Vec::new());
+        runner.0.lock().unwrap().expire_after_load_inventory = true;
+        let loopbacks = PulseOriginalLoopbacks::new(runner);
+        assert!(
+            loopbacks
+                .ensure(&loopback_snapshot(OutputMode::OpenSpeaker))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fresh_loopback_identical_duplicate_streams_are_not_one_pair() {
+        let sink = serde_json::json!({"owner_module": 43, "sink": 0,
+            "properties": {"media.name": SPEAKER_ORIGINAL_LOOPBACK, "translator.owner": "true"}});
+        let source = serde_json::json!({"owner_module": 43, "source": 1,
+            "properties": {"media.name": SPEAKER_ORIGINAL_LOOPBACK, "translator.owner": "true"}});
+        for duplicate_sink in [true, false] {
+            let sinks: Vec<RawPulseStream> = serde_json::from_value(if duplicate_sink {
+                serde_json::json!([sink, sink])
+            } else {
+                serde_json::json!([sink])
+            })
+            .unwrap();
+            let sources: Vec<RawPulseStream> = serde_json::from_value(if duplicate_sink {
+                serde_json::json!([source])
+            } else {
+                serde_json::json!([source, source])
+            })
+            .unwrap();
+            assert!(discover_original_loopbacks(&sinks, &sources).is_err());
+        }
     }
 
     #[test]
@@ -4721,7 +5022,7 @@ mod tests {
             .with_max_level(tracing::Level::WARN)
             .try_init();
         use std::os::unix::fs::FileTypeExt;
-        use std::sync::atomic::AtomicU8;
+        use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64};
         use translator_audio::{
             OriginalMicrophoneRegistry, PcmFrame, PulsePcmCapture, PulsePcmCommand,
             PulsePcmPlayback, StreamPcmFormat,
@@ -5068,6 +5369,248 @@ mod tests {
             "original gain must follow Pulse's amplitude mapping"
         );
         assert!(silent.iter().all(|(_, _, peak)| *peak == 0));
+        mix.apply_desired(
+            AudioMixState {
+                microphone_original_percent: 35,
+                ..desired
+            },
+            TranslationMixMode::Translating,
+        )
+        .unwrap();
+        let incoming_observer = PulsePcmCapture::spawn(&PulsePcmCommand::capture(
+            "translator_test_out.monitor",
+            "synthetic-concurrent-incoming-observer",
+        ))
+        .unwrap();
+        let translated_frame = |sequence, frequency: f64| {
+            PcmFrame::try_new(
+                sequence,
+                sequence * 20_000_000,
+                StreamPcmFormat::provider_default(),
+                (0..320)
+                    .flat_map(|index| {
+                        ((8_000.0
+                            * (std::f64::consts::TAU * frequency * index as f64 / 16_000.0).sin())
+                            as i16)
+                            .to_le_bytes()
+                    })
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let translation_indices = [
+            translation_playbacks[0].1.index(),
+            translation_playbacks[1].1.index(),
+        ];
+        let assert_translation_gains = |percents: [u32; 2]| {
+            let inputs = std::process::Command::new("pactl")
+                .args(["--format=json", "list", "sink-inputs"])
+                .output()
+                .unwrap();
+            assert!(inputs.status.success());
+            let values: serde_json::Value = serde_json::from_slice(&inputs.stdout).unwrap();
+            for (index, percent) in translation_indices.iter().zip(percents) {
+                let stream = values
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|stream| stream["index"] == *index)
+                    .unwrap();
+                assert!(
+                    stream["volume"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|channel| channel["value"]
+                            .as_u64()
+                            .unwrap()
+                            .abs_diff(u64::from((percent * 65_536 + 50) / 100))
+                            <= 1)
+                );
+            }
+        };
+        let translated_done = Arc::new(AtomicBool::new(false));
+        let incoming_frequency = Arc::new(AtomicU32::new(1_500));
+        let translated_sequence = Arc::new(AtomicU64::new(0));
+        let writer_done = translated_done.clone();
+        let writer_frequency = incoming_frequency.clone();
+        let writer_sequence = translated_sequence.clone();
+        let translated_task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(20));
+            let mut sequence = 0;
+            while !writer_done.load(Ordering::Acquire) {
+                tick.tick().await;
+                for ((playback, _), frequency) in translation_playbacks
+                    .iter_mut()
+                    .zip([1_000.0, f64::from(writer_frequency.load(Ordering::Acquire))])
+                {
+                    playback
+                        .write_frame(&translated_frame(sequence, frequency))
+                        .await
+                        .unwrap();
+                }
+                sequence += 1;
+                writer_sequence.store(sequence, Ordering::Release);
+            }
+            translation_playbacks
+        });
+        let incoming_observations = Arc::new(Mutex::new(Vec::new()));
+        let observer_done = Arc::new(AtomicBool::new(false));
+        let observer_stop = observer_done.clone();
+        let incoming_samples = incoming_observations.clone();
+        let incoming_task = tokio::spawn(async move {
+            let mut capture = incoming_observer;
+            let mut sequence = 0;
+            while !observer_stop.load(Ordering::Acquire) {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    capture.read_frame(sequence, sequence * 20_000_000),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let samples: Vec<f64> = frame
+                    .pcm()
+                    .chunks_exact(2)
+                    .map(|v| f64::from(i16::from_le_bytes([v[0], v[1]])))
+                    .collect();
+                let rms =
+                    (samples.iter().map(|v| v * v).sum::<f64>() / samples.len() as f64).sqrt();
+                let amplitude = |frequency: f64| {
+                    let (sin, cos) = samples.iter().enumerate().fold(
+                        (0.0, 0.0),
+                        |(sin, cos), (index, value)| {
+                            let angle = std::f64::consts::TAU * frequency * index as f64 / 16_000.0;
+                            (sin + value * angle.sin(), cos + value * angle.cos())
+                        },
+                    );
+                    2.0 * sin.hypot(cos) / samples.len() as f64
+                };
+                incoming_samples.lock().unwrap().push((
+                    Instant::now(),
+                    rms,
+                    amplitude(1_500.0),
+                    amplitude(2_000.0),
+                ));
+                sequence += 1;
+            }
+            capture.stop().await.unwrap();
+        });
+        for (stage, percent) in [(6, 100), (8, 35), (9, 0), (10, 35)] {
+            let boundary = Instant::now();
+            let before_sequence = translated_sequence.load(Ordering::Acquire);
+            mix.apply_desired(
+                AudioMixState {
+                    microphone_original_percent: percent,
+                    ..desired
+                },
+                TranslationMixMode::Translating,
+            )
+            .unwrap();
+            phase.store(stage, Ordering::Release);
+            tokio::time::sleep(Duration::from_millis(950)).await;
+            originals.verify_existing(&snapshot, true).unwrap();
+            assert!(first.same_session(&registry.current().unwrap().unwrap()));
+            assert_translation_gains([75, 63]);
+            assert_eq!(
+                mix.committed().unwrap().microphone_original_percent,
+                percent
+            );
+            assert!(translated_sequence.load(Ordering::Acquire) >= before_sequence + 40);
+            let outgoing = settled(stage);
+            assert_eq!(outgoing.len(), 20);
+            assert!(
+                outgoing.iter().all(|(_, rms, _)| *rms > 1_500.0),
+                "translated outgoing PCM must continue even when raw gain is zero"
+            );
+            let incoming = incoming_observations.lock().unwrap();
+            let window: Vec<_> = incoming
+                .iter()
+                .filter(|(at, _, _, _)| *at >= boundary + Duration::from_millis(400))
+                .collect();
+            assert!(window.len() >= 20);
+            assert!(window.iter().all(|(_, rms, _, _)| *rms > 1_000.0));
+        }
+
+        let mut disabled = snapshot.clone();
+        disabled
+            .directions
+            .iter_mut()
+            .find(|direction| direction.direction_id == translator_core::AudioDirection::Microphone)
+            .unwrap()
+            .enabled = false;
+        originals.ensure_without_new_mic(&disabled).unwrap();
+        mix.reconcile_committed(TranslationMixMode::TranslatingMicrophoneMuted)
+            .unwrap();
+        assert!(
+            registry.current().unwrap().is_none() && !first.is_live(),
+            "healthy positive-gain disable must join acquisition before acknowledgement"
+        );
+        assert_eq!(
+            mix.committed().unwrap().microphone_original_percent,
+            35,
+            "disable retains desired gain"
+        );
+        assert_translation_gains([0, 63]);
+        let joined_at = Instant::now();
+        incoming_frequency.store(2_000, Ordering::Release);
+        tokio::time::sleep(Duration::from_millis(950)).await;
+        let fresh_incoming = incoming_observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(at, _, _, fresh)| *at > joined_at && *fresh > 1_000.0)
+            .count();
+        assert!(
+            fresh_incoming >= 20,
+            "post-join unique incoming tone must arrive; buffered pre-disable PCM cannot pass"
+        );
+        let disabled_boundary = observations.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(observations.lock().unwrap().len() >= disabled_boundary + 20);
+        assert!(
+            observations.lock().unwrap()[disabled_boundary..]
+                .iter()
+                .all(|(_, _, peak)| *peak == 0)
+        );
+        let reenable_boundary = observations.lock().unwrap().len();
+        phase.store(7, Ordering::Release);
+        originals.prepare_for_start(&snapshot).unwrap();
+        let reenabled = registry.current().unwrap().unwrap();
+        assert_ne!(first.session_id(), reenabled.session_id());
+        tokio::time::sleep(Duration::from_millis(950)).await;
+        {
+            let reenabled_observations = observations.lock().unwrap();
+            let reenabled_zero = &reenabled_observations[reenable_boundary..];
+            assert!(reenabled_zero.len() >= 20);
+            assert!(
+                reenabled_zero.iter().all(|(_, _, peak)| *peak == 0),
+                "healthy re-enable starts at zero, without old PCM"
+            );
+        }
+        translated_done.store(true, Ordering::Release);
+        let mut translation_playbacks =
+            tokio::time::timeout(Duration::from_secs(2), translated_task)
+                .await
+                .unwrap()
+                .unwrap();
+        observer_done.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), incoming_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let first = reenabled;
+        mix.apply_desired(
+            AudioMixState {
+                microphone_original_percent: 35,
+                ..desired
+            },
+            TranslationMixMode::Translating,
+        )
+        .unwrap();
+        eprintln!(
+            "PRIVATE_ORIGINAL_CONCURRENCY outgoing_pcm=true incoming_pcm=true gain_independent=true healthy_disable_joined=true incoming_survived=true fresh_zero_reenable=true PASS"
+        );
         assert!(
             !std::process::Command::new("pactl")
                 .args([
@@ -5374,6 +5917,406 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires a disposable private PulseAudio socket and virtual fixture sinks"]
+    async fn private_pulse_native_z_composed_shutdown_releases_cancelled_custody() {
+        let server = std::env::var("PULSE_SERVER").expect("private PULSE_SERVER required");
+        assert!(
+            server.starts_with("unix:/tmp/translator-loopback-") && server.ends_with("/native")
+        );
+        fn inventory(kind: &str) -> Vec<serde_json::Value> {
+            let output = std::process::Command::new("pactl")
+                .args(["--format=json", "list", kind])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            serde_json::from_slice(&output.stdout).unwrap()
+        }
+        let endpoint = |kind: &str, name: &str| -> u32 {
+            inventory(kind)
+                .iter()
+                .find(|item| item["name"] == name)
+                .unwrap()["index"]
+                .as_u64()
+                .unwrap() as u32
+        };
+        // Replace only the runner's unowned fixture endpoints, never host devices.
+        for name in [MIC_OUT_SINK, REMOTE_IN_SINK] {
+            let sinks = inventory("sinks");
+            let sink = sinks.iter().find(|item| item["name"] == name).unwrap();
+            assert!(sink["properties"]["translator.owner"].is_null());
+            let module = sink["owner_module"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| sink["owner_module"].as_u64().unwrap().to_string());
+            assert!(
+                std::process::Command::new("pactl")
+                    .args(["unload-module", &module])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let foreign_modules = || {
+            let output = std::process::Command::new("pactl")
+                .args(["list", "short", "modules"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            output.stdout
+        };
+        let fixture_modules = [
+            [
+                "load-module",
+                "module-null-sink",
+                "sink_name=private_fixture_output",
+                "channels=1",
+                "channel_map=mono",
+            ],
+            [
+                "load-module",
+                "module-remap-source",
+                "master=translator_test_mic.monitor",
+                "source_name=private_fixture_capture",
+                "channels=1",
+            ],
+        ]
+        .map(|arguments| {
+            let output = std::process::Command::new("pactl")
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap()
+        });
+        let foreign_before = foreign_modules();
+
+        struct PrivateFacts {
+            routes: Arc<super::PulseManualRoutes>,
+            devices: translator_audio::DeviceFacts,
+        }
+        impl translator_daemon::RuntimeFactsSource for PrivateFacts {
+            fn inspect(
+                &self,
+                deadline: Instant,
+            ) -> Result<translator_daemon::RuntimeFacts, translator_daemon::FactsError>
+            {
+                self.routes
+                    .resources
+                    .with_active(|resources| {
+                        super::inspect_runtime_graph_facts(
+                            self.devices.clone(),
+                            resources.graph.as_ref().unwrap(),
+                            &resources.routing,
+                            deadline,
+                        )
+                    })
+                    .ok_or(translator_daemon::FactsError::DiscoveryFailed)?
+            }
+        }
+        impl translator_daemon::RuntimeMaintenance for PrivateFacts {
+            fn refresh(
+                &self,
+                store: &RuntimeStore,
+            ) -> Result<(), translator_daemon::ControlFailure> {
+                let facts = translator_daemon::RuntimeFactsSource::inspect(
+                    self,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .map_err(|_| super::native_route_failure())?;
+                store.set_devices(facts.devices.into());
+                store.set_audio_graph(facts.audio_graph);
+                store.set_routes(facts.routes);
+                Ok(())
+            }
+            fn refresh_bypass_facts(
+                &self,
+                store: &RuntimeStore,
+            ) -> Result<(), translator_daemon::ControlFailure> {
+                self.refresh(store)
+            }
+            fn verify_bypass_custody(
+                &self,
+                snapshot: &RuntimeSnapshot,
+                permit: bool,
+            ) -> Result<(), translator_daemon::ControlFailure> {
+                self.routes.verify_bypass_custody(snapshot, permit)
+            }
+            fn prepare_start(
+                &self,
+                snapshot: &RuntimeSnapshot,
+            ) -> Result<(), translator_daemon::ControlFailure> {
+                self.routes.prepare_start(snapshot)
+            }
+            fn prepare_bypass(
+                &self,
+                snapshot: &RuntimeSnapshot,
+            ) -> Result<(), translator_daemon::ControlFailure> {
+                self.routes.prepare_bypass(snapshot)
+            }
+            fn cleanup_originals(
+                &self,
+                deadline: Instant,
+            ) -> Result<(), translator_daemon::ControlFailure> {
+                self.routes.cleanup_originals(deadline)
+            }
+        }
+
+        let foreign_pair = (
+            endpoint("sources", "private_fixture_capture"),
+            endpoint("sinks", "private_fixture_output"),
+        );
+        for case in ["cancelled", "running", "bypass", "offline"] {
+            let mut graph = translator_audio::PulseAudioGraph::new(
+                SystemCommandRunner,
+                translator_audio::default_journal_path().unwrap(),
+            );
+            let graph_state = graph.ensure_endpoints().unwrap();
+            assert_eq!(graph_state.owned_module_ids.len(), 3);
+            let gate = AudioOperationGate::new();
+            let registry = translator_audio::OriginalMicrophoneRegistry::default();
+            let routes = Arc::new(super::PulseManualRoutes {
+                resources: LifecycleProtected::new(super::PulseResources {
+                    routing: translator_audio::PulseRoutingWatcher::new(
+                        SystemCommandRunner,
+                        translator_audio::RoutingProfile::Production,
+                    ),
+                    devices: translator_audio::PulseDeviceWatcher::new(
+                        SystemCommandRunner,
+                        AecCapability::Unavailable,
+                    ),
+                    original_loopbacks: PulseOriginalLoopbacks::with_microphone(
+                        SystemCommandRunner,
+                        registry.clone(),
+                    ),
+                    graph: Some(graph),
+                }),
+                operation_gate: gate.clone(),
+            });
+            let mut devices = selected_devices();
+            // These are explicitly synthetic admitted facts, not physical/AEC evidence.
+            let microphone = "private_fixture_capture";
+            devices.source.selected =
+                Some(physical_device(endpoint("sources", microphone), microphone));
+            devices.source.pinned_name = Some(microphone.into());
+            devices.sink.selected = Some(physical_device(
+                endpoint("sinks", "private_fixture_output"),
+                "private_fixture_output",
+            ));
+            devices.sink.pinned_name = Some("private_fixture_output".into());
+            let facts = Arc::new(PrivateFacts {
+                routes: routes.clone(),
+                devices: translator_audio::DeviceFacts {
+                    source: devices.source,
+                    sink: devices.sink,
+                    output_mode: OutputMode::Headphones,
+                    aec_capability: AecCapability::Unavailable,
+                },
+            });
+            let mix = Arc::new(
+                translator_daemon::AudioMixApplication::with_original_microphone(
+                    SystemCommandRunner,
+                    registry.clone(),
+                ),
+            );
+            let store = RuntimeStore::default();
+            let state = Arc::new(DrainState::default());
+            let control = ControlApplication::spawn(
+                store.clone(),
+                Arc::new(DrainRuntime(state.clone())),
+                gate.clone(),
+                facts.clone(),
+                facts,
+                Some(mix.clone()),
+            );
+            control.execute(ControlCommand::Start).await.unwrap();
+            let registration = registry.current().unwrap().unwrap();
+            assert!(registration.is_live());
+            if case == "bypass" {
+                control.execute(ControlCommand::Stop).await.unwrap();
+                assert!(registration.is_live());
+                let desired = store.snapshot().audio_mix;
+                for _ in 0..3 {
+                    control
+                        .execute(ControlCommand::ReconcileAudio)
+                        .await
+                        .unwrap();
+                    assert_eq!(store.snapshot().audio_mix, desired);
+                    assert!(
+                        registry
+                            .current()
+                            .unwrap()
+                            .unwrap()
+                            .same_session(&registration)
+                    );
+                    let raw = inventory("sink-inputs");
+                    let raw = raw
+                        .iter()
+                        .find(|item| item["index"] == registration.playback_index())
+                        .unwrap();
+                    assert_eq!(raw["volume"]["mono"]["value"], 65_536);
+                }
+            }
+            if case == "cancelled" {
+                registry.cancel_current();
+                assert!(!registration.is_live());
+                assert!(
+                    registry.current().is_err(),
+                    "cancel must retain join custody"
+                );
+            }
+            if case == "offline" {
+                control.execute(ControlCommand::Stop).await.unwrap();
+                routes
+                    .resources
+                    .with_active(|resources| resources.original_loopbacks.cleanup_all())
+                    .unwrap()
+                    .unwrap();
+                let request = OriginalLoopbackRequest {
+                    media_name: SPEAKER_ORIGINAL_LOOPBACK,
+                    source: format!("{REMOTE_IN_SINK}.monitor"),
+                    sink: "private_fixture_output".into(),
+                };
+                routes
+                    .resources
+                    .with_active(|resources| {
+                        resources
+                            .original_loopbacks
+                            .load_module(&request, Instant::now() + Duration::from_secs(2))
+                    })
+                    .unwrap()
+                    .unwrap();
+                let before = foreign_modules();
+                assert!(String::from_utf8_lossy(&before).contains("loopback-speaker-original"));
+                assert_eq!(
+                    super::run_audio_graph_cleanup(),
+                    std::process::ExitCode::SUCCESS
+                );
+                assert_eq!(
+                    foreign_modules(),
+                    foreign_before,
+                    "offline cleanup must remove all four owned modules only"
+                );
+                assert_eq!(
+                    super::run_audio_graph_cleanup(),
+                    std::process::ExitCode::SUCCESS
+                );
+            }
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let observed_gate = gate.clone();
+            let server = tokio::spawn(async move {
+                stopped.await.unwrap();
+                assert_eq!(observed_gate.state(), AudioOperationState::Stopping);
+                Ok(())
+            });
+            let background = [0; 2].map(|_| tokio::spawn(std::future::pending::<()>()));
+            let result = tokio::time::timeout(
+                translator_daemon::RUNTIME_CLEANUP_BUDGET + Duration::from_secs(1),
+                super::drain_control_owners(
+                    &gate,
+                    (stop, server),
+                    background,
+                    None,
+                    Some(&control),
+                    &store,
+                ),
+            )
+            .await
+            .expect("composed drain exceeded original cleanup budget");
+            assert!(
+                result.0.is_ok() && result.1.is_ok() && result.2.is_ok() && result.3.is_none(),
+                "actual composed {case} drain must finish before final graph cleanup: {:?}",
+                result.2
+            );
+            assert_eq!(gate.state(), AudioOperationState::Stopping);
+            assert!(gate.acquire_production().is_err());
+            assert!(
+                translator_daemon::RuntimeMaintenance::refresh_bypass_facts(
+                    routes.as_ref(),
+                    &store
+                )
+                .is_err()
+            );
+            assert!(
+                translator_daemon::RuntimeMaintenance::prepare_bypass(
+                    routes.as_ref(),
+                    &store.snapshot()
+                )
+                .is_err()
+            );
+            assert!(control.execute(ControlCommand::Start).await.is_err());
+            assert!(
+                registry.current().unwrap().is_none(),
+                "joined native custody must be released by drain"
+            );
+            assert_eq!(
+                store.snapshot().runtime_status,
+                translator_daemon::RuntimeStatus::Stopped
+            );
+            assert_eq!(
+                store.snapshot().audio_mix_knowledge,
+                translator_daemon::AudioMixKnowledge::Known
+            );
+            assert_eq!(
+                state.stop_calls.load(Ordering::SeqCst),
+                1,
+                "do not repeat an already completed runtime stop"
+            );
+            let inputs = inventory("sink-inputs");
+            let outputs = inventory("source-outputs");
+            assert!(
+                !inputs
+                    .iter()
+                    .any(|item| item["index"] == registration.playback_index())
+            );
+            assert!(
+                !outputs
+                    .iter()
+                    .any(|item| item["index"] == registration.capture_index())
+            );
+            let raw_inputs: Vec<RawPulseStream> =
+                serde_json::from_value(serde_json::Value::Array(inputs)).unwrap();
+            let raw_outputs: Vec<RawPulseStream> =
+                serde_json::from_value(serde_json::Value::Array(outputs)).unwrap();
+            assert!(
+                discover_original_loopbacks(&raw_inputs, &raw_outputs)
+                    .unwrap()
+                    .is_empty(),
+                "graph remap streams may remain, but no owned originals may survive drain"
+            );
+            translator_daemon::ManualRouteController::restore(routes.as_ref()).unwrap();
+            routes.cleanup_graph();
+            assert_eq!(
+                foreign_modules(),
+                foreign_before,
+                "only owned graph modules may disappear"
+            );
+            assert_eq!(
+                (
+                    endpoint("sources", microphone),
+                    endpoint("sinks", "private_fixture_output")
+                ),
+                foreign_pair
+            );
+            println!(
+                "PRIVATE_COMPOSED_SHUTDOWN case={case} joined=true gate=stopping owned_cleanup=true PASS"
+            );
+        }
+        for module in fixture_modules.into_iter().rev() {
+            assert!(
+                std::process::Command::new("pactl")
+                    .args(["unload-module", &module.to_string()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
     #[test]
     fn original_loopback_load_args_quote_nested_owner_properties() {
         let request = OriginalLoopbackRequest {
@@ -5569,7 +6512,7 @@ mod tests {
         recovery_failures: AtomicUsize,
         unknown: AtomicBool,
         failed: tokio::sync::Notify,
-        attempts: Mutex<Vec<Instant>>,
+        attempts: Mutex<Vec<(&'static str, Instant)>>,
         stop_deadlines: Mutex<Vec<tokio::time::Instant>>,
         stop_calls: AtomicUsize,
         mix_modes: Mutex<Vec<translator_daemon::TranslationMixMode>>,
@@ -5579,8 +6522,16 @@ mod tests {
     struct DrainRuntime(Arc<DrainState>);
 
     impl DrainRuntime {
-        fn attempt(&self, failures: &AtomicUsize) -> Result<(), translator_daemon::ControlFailure> {
-            self.0.attempts.lock().unwrap().push(Instant::now());
+        fn attempt(
+            &self,
+            boundary: &'static str,
+            failures: &AtomicUsize,
+        ) -> Result<(), translator_daemon::ControlFailure> {
+            self.0
+                .attempts
+                .lock()
+                .unwrap()
+                .push((boundary, Instant::now()));
             if failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
@@ -5618,7 +6569,7 @@ mod tests {
             if self.0.unknown.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            self.attempt(&self.0.stop_failures)
+            self.attempt("stop", &self.0.stop_failures)
                 .map_err(|_| translator_daemon::DuplexRuntimeError::StopFailed)
         }
     }
@@ -5689,7 +6640,7 @@ mod tests {
             mode: translator_daemon::TranslationMixMode,
         ) -> Result<(), translator_daemon::ControlFailure> {
             self.0.mix_modes.lock().unwrap().push(mode);
-            self.attempt(&self.0.recovery_failures)?;
+            self.attempt("recovery", &self.0.recovery_failures)?;
             self.0.unknown.store(false, Ordering::SeqCst);
             Ok(())
         }
@@ -5764,14 +6715,35 @@ mod tests {
         }
         assert_eq!(gate.state(), AudioOperationState::Idle);
         assert!(route_observed.load(Ordering::SeqCst));
-        let attempts = state.attempts.lock().unwrap();
-        assert_eq!(attempts.len(), stop_failures + recovery_failures + 1);
-        assert!(
-            attempts
-                .windows(2)
-                .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_secs(1)),
-            "completed failures must be separated by a full second before retry"
+        assert_eq!(state.stop_calls.load(Ordering::SeqCst), stop_failures + 1);
+        assert_eq!(
+            state.stop_deadlines.lock().unwrap().len(),
+            stop_failures + 1
         );
+        let attempts = state.attempts.lock().unwrap();
+        for (boundary, count) in [
+            (
+                "stop",
+                if recovery_failures > 0 {
+                    0
+                } else {
+                    stop_failures + 1
+                },
+            ),
+            ("recovery", stop_failures + recovery_failures + 1),
+        ] {
+            let times: Vec<_> = attempts
+                .iter()
+                .filter_map(|(observed, at)| (*observed == boundary).then_some(*at))
+                .collect();
+            assert_eq!(times.len(), count, "{boundary} attempt count");
+            assert!(
+                times
+                    .windows(2)
+                    .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_secs(1)),
+                "completed {boundary} failures must be paced before retry"
+            );
+        }
         assert!(
             state
                 .stop_deadlines
@@ -5945,7 +6917,7 @@ mod tests {
             state.mix_modes.lock().unwrap().as_slice(),
             &[translator_daemon::TranslationMixMode::Quarantine {
                 mic_original_expected: false
-            }],
+            }; 2],
             "the actual mix owner must quarantine, never restore audible bypass"
         );
     }

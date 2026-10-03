@@ -7,7 +7,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
 UnsetEnvironment=GLIBC_TUNABLES GCONV_PATH LOCPATH MALLOC_TRACE
 UnsetEnvironment=LD_ASSUME_KERNEL LD_AUDIT LD_BIND_NOT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT LD_DYNAMIC_WEAK LD_HWCAP_MASK
 UnsetEnvironment=LD_LIBRARY_PATH LD_ORIGIN_PATH LD_POINTER_GUARD LD_PREFER_MAP_32BIT_EXEC LD_PRELOAD LD_PROFILE LD_PROFILE_OUTPUT
@@ -26,7 +26,7 @@ CPUQuota=200%
 TasksMax=256
 RuntimeDirectory=translator-preview
 RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=restart
+RuntimeDirectoryPreserve=yes
 StateDirectory=translator-preview
 StateDirectoryMode=0700
 UMask=0077

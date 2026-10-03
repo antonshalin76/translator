@@ -723,7 +723,10 @@ impl RuntimeMaintenance for OriginalCustodyMaintenance {
         }
     }
     fn cleanup_originals(&self, deadline: std::time::Instant) -> Result<(), ControlFailure> {
-        assert_eq!(self.gate.state(), AudioOperationState::Production);
+        assert!(matches!(
+            self.gate.state(),
+            AudioOperationState::Production | AudioOperationState::Stopping
+        ));
         assert!(deadline > std::time::Instant::now());
         self.cleanups.fetch_add(1, Ordering::SeqCst);
         if self.fail_cleanup.load(Ordering::SeqCst) {
@@ -797,6 +800,7 @@ async fn original_start_faults_retain_exclusive_custody_until_joined_recovery() 
             store.snapshot().audio_mix_knowledge,
             AudioMixKnowledge::Known
         );
+        maintenance.gate.begin_stopping();
         application.shutdown().await.unwrap();
     }
 }
@@ -849,6 +853,7 @@ async fn original_unknown_reconcile_joins_raw_custody_and_stops_translation() {
         .unwrap();
     assert_eq!(maintenance.cleanups.load(Ordering::SeqCst), 2);
     assert_eq!(gate.state(), AudioOperationState::Idle);
+    maintenance.gate.begin_stopping();
     application.shutdown().await.unwrap();
 }
 
@@ -953,6 +958,7 @@ async fn disabled_microphone_keeps_desired_gains_but_uses_muted_running_policy()
         Some(&("reconcile", TranslationMixMode::Translating))
     );
     application.execute(ControlCommand::Stop).await.unwrap();
+    maintenance.gate.begin_stopping();
     application.shutdown().await.unwrap();
 }
 
@@ -1150,6 +1156,120 @@ impl AudioMixController for LifecycleProjectionMix {
 }
 
 #[tokio::test]
+async fn stopped_bypass_reinspection_never_interrupts_verified_originals() {
+    let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
+    let runner = Arc::new(TestRunner::default());
+    let mix = Arc::new(TestMix::default());
+    let facts = Arc::new(RecoverableSpeakerFacts::default());
+    let application = ControlApplication::spawn(
+        store.clone(),
+        runner.clone(),
+        gate.clone(),
+        facts.clone(),
+        facts.clone(),
+        Some(mix.clone()),
+    );
+    application.execute(ControlCommand::Start).await.unwrap();
+    let desired = AudioMixState {
+        microphone_original_percent: 0,
+        microphone_translation_percent: 63,
+        speaker_original_percent: 36,
+        speaker_translation_percent: 100,
+    };
+    application
+        .execute(ControlCommand::PatchAudioMix(AudioMixPatch {
+            microphone_original_percent: Some(desired.microphone_original_percent),
+            microphone_translation_percent: Some(desired.microphone_translation_percent),
+            speaker_original_percent: Some(desired.speaker_original_percent),
+            speaker_translation_percent: Some(desired.speaker_translation_percent),
+        }))
+        .await
+        .unwrap();
+    application.execute(ControlCommand::Stop).await.unwrap();
+    let repairs = facts.repairs.load(Ordering::SeqCst);
+    mix.calls.lock().unwrap().clear();
+    for _ in 0..3 {
+        let snapshot = application
+            .execute(ControlCommand::ReconcileAudio)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.runtime_status, RuntimeStatus::Stopped);
+        assert_eq!(snapshot.audio_mix, desired);
+        assert_eq!(gate.state(), AudioOperationState::Idle);
+    }
+    let observed = mix.calls();
+    let repairs_after = facts.repairs.load(Ordering::SeqCst);
+    application.shutdown().await.unwrap();
+    assert_eq!(
+        observed,
+        vec![("reconcile", TranslationMixMode::Bypass); 3],
+        "routine inspection must never select intermediate all-zero Quarantine"
+    );
+    assert_eq!(repairs_after, repairs, "valid custody needs no preparation");
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn stopped_bypass_fast_path_retains_mixer_error_after_successful_repair() {
+    let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
+    let runner = Arc::new(TestRunner::default());
+    let mix = Arc::new(TestMix::default());
+    let facts = Arc::new(RecoverableSpeakerFacts::default());
+    let application = ControlApplication::spawn(
+        store.clone(),
+        runner.clone(),
+        gate.clone(),
+        facts.clone(),
+        facts.clone(),
+        Some(mix.clone()),
+    );
+    application.execute(ControlCommand::Start).await.unwrap();
+    application.execute(ControlCommand::Stop).await.unwrap();
+    let desired = store.snapshot().audio_mix;
+    let repairs = facts.repairs.load(Ordering::SeqCst);
+    mix.calls.lock().unwrap().clear();
+    mix.reconcile
+        .lock()
+        .unwrap()
+        .push_back(Err(mix_error("audio_mix_apply_failed")));
+
+    let error = application
+        .execute(ControlCommand::ReconcileAudio)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "audio_mix_apply_failed");
+    assert_eq!(
+        mix.calls(),
+        [
+            ("reconcile", TranslationMixMode::Bypass),
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            ("reconcile", TranslationMixMode::Bypass),
+        ],
+        "successful quarantine and repair must not acknowledge the failed direct bypass"
+    );
+    assert_eq!(facts.repairs.load(Ordering::SeqCst), repairs + 1);
+    assert_eq!(store.snapshot().runtime_status, RuntimeStatus::Stopped);
+    assert_eq!(
+        store.snapshot().audio_mix_knowledge,
+        AudioMixKnowledge::Known
+    );
+    assert_eq!(store.snapshot().audio_mix, desired);
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+    application.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn stopped_audio_reconciliation_does_not_project_nonexistent_runtime_cleanup() {
     let store = RuntimeStore::default();
     let facts =
@@ -1188,6 +1308,63 @@ async fn stopped_audio_reconciliation_does_not_project_nonexistent_runtime_clean
     assert_eq!(state.starts.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test]
+async fn stopped_bypass_reinspection_quarantines_revoked_authorization() {
+    let store = RuntimeStore::default();
+    let gate = AudioOperationGate::new();
+    let runner = Arc::new(TestRunner::default());
+    let mix = Arc::new(TestMix::default());
+    let facts = Arc::new(SwitchableBypassFacts {
+        mode: Mutex::new(translator_audio::OutputMode::Headphones),
+        mic_custody: AtomicBool::new(true),
+    });
+    let application = ControlApplication::spawn(
+        store.clone(),
+        runner.clone(),
+        gate.clone(),
+        facts.clone(),
+        facts.clone(),
+        Some(mix.clone()),
+    );
+    application.execute(ControlCommand::Start).await.unwrap();
+    application.execute(ControlCommand::Stop).await.unwrap();
+    let desired = store.snapshot().audio_mix;
+    *facts.mode.lock().unwrap() = translator_audio::OutputMode::OpenSpeaker;
+    mix.calls.lock().unwrap().clear();
+    application
+        .execute(ControlCommand::ReconcileAudio)
+        .await
+        .unwrap();
+    let changed = mix.calls();
+    mix.calls.lock().unwrap().clear();
+    application
+        .execute(ControlCommand::ReconcileAudio)
+        .await
+        .unwrap();
+    let stable_muted = mix.calls();
+    assert_eq!(store.snapshot().audio_mix, desired);
+    assert_eq!(gate.state(), AudioOperationState::Idle);
+    application.shutdown().await.unwrap();
+    assert_eq!(
+        changed,
+        [
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            ("reconcile", TranslationMixMode::MicrophoneMutedBypass),
+        ]
+    );
+    assert_eq!(
+        stable_muted,
+        [("reconcile", TranslationMixMode::MicrophoneMutedBypass)]
+    );
+    assert_eq!(runner.state.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 1);
+}
+
 async fn assert_owned_shutdown_after_safety_stop(
     application: &ControlApplication,
     store: &RuntimeStore,
@@ -1201,6 +1378,12 @@ async fn assert_owned_shutdown_after_safety_stop(
     let mut expected = mix.calls();
     expected.push((
         "reconcile",
+        TranslationMixMode::Quarantine {
+            mic_original_expected: false,
+        },
+    ));
+    expected.push((
+        "recover",
         TranslationMixMode::Quarantine {
             mic_original_expected: false,
         },
@@ -2530,6 +2713,12 @@ async fn shutdown_quarantines_and_completes_native_cleanup_without_bypass() {
                     mic_original_expected: false
                 }
             ),
+            (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
         ]
     );
     let snapshot = store.snapshot();
@@ -2576,6 +2765,12 @@ async fn failed_native_shutdown_keeps_quarantine_and_retry_ownership() {
                     mic_original_expected: false
                 }
             ),
+            (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
         ]
     );
     assert_eq!(
@@ -2610,7 +2805,19 @@ async fn failed_native_shutdown_keeps_quarantine_and_retry_ownership() {
                 }
             ),
             (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
                 "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
+                "recover",
                 TranslationMixMode::Quarantine {
                     mic_original_expected: false
                 }
@@ -2694,6 +2901,12 @@ async fn cancelled_accepted_shutdown_attaches_to_one_native_cleanup_and_stays_cl
             ("reconcile", TranslationMixMode::Translating),
             (
                 "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
+                "recover",
                 TranslationMixMode::Quarantine {
                     mic_original_expected: false
                 }
@@ -2813,6 +3026,12 @@ async fn dropping_last_application_handle_drains_active_runtime_and_mix() {
                     mic_original_expected: false
                 }
             ),
+            (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
         ]
     );
 }
@@ -2887,7 +3106,19 @@ async fn dropping_last_handle_retries_the_same_cleanup_pending_owner() {
                 }
             ),
             (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
                 "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
+                "recover",
                 TranslationMixMode::Quarantine {
                     mic_original_expected: false
                 }
@@ -3097,14 +3328,23 @@ async fn ordinary_bypass_failure_is_not_silently_recovered() {
     application.shutdown().await.unwrap();
     assert_eq!(runner.state.stop_calls.load(Ordering::SeqCst), 2);
     assert_eq!(runner.state.active.load(Ordering::SeqCst), 0);
+    let calls = mix.calls();
     assert_eq!(
-        mix.calls().last(),
-        Some(&(
-            "reconcile",
-            TranslationMixMode::Quarantine {
-                mic_original_expected: false
-            },
-        ))
+        &calls[calls.len() - 2..],
+        [
+            (
+                "reconcile",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+            (
+                "recover",
+                TranslationMixMode::Quarantine {
+                    mic_original_expected: false
+                }
+            ),
+        ]
     );
     assert_eq!(
         application

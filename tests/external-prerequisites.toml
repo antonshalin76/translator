@@ -2,6 +2,11 @@ schema_version = 1
 
 [[skip]]
 framework = "rust"
+id = "translator-daemon::bin::translator-daemon::tests::private_pulse_native_z_composed_shutdown_releases_cancelled_custody"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
 id = "translator-daemon::bin::translator-daemon::tests::private_pulse_native_original_zero_gain_gain_changes_and_cleanup"
 code = "missing_external_prerequisite:private_pulse_fixture"
 
@@ -203,4 +208,24 @@ code = "missing_external_prerequisite:private_human_evidence"
 [[skip]]
 framework = "rust"
 id = "translator-audio::lib::translator_audio::original_microphone::tests::private_pulse_cancellation_at_native_phases_confirms_cleanup"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_numbered_pcm_conservation_and_stall"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_pump_exhaustion_revokes"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_suspended_endpoint_revokes"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-audio::lib::translator_audio::original_microphone::native_pcm_fixture::private_pulse_native_corked_endpoint_revokes"
 code = "missing_external_prerequisite:private_pulse_fixture"

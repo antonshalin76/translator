@@ -60,6 +60,7 @@ crates/translator-audio/src/mix.rs
 crates/translator-audio/src/model.rs
 crates/translator-audio/src/module_list.rs
 crates/translator-audio/src/original_microphone.rs
+crates/translator-audio/src/original_microphone/native_pcm_fixture.rs
 crates/translator-audio/src/pcm.rs
 crates/translator-audio/src/pulse.rs
 crates/translator-audio/src/routing.rs
@@ -193,6 +194,7 @@ scripts/translator-aec-backend-stage
 scripts/translator-asr-quality-debug
 scripts/translator-browser-live-stream-smoke
 scripts/translator-desktop
+scripts/translator-native-pcm-check
 scripts/translator-native-ui-check
 scripts/translator-podcast-quality-debug
 scripts/translator-preview-package
@@ -317,6 +319,10 @@ systemd/translator.service
 tests/audio-fixtures/README.md
 tests/contract-fixtures/open_session.json
 tests/external-prerequisites.toml
+tests/fixtures/native-pcm/80-fixture.lua
+tests/fixtures/native-pcm/isolated-core.conf
+tests/fixtures/native-pcm/isolated-pulse.conf
+tests/fixtures/native-pcm/policy.conf
 tests/requirements-automatic-audio-eval.txt
 tests/requirements-native-ui-eval.txt
 tests/test-manifest.json

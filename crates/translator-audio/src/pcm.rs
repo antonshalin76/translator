@@ -814,17 +814,19 @@ impl PulsePcmPlayback {
             }) {
                 let sinks: Vec<RawPlaybackSink> =
                     pactl_json(&["--format=json", "list", "sinks"], deadline).await?;
-                let registration = find_playback_registration(identity, pid, &inputs, &sinks)?
-                    .ok_or(PulsePcmError::Registration)?;
-                if self
-                    .child
-                    .try_wait()
-                    .map_err(|_| PulsePcmError::Registration)?
-                    .is_some()
+                if let Some(registration) =
+                    find_playback_registration(identity, pid, &inputs, &sinks)?
                 {
-                    return Err(PulsePcmError::Registration);
+                    if self
+                        .child
+                        .try_wait()
+                        .map_err(|_| PulsePcmError::Registration)?
+                        .is_some()
+                    {
+                        return Err(PulsePcmError::Registration);
+                    }
+                    return Ok(registration);
                 }
-                return Ok(registration);
             }
             let next_probe = (Instant::now() + Duration::from_millis(20)).min(deadline);
             tokio::time::sleep_until(next_probe.into()).await;
@@ -916,16 +918,6 @@ fn find_playback_registration(
     {
         return Err(PulsePcmError::Registration);
     }
-    let sink = input.sink.ok_or(PulsePcmError::Registration)?;
-    if sinks
-        .iter()
-        .filter(|candidate| candidate.index == sink)
-        .map(|candidate| candidate.name.as_str())
-        .collect::<Vec<_>>()
-        != [identity.device.as_str()]
-    {
-        return Err(PulsePcmError::Registration);
-    }
     let channels: Vec<_> = input.channel_map.split(',').collect();
     let unique: HashSet<_> = channels.iter().copied().collect();
     if channels.is_empty()
@@ -938,6 +930,29 @@ fn find_playback_registration(
                 .get(*channel)
                 .is_none_or(|volume| volume.value != 0)
         })
+    {
+        return Err(PulsePcmError::Registration);
+    }
+    let sink = input.sink.ok_or(PulsePcmError::Registration)?;
+    // PipeWire can publish a muted stream before policy links its target sink.
+    // This is not an admission: the original deadline still bounds registration.
+    if sink == libpulse_binding::def::INVALID_INDEX {
+        if sinks
+            .iter()
+            .filter(|candidate| candidate.name == identity.device)
+            .count()
+            != 1
+        {
+            return Err(PulsePcmError::Registration);
+        }
+        return Ok(None);
+    }
+    if sinks
+        .iter()
+        .filter(|candidate| candidate.index == sink)
+        .map(|candidate| candidate.name.as_str())
+        .collect::<Vec<_>>()
+        != [identity.device.as_str()]
     {
         return Err(PulsePcmError::Registration);
     }
@@ -1227,6 +1242,43 @@ mod tests {
         ]))
         .unwrap();
         assert!(find_playback_registration(identity, pid, &valid, &wrong_sink).is_err());
+
+        // PipeWire publishes the muted owned stream before its policy links a sink.
+        let mut unbound = input(identity.session_id, 0);
+        unbound["sink"] = serde_json::json!(libpulse_binding::def::INVALID_INDEX);
+        let pending: Vec<RawPlaybackInput> =
+            serde_json::from_value(serde_json::json!([unbound.clone()])).unwrap();
+        assert!(
+            find_playback_registration(identity, pid, &pending, &sinks)
+                .unwrap()
+                .is_none(),
+            "an owned zero-volume unbound stream is pending, never admitted"
+        );
+        assert!(find_playback_registration(identity, pid, &pending, &[]).is_err());
+        unbound["volume"]["mono"]["value"] = serde_json::json!(65536);
+        let unsafe_pending: Vec<RawPlaybackInput> =
+            serde_json::from_value(serde_json::json!([unbound.clone()])).unwrap();
+        assert!(find_playback_registration(identity, pid, &unsafe_pending, &sinks).is_err());
+        unbound["volume"]["mono"]["value"] = serde_json::json!(0);
+        unbound["properties"]["application.process.id"] = serde_json::json!("999");
+        let foreign_pending: Vec<RawPlaybackInput> =
+            serde_json::from_value(serde_json::json!([unbound])).unwrap();
+        assert!(find_playback_registration(identity, pid, &foreign_pending, &sinks).is_err());
+        let mut invalid = input(identity.session_id, 0);
+        for sink in [serde_json::Value::Null, serde_json::json!(123)] {
+            invalid["sink"] = sink;
+            let missing_target: Vec<RawPlaybackInput> =
+                serde_json::from_value(serde_json::json!([invalid.clone()])).unwrap();
+            assert!(find_playback_registration(identity, pid, &missing_target, &sinks).is_err());
+        }
+        let mut unbound_duplicate = input(identity.session_id, 0);
+        unbound_duplicate["sink"] = serde_json::json!(libpulse_binding::def::INVALID_INDEX);
+        let duplicate_pending: Vec<RawPlaybackInput> = serde_json::from_value(serde_json::json!([
+            input(identity.session_id, 0),
+            unbound_duplicate
+        ]))
+        .unwrap();
+        assert!(find_playback_registration(identity, pid, &duplicate_pending, &sinks).is_err());
     }
 
     #[test]

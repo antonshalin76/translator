@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PreviewResourceLimitTests(unittest.TestCase):
+    def test_owned_cleanup_journal_survives_a_failed_explicit_stop(self) -> None:
+        unit = configparser.ConfigParser(strict=False, interpolation=None)
+        unit.read(ROOT / "systemd/translator-preview.service")
+        self.assertEqual(unit.get("Service", "RuntimeDirectoryPreserve"), "yes")
+        self.assertEqual(unit.get("Service", "RuntimeDirectoryMode"), "0700")
+        self.assertEqual(unit.get("Service", "UMask"), "0077")
+
+    def test_compute_pools_are_bounded_within_the_service_cpu_quota(self) -> None:
+        unit = configparser.ConfigParser(strict=False, interpolation=None)
+        unit.read(ROOT / "systemd/translator-preview.service")
+        environment = dict(
+            assignment.split("=", 1)
+            for assignment in shlex.split(unit.get("Service", "Environment"))
+        )
+        for key, expected in {
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "2",
+            "MKL_NUM_THREADS": "2",
+        }.items():
+            with self.subTest(key=key):
+                self.assertEqual(environment.get(key), expected)
+        self.assertEqual(unit.get("Service", "CPUQuota"), "200%")
+
     def test_host_uid_validation_keeps_initial_user_namespace(self) -> None:
         unit = configparser.ConfigParser(strict=False, interpolation=None)
         unit.read(ROOT / "systemd/translator-preview.service")
@@ -134,6 +158,8 @@ class PreviewServiceTests(unittest.TestCase):
             'test "${PREVIEW_PRODUCTION_ACTIVE:-0}" = 1; exit $?;;\n'
             '  *"is-active --quiet translator-preview.service"*) exit 1;;\n'
             '  *list-unit-files*) printf "translator-preview.service disabled\\n";;\n'
+            '  *"stop translator-preview.service"*) '
+            'test "${PREVIEW_STOP_REJECTED:-0}" != 1 || exit 1;;\n'
             '  *daemon-reload*) test "${PREVIEW_FAIL:-}" != reload || exit 1;;\n'
             "esac\nexit 0\n",
         )
@@ -273,6 +299,13 @@ class PreviewServiceTests(unittest.TestCase):
         capture = self.capture.read_text()
         self.assertIn("argv=--audio-graph-cleanup", capture)
         self.assertIn(f"XDG_RUNTIME_DIR={self.runtime}/translator-preview", capture)
+
+    def test_rejected_stop_does_not_launch_competing_audio_cleanup(self) -> None:
+        self.env["PREVIEW_STOP_REJECTED"] = "1"
+        result = self.run_action("down")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stop translator-preview.service", self.calls.read_text())
+        self.assertFalse(self.capture.exists())
 
     def test_start_refuses_live_canonical_api(self) -> None:
         self.env["PREVIEW_PRODUCTION_API"] = "1"
