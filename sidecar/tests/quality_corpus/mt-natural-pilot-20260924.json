@@ -1,0 +1,18 @@
+{
+  "schema_version": "translator.mt-natural-pilot.v1",
+  "purpose": "Diagnostic paired text-only RU/EN MT screen; not a release holdout",
+  "cases": [
+    {"id": "ru-negation-recipient", "source_language": "ru", "source": "Нет, не отправляйте отчёт Алексею до пятницы.", "reference": "No, do not send the report to Alex before Friday.", "critical": ["negation", "name", "recipient"]},
+    {"id": "ru-time-change", "source_language": "ru", "source": "Перенесите звонок с Марией с 14:30 на 15:10.", "reference": "Move the call with Maria from 14:30 to 15:10.", "critical": ["time", "name", "direction"]},
+    {"id": "ru-version-contrast", "source_language": "ru", "source": "Нина просила показать Виктору не черновик, а окончательную версию.", "reference": "Nina asked to show Victor the final version, not the draft.", "critical": ["negation", "names", "role"]},
+    {"id": "ru-order-contrast", "source_language": "ru", "source": "Заказ 104 отменён, но заказ 140 остаётся активным.", "reference": "Order 104 has been canceled, but order 140 remains active.", "critical": ["numbers", "contrast"]},
+    {"id": "ru-microphone-condition", "source_language": "ru", "source": "Если связь пропадёт, не включайте микрофон автоматически.", "reference": "If the connection drops, do not turn on the microphone automatically.", "critical": ["negation", "condition"]},
+    {"id": "ru-count-contrast", "source_language": "ru", "source": "На совещании было двенадцать человек, а не двадцать.", "reference": "There were twelve people in the meeting, not twenty.", "critical": ["number", "negation"]},
+    {"id": "en-negation-recipient", "source_language": "en", "source": "Do not send the revised contract to Anna until Monday.", "reference": "Не отправляйте Анне исправленный договор до понедельника.", "critical": ["negation", "name", "recipient"]},
+    {"id": "en-time-change", "source_language": "en", "source": "Move the review with Roman from 3:15 to 4:45 p.m.", "reference": "Перенесите встречу с Романом с 15:15 на 16:45.", "critical": ["time", "name", "direction"]},
+    {"id": "en-role-contrast", "source_language": "en", "source": "Maria should call Victor, not the other way around.", "reference": "Мария должна позвонить Виктору, а не наоборот.", "critical": ["negation", "names", "role"]},
+    {"id": "en-invoice-contrast", "source_language": "en", "source": "Invoice 508 was paid; invoice 580 is still overdue.", "reference": "Счёт 508 оплачен, а счёт 580 всё ещё просрочен.", "critical": ["numbers", "contrast"]},
+    {"id": "en-device-condition", "source_language": "en", "source": "If the speakers are active, keep the microphone muted.", "reference": "Если динамики работают, оставьте микрофон выключенным.", "critical": ["condition", "device_state"]},
+    {"id": "en-count-contrast", "source_language": "en", "source": "We need thirteen samples, not thirty.", "reference": "Нам нужно тринадцать образцов, а не тридцать.", "critical": ["number", "negation"]}
+  ]
+}

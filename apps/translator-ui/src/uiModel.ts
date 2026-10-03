@@ -132,6 +132,49 @@ export interface PhysicalDevice {
   available: boolean;
 }
 
+export function translationControlState(snapshot: RuntimeSnapshot) {
+  if (snapshot.runtime_status === "cleanup_pending") {
+    return { summary: "Очистка аудио не завершена", statusText: "Требуется очистка", label: "Повторить Stop", command: "translator_stop" };
+  }
+  if (snapshot.runtime_status === "failed") {
+    return { summary: "Ошибка перевода", statusText: "Ошибка", label: "Сбросить ошибку", command: "translator_stop" };
+  }
+  const running = snapshot.translation_running || snapshot.runtime_status === "running";
+  const stopped = snapshot.runtime_status === "stopped";
+  return {
+    summary: running ? "Перевод запущен" : stopped ? "Перевод остановлен" : "Состояние неизвестно",
+    statusText: running ? "Запущен" : stopped ? "Остановлен" : "Неизвестно",
+    label: running ? "Stop" : "Start",
+    command: running ? "translator_stop" : stopped ? "translator_start" : null,
+  };
+}
+
+export function headphoneConfirmationIntent(snapshot: RuntimeSnapshot, confirmed: boolean) {
+  if (snapshot.translation_running || snapshot.runtime_status !== "stopped") {
+    return null;
+  }
+  const devices = snapshot.devices;
+  if (!devices) {
+    return null;
+  }
+  if (!confirmed) {
+    return devices.acoustic.mode === "user_confirmed_headphones"
+      ? { command: "translator_confirm_headphones", args: { confirmation: null } }
+      : null;
+  }
+  const { source, sink } = devices;
+  if (devices.acoustic.mode !== "unknown_unsafe" ||
+      source.health !== "available" || sink.health !== "available" ||
+      !source.selected?.available || !sink.selected?.available ||
+      source.pinned_name !== source.selected.name || sink.pinned_name !== sink.selected.name) {
+    return null;
+  }
+  return {
+    command: "translator_confirm_headphones",
+    args: { confirmation: { source: source.selected, sink: sink.selected } },
+  };
+}
+
 export interface RoundTripLatency {
   outgoing_first_audio_ms?: number | null;
   english_monitor_complete_ms?: number | null;
@@ -155,7 +198,76 @@ export interface RoundTripSelfTestState {
   status: RoundTripStatus;
 }
 
+export type AecProofStatus =
+  | { state: "unavailable" | "measuring" | "validation_failed" | "cleanup_uncertain" }
+  | { state: "validated"; source_name: string; sink_name: string; expires_monotonic_ns: number };
+
+export type AecCalibrationStatus =
+  | { state: "unavailable" | "shutting_down" }
+  | { state: "running" | "cancelled" | "timed_out" | "cleanup_uncertain"; attempt_id: string }
+  | { state: "failed"; attempt_id: string; code: string }
+  | { state: "succeeded"; attempt_id: string; proof: AecProofStatus };
+
+export function aecCalibrationPendingCancel(
+  status: AecCalibrationStatus,
+  requestedAttemptId: string | null,
+): string | null {
+  return (status.state === "running" || status.state === "succeeded") && status.attempt_id === requestedAttemptId
+    ? requestedAttemptId
+    : null;
+}
+
+export function aecCalibrationControlState(
+  status: AecCalibrationStatus | null,
+  error: string | null,
+  cancelRequestedAttemptId: string | null = null,
+): { label: string; canStart: boolean; cancelAttemptId: string | null } {
+  if (error) {
+    return {
+      label: status?.state === "cleanup_uncertain"
+        ? "Очистка не подтверждена; текущий статус недоступен"
+        : error === "aec_calibration_controller_unavailable"
+        ? "Контроллер недоступен"
+        : `Статус неизвестен: ${error}`,
+      canStart: false,
+      cancelAttemptId: null,
+    };
+  }
+  switch (status?.state) {
+    case "unavailable":
+      return { label: "Калибровка не запускалась", canStart: true, cancelAttemptId: null };
+    case "running":
+      return cancelRequestedAttemptId === status.attempt_id
+        ? { label: "Отмена запрошена, ожидаем завершения", canStart: false, cancelAttemptId: null }
+        : { label: "Калибровка выполняется", canStart: false, cancelAttemptId: status.attempt_id };
+    case "succeeded":
+      if (cancelRequestedAttemptId === status.attempt_id) {
+        return { label: "Отмена запрошена, ожидаем завершения", canStart: false, cancelAttemptId: null };
+      }
+      return {
+        label: status.proof.state === "validated"
+          ? "Калибровка завершилась; актуальность AEC проверяет daemon при запуске"
+          : "Завершена без действующего подтверждения",
+        canStart: status.proof.state === "validated",
+        cancelAttemptId: status.attempt_id,
+      };
+    case "failed":
+      return { label: `Ошибка: ${status.code}`, canStart: true, cancelAttemptId: null };
+    case "cancelled":
+      return { label: "Отменена", canStart: true, cancelAttemptId: null };
+    case "timed_out":
+      return { label: "Превышено время", canStart: true, cancelAttemptId: null };
+    case "cleanup_uncertain":
+      return { label: "Очистка не подтверждена", canStart: false, cancelAttemptId: null };
+    case "shutting_down":
+      return { label: "Сервис останавливается", canStart: false, cancelAttemptId: null };
+    default:
+      return { label: "Статус неизвестен", canStart: false, cancelAttemptId: null };
+  }
+}
+
 export interface RuntimeSnapshot {
+  runtime_status?: string;
   translation_running: boolean;
   debug_text_enabled: boolean;
   debug_capture_enabled: boolean;
@@ -343,7 +455,7 @@ export function currentAudioMixPatchIntent(
 ): ReturnType<typeof audioMixPatchIntent> | null {
   const current = normalizeAudioMix(snapshot.audio_mix)[field];
   const next = clampVolume(value);
-  if (current !== next) {
+  if (current === next) {
     return null;
   }
   return audioMixPatchIntent(field, next);

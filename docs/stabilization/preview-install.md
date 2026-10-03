@@ -1,0 +1,361 @@
+# Translator private preview, 2026-10-03
+
+This is a personal, host-specific Linux x86-64 preview, not a stable release.
+It uses Whisper large-v3-turbo, Hy-MT2-1.8B Q4_K_M and four Piper medium voices.
+Small is the existing ASR fallback. Hy has a measured MT-only development
+advantage; full-chain accuracy, acoustic latency and reliability are unproved.
+Model weights are for this owner's private installation, not redistribution.
+
+Requirements: the existing Ubuntu/PipeWire desktop with `libpulse.so.0`
+(`libpulse0`), Python 3.12, user systemd,
+the installed Ollama llama-server and its CUDA12 backend, and NVIDIA driver.
+The payload includes private, RECORD-verified cuDNN9/CUDA12 and NVRTC12 copies
+for CTranslate2. Missing Hy CUDA fails closed, rather than changing models.
+The package does not replace or repair host CUDA installations. Dependency
+fingerprints alone are not proof of actual GPU inference.
+Included vendor libraries are `nvidia-cudnn-cu12==9.10.2.21` and
+`nvidia-cuda-nvrtc-cu12==12.8.93`, with their supplier metadata/licenses.
+
+## Install
+
+Verify the archive against its SHA256SUMS, then extract it to a permanent
+private directory, preferably directly under `$HOME/.local/state` with the
+archive's `translator-preview-20261002` directory name. Keep that directory:
+the installed command refers to it. The pinned Piper native phonemizer rejects
+some long installation paths; installation checks EN/RU phonemization in an
+isolated subprocess before creating the preview command/unit and refuses a
+nonworking payload. No speech is played or recorded during this check.
+Do not run canonical Translator and preview simultaneously; virtual endpoint
+names remain shared. Preview refuses a currently active canonical unit/API,
+but this is not an atomic cross-service audio lock.
+
+From the extracted short directory:
+
+```bash
+set -e
+sha256sum -c SHA256SUMS --quiet
+./scripts/translator-desktop --preview install
+translator-preview up
+```
+
+Installation creates only the preview command, unit and private configuration.
+It does not start/enable a service or create UI autostart. First installation
+only: uninstall an existing preview before installing a different payload.
+Production files and its configuration are not replaced.
+
+### Replace an installed preview
+
+The installer refuses an existing preview instead of overwriting it. Running
+`up` after a failed installation can restart the old payload. From the new
+verified, permanently extracted directory, use this fail-fast sequence:
+
+```bash
+set -e
+sha256sum -c SHA256SUMS --quiet
+translator-preview down
+translator-preview uninstall
+./scripts/translator-desktop --preview install
+translator-preview up
+pid="$(systemctl --user show translator-preview.service -p MainPID --value)"
+test "$pid" -gt 0
+test "$(readlink -f "/proc/$pid/exe")" = "$(pwd -P)/target/release/translator-daemon"
+sha256sum target/release/translator-daemon "/proc/$pid/exe"
+```
+
+The two hashes must match. This interrupts only preview translation and
+replaces its generated command/unit; keep the old extracted payload for
+rollback. Private settings and model payloads remain. After the restart,
+confirm the currently selected headphones again before bidirectional Start.
+An unchanged-looking UI does not identify the running daemon version.
+
+The preview API uses loopback port 47682 and a separate private control token.
+Runtime/state and graph journals are separated; audio endpoints are not.
+The UI command launched by `up` points to this preview API/token location.
+No audio, transcript or translation logging is enabled by this package.
+The preview unit caps RAM at 8 GiB (6 GiB soft pressure), swap at 256 MiB,
+CPU at two cores and tasks at 256; stopping it reaps its whole process group.
+This user unit deliberately does not request a filesystem/user namespace:
+unprivileged systemd mount sandboxing hides host root UID and conflicts with
+the strict CUDA library owner checks. Those checks remain unchanged; the unit
+retains NoNewPrivileges, environment sanitization and private directory modes.
+Filesystem writes are not additionally confined by systemd in this preview.
+
+## First real-call trial
+
+Select `quality_first` in the existing UI. With physical headphones, leave both
+directions enabled for RU-to-EN microphone and EN-to-RU incoming translation.
+This preview deliberately has no AEC calibration backend: microphone/full-duplex
+with speakers is rejected by the existing acoustic admission. It does not
+establish that speaker-only translation or app routing has passed real-call E2E.
+
+Some USB adapters report only an Analog port, even with headphones connected.
+While translation is stopped, explicitly confirm the currently selected
+microphone/output pair using the headphone button. Status then reports
+`user_confirmed_headphones`, not driver-detected headphones or validated AEC.
+Confirmation leaves the original port metadata unchanged, is not persisted,
+and is revoked on discovery failure or observed device/port/availability changes.
+Restarting the daemon requires confirmation again.
+Pending cleanup or failure exposes Stop, not Start or a completed-stop status.
+Headphone confirmation remains unavailable until the daemon reports stopped.
+Do not confirm speakers; an Analog adapter cannot detect what is plugged into
+its analog socket.
+Stop translation before changing that physical connection or revoking the choice.
+
+The two direction loops read capture while awaiting playback writes, with bounded
+PCM queues. Shared GPU inference remains serialized and translation waits for
+speech segmentation; full duplex does not mean token-streamed ASR/MT or zero
+latency. A failed/partial playback cannot be reused before cleanup.
+Volume controls display acknowledged daemon values, not a successful-looking
+local snapshot before the request completes. A missing-original rejection
+preserves the previous mix and running translation; its error remains visible until another
+control command or the daemon reconnects. Status results obtained before a
+control command cannot overwrite that command's acknowledgement.
+An unknown physical mixer state still stops/quarantines translation for safety.
+
+`Microphone original` forwards raw microphone audio into the outgoing virtual
+microphone independently of translated speech. With the microphone enabled and
+admitted headphones, Start prepares a pinned native Pulse capture/playback pair
+whose playback volume is zero before its first frame. During translation, the
+original slider changes this pair's gain without restarting either translation
+direction. Leave it at 0% if only translated microphone speech should be sent.
+Background device refresh cannot create a new microphone capture. A stopped
+positive-volume command can prepare the pair only after fresh headphone checks.
+
+The existing Stopped/Bypass policy sends originals at 100% and mutes translations;
+it retains the desired translating gains for the next Start. Microphone-muted
+bypass keeps the raw microphone at zero. A disabled microphone, revoked acoustic
+admission or changed endpoint disconnects the pair before replacement. A missing
+pair still rejects positive gain with
+`microphone_original_unavailable`; it cannot fall back to another microphone.
+Disabling microphone joins this pair before acknowledgement, preserves the
+desired microphone gains and applies zero effective microphone gains. Incoming
+translation and its volume remain independent. Re-enabling microphone requires
+an explicit admitted command and prepares a fresh pair at zero. Unverified gain
+readback cancels raw forwarding; failed cleanup retains custody and requires
+explicit recovery before another pair can be created.
+
+Periodic reinspection of a known, unchanged bypass verifies fresh device/graph
+facts and existing custody without first muting healthy originals or preparing
+new capture. Uncertain or changed bindings still enter quarantine and the
+existing repair/cleanup path. Positive microphone bypass requires current
+headphone authorization and full-duplex permission. Explicit Stop, recovery
+and service shutdown retain their quarantine/join protections.
+
+Cold Start uses the existing runtime's bounded 130-second readiness budget;
+Stop keeps its separate eight-second cleanup budget. Models are not retained
+after Stop, so another Start is cold again. Before opening PCM after readiness,
+the packaged daemon rechecks physical identities/ports and acoustic admission.
+An in-flight cold Start currently serializes other controls; stopping the
+preview systemd unit remains the bounded process-group cancellation boundary.
+
+The private `translator-preview/environment` file under the systemd user
+configuration root accepts the same guarded keys as the ordinary service,
+including `TRANSLATOR_MT_MODEL_ID`. NLLB is not included in this preview model
+payload; selecting it needs a separately verified cache and explicit cache root.
+Do not print/source environment files or put tokens on command lines.
+
+## Stop and rollback
+
+```bash
+translator-preview down
+translator-preview uninstall
+```
+
+These commands target the preview unit and its journal, not the canonical
+service. The extracted payload, models and private configuration are retained.
+Canonical Translator can then be started explicitly with its original command.
+Uninstall does not remove weights or call recordings.
+
+Source/physical failure receipts remain retained. This preview does not close
+Task7, prove AEC, pass the independent holdout/paired evaluation, or authorize
+stable merge/publication. Automated package checks and actual translation
+behavior are distinct evidence.
+
+## Earlier installed-preview verification, 2026-10-02
+
+The earlier installed preview completed an authenticated cold HTTP Start in 9,828 ms
+and Stop in 1,111 ms. Both enabled directions remained Running across five
+status polls. Unauthorized confirmation was rejected, revocation blocked
+Start, and daemon restart revoked the ephemeral headphone choice. That trial
+ended Stopped with both directions enabled, local processing and debug
+text/capture disabled. The earlier 503 spawn failure and 4,001-ms Start timeout
+remain retained; successful startup does not erase them.
+
+The packaged Turbo/Hy/Piper provider completed eight saved-audio attempts,
+including two concurrent opposite-language pairs. Their nonzero input overlap
+was 3,019 ms and 3,014 ms; each short leg emitted translated PCM before the
+opposite leg's later nonzero speech frame. No ASR fallback/degraded result was
+reported; the child, process group and socket were cleaned up. These exposed
+development fixtures establish inference concurrency, not independent quality
+or physical acoustic latency. Runtime regressions separately verify capture
+and provider acceptance during a held playback write, payload order, queue
+overflow, capture EOF and cancellation.
+
+The earlier embedded native UI passed all five isolated checks: asset loading,
+disconnected admission, three viewports, keyboard focus across polling and
+negative focus-identity cases. Window/driver cleanup completed. This is not
+real-call app routing, a soak result or a stable-release approval.
+
+## Rebuild scope
+
+`scripts/translator-preview-package` packages already-built release binaries,
+the locked non-editable Python environment, the seven selected pinned models
+and the two pinned CUDA distributions. It refuses an existing output directory,
+an output inside the checkout, unstaged changes or a mismatching staged tree.
+Model copies use the existing manifest's retained descriptors and size/SHA-256
+checks; library copies are checked against supplier RECORD. Copied ELF modes
+are normalized without changing build outputs. This is host-specific packaging,
+not an installable distribution for arbitrary operating systems.
+
+Build the frontend first (`bun run build` in `apps/translator-ui`). The native
+Pulse dependency needs the existing `libpulse.so.0` runtime; `libpulse-dev` and
+pkg-config provide SDK discovery, with the pinned binding's Linux SONAME fallback
+available when the SDK is absent. Raw Cargo
+release builds must enable `--features translator-ui/custom-protocol`; the
+Tauri CLI enables this feature for `tauri build` automatically. A release build
+without it is rejected, because it would open the Vite development URL instead
+of embedding the frontend. The packager checks the actual UI binary with
+`--check-bundled-ui` before creating output or copying models. This check needs
+no display, daemon connection or audio. It does not replace the separate native
+window test or translation acceptance.
+
+The volume correction adds three connected checks to that native window suite:
+rejection without optimistic volume state, successful translated-volume change
+with a held older native status result, and separation of unavailable AEC from
+command errors. All eight checks pass against the rebuilt UI using a private
+authenticated HTTP fixture, with no audio or model calls and complete cleanup.
+This does not validate a real microphone-original stream or live call quality.
+
+## R11 native identity on PipeWire
+
+The installed R10 passed packaging but still rejected actual host Start before
+model startup. Its native identity check incorrectly required the server to
+echo the requested `module-stream-restore.id` unchanged. PipeWire 1.0.5
+[projects that key as a server-generated stream group](https://github.com/PipeWire/pipewire/blob/1.0.5/src/modules/module-protocol-pulse/message.c#L473-L534).
+R11 uses the existing opaque session UUID, application/PID and stream media
+name for identity; it still checks the retained client, stream/endpoint indices,
+sample format/map, volumes, cancellation and custody. The requested restoration
+hint remains for PulseAudio but is not identity proof. First-frame zero gain,
+finite buffering and acoustic admission are unchanged.
+
+The original R9/R10 host failures remain failures, not successful startups.
+Use the exact installed binary/hash check above when replacing those packages.
+
+R11 also failed the actual Jieli headset Start: its native pending PCM queue
+exceeded the 9,600-byte bound after 551 ms; HTTP returned
+`audio_mix_state_unknown` instead of Running. The source/private-Pulse passes
+do not override this failure. R11 is a failed candidate, not a working upgrade.
+R8 was retained as the fallback during this investigation, with microphone
+original at 0%; positive original microphone gain is unavailable in R8.
+
+## R12 bounded native microphone service
+
+R12 keeps the 4,800-byte capture/playback and 9,600-byte pending limits.
+A whole valid capture fragment that temporarily cannot fit pending remains
+undiscarded in libpulse's bounded capture queue until playback credit returns.
+Only successfully copied and discarded fragments are counted as accepted;
+playback is serviced both before and after capture. Full capture storage with
+an undiscardable fragment revokes the path conservatively: continuity cannot
+be assured, but saturation does not prove lost PCM. A failed write, hole,
+suspended/corked stream or identity failure also revokes
+the raw path. No new scheduler, resampler, clock-drift assumption or model change
+is introduced.
+
+Translated playback registration also waits for PipeWire's transient unlinked
+sink marker (`PA_INVALID_INDEX`) within the unchanged registration deadline.
+The owned stream must already have verified identity and zero volume, and the
+intended sink must exist uniquely. Playback is admitted only after exact sink
+binding; contradictory identities/targets or nonzero volume remain errors.
+
+Independent synthetic numbered-PCM observers passed 180 seconds on private
+PulseAudio and private PipeWire: 16,874 and 16,872 complete consecutive packets
+respectively, without loss, duplication, reordering or corruption. Final accepted
+packets reached the independent observer within 250 ms. These are PCM transport
+results, not recognition/translation quality or real-call acoustic latency.
+
+The private graph test changes raw gain through 100/35/0/35 while both translated
+PCM producers and observers run. It checks translated gains independently,
+healthy microphone disable/join, fresh post-disable incoming PCM, and every
+first-frame observation during zero-gain re-enable. Reproduce backend tests with:
+
+```bash
+./scripts/translator-native-pcm-check all all /absolute/private/receipt-directory
+```
+
+This creates isolated software-only audio servers, with no hardware monitors
+or connection to the production user bus. The PipeWire fixture uses the installed
+WirePlumber 0.4 policy scripts. `lifecycle` instead of the second `all` runs the
+short fault/graph checks; the full scope also runs both 180-second observers.
+PipeWire 1.0.5 does not emit Pulse stream-suspension notifications; that fault
+injection is explicitly `UNAVAILABLE`, not PASS, on this backend. Suspension is
+checked on PulseAudio; real cork, bounded pressure and endpoint removal are
+checked on both backends.
+The existing native window runner now accepts `--live-preview` to exercise actual
+preview Start/Stop and raw 35/100/0 commands through the packaged Tauri bridge.
+It cleans up only its own window/drivers, not the preview daemon. Installed
+binary, actual device readbacks and cleanup must still be checked separately;
+private fixtures cannot approve an installed package or a stable release.
+
+R12's first installed cold Start still failed with capture saturation during
+model bootstrap; a second identical Start and gain/mode sequence passed. Keep
+that failure receipt. The preview unit now bounds library compute pools with
+`OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=2`, and `MKL_NUM_THREADS=2` under the
+unchanged 200% CPU quota. The installed environment otherwise created 32 NumPy
+threads. A bounded metadata-only same-quota diagnostic reproduced saturation
+with 32 busy workers; two-worker runs continued with unchanged audio buffers.
+These observations establish a scheduling-pressure mechanism, not a definitive
+explanation of every earlier failure. The quota period, model hashes, acoustic
+admission and all deadlines remain unchanged. R13 includes this resource-policy
+correction. Installed acceptance requires an exact-package cold-start and
+lifecycle receipt, separate from deterministic and virtual-audio checks.
+
+R13 also closes the original-audio shutdown dependency: cancellation alone does
+not release native custody. Shutdown attempts model stop and original-stream
+cleanup even when initial mute/readback fails, joins the native owner, and only
+then verifies mixer recovery. The stopping gate remains closed to new Start,
+bypass preparation and fact refresh. A failed cleanup or late recovery cannot
+publish a completed stop.
+
+The preview unit preserves its private runtime directory across explicit stop
+so a forced process-group termination cannot erase the ownership journal before
+recovery. Permissions remain 0700/0600; the control token is rotated on the next
+daemon start. Post-stop CLI cleanup removes original loopbacks before their
+journal-owned graph, sharing the existing eight-second graph cleanup budget.
+A failed systemctl stop returns failure without starting competing audio cleanup.
+
+Fresh original loopbacks are certified against the module ID acknowledged by
+the audio server. A complete, uniquely owned pair may briefly await target
+binding within one fixed two-second load/readback budget. Missing or one-sided
+streams, malformed IDs, foreign ownership, wrong targets and duplicate streams
+fail immediately. Existing routes receive no such readiness grace. Native
+microphone preparation follows successful certification only; a reply arriving
+after the deadline cannot certify a route.
+
+## R10 PipeWire capture request
+
+PipeWire 1.0.5 [reserves at least four capture fragments](https://github.com/PipeWire/pipewire/blob/1.0.5/src/modules/module-protocol-pulse/pulse-server.c#L627-L633).
+The earlier 1,920-byte fragment caused its negotiated capture maximum to exceed
+the fixed 4,800-byte bound. R10 requests 1,200-byte fragments while retaining
+the same capture/playback/pending limits and all identity, mute, activation,
+cancellation and cleanup checks. It does not raise the allowed buffering or
+change the speech models. Backend compatibility is separate from call quality.
+
+## R9 original-microphone verification
+
+The actual native transport and daemon graph/mix owners passed an isolated
+PulseAudio PCM regression using a synthetic microphone signal and an independent
+output observer. Every settled 100% frame preserved the input RMS of 5655.994;
+35% produced RMS 242.571, matching Pulse's nonlinear amplitude mapping, and 0%
+produced exact zero peaks. Observation excludes at most 240 ms of gain settling.
+Translated stream identities/gains stayed unchanged across original-gain changes.
+
+The same regression covers silence before the first admitted frame, fresh-zero
+incoming playback admission with microphone disabled, cancellation after a
+falsely acknowledged zero write, joined cleanup/recovery, rejected stream moves,
+endpoint removal/recreation and silent replacement without old PCM replay.
+Separate private checks cover cancellation at native startup phases and
+first-frame translated playback admission. The fixture finished with no streams;
+its owned Pulse process exited and its socket became unreachable.
+
+This proves the automated original-microphone capability on a private virtual
+graph, not physical headset/call quality, a long soak, AEC or stable release.

@@ -3,18 +3,22 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   DEFAULT_AUDIO_MIX,
   DebugTextRing,
+  aecCalibrationControlState,
+  aecCalibrationPendingCancel,
   buildUiModel,
   cloudOptInChangeIntent,
   currentAudioMixPatchIntent,
   debugToggleIntent,
   directionToggleIntent,
   formatMs,
+  headphoneConfirmationIntent,
   labelLanguage,
   providerPatchIntent,
   roundTripControlState,
+  translationControlState,
   type AudioDirection,
+  type AecCalibrationStatus,
   type AudioMixField,
-  type AudioMixVolumes,
   type DebugControl,
   type DirectionState,
   type Language,
@@ -36,6 +40,9 @@ interface AppState {
   error: string | null;
   lastUpdated: Date | null;
   activeSection: UiSection;
+  calibrationStatus: AecCalibrationStatus | null;
+  calibrationError: string | null;
+  calibrationCancelRequested: string | null;
 }
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -43,6 +50,8 @@ const debugTextRing = new DebugTextRing();
 const audioMixTimers: Partial<Record<AudioMixField, number>> = {};
 let lastDebugTextKey: string | null = null;
 let wasDisconnected = true;
+let calibrationRevision = 0;
+let controlRevision = 0;
 
 const state: AppState = {
   snapshot: defaultSnapshot(),
@@ -52,6 +61,9 @@ const state: AppState = {
   error: null,
   lastUpdated: null,
   activeSection: "status",
+  calibrationStatus: null,
+  calibrationError: null,
+  calibrationCancelRequested: null,
 };
 
 if (!root) {
@@ -61,16 +73,28 @@ const appRoot = root;
 
 render();
 await refreshStatus();
+await refreshCalibrationStatus();
 window.setInterval(() => {
   void refreshStatus();
+  void refreshCalibrationStatus();
 }, 2000);
 window.addEventListener("pagehide", () => {
   clearDebugText("ui_close");
 });
 
 function render(): void {
+  const focused = document.activeElement;
+  const focusedId = focused instanceof HTMLElement && appRoot.contains(focused)
+    ? focused.id
+    : null;
   const model = buildUiModel(state.snapshot);
   appRoot.replaceChildren(appShell(model));
+  if (focusedId) {
+    const replacement = document.getElementById(focusedId);
+    if (replacement && appRoot.contains(replacement) && !replacement.matches(":disabled")) {
+      replacement.focus({ preventScroll: true });
+    }
+  }
 }
 
 function appShell(model: ReturnType<typeof buildUiModel>): HTMLElement {
@@ -87,6 +111,7 @@ function appShell(model: ReturnType<typeof buildUiModel>): HTMLElement {
     directionGrid(),
     routeSection(),
     graphSection(),
+    aecCalibrationSection(),
     diagnosticsSection(model),
     debugTextSection(model),
   );
@@ -125,6 +150,7 @@ function sidebar(model: ReturnType<typeof buildUiModel>): HTMLElement {
 function navItem(text: string, section: UiSection): HTMLElement {
   const active = state.activeSection === section;
   const item = element("a", `nav-item ${active ? "active" : ""}`, text);
+  item.id = `nav-${section}`;
   item.setAttribute("href", `#${section}`);
   if (active) {
     item.setAttribute("aria-current", "page");
@@ -172,7 +198,7 @@ function warningBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
     warnings.push(
       warning(
         "acoustic",
-        "Acoustic fallback активен: сервис продолжает аудио, но возможна обратная связь без AEC/наушников.",
+        "Акустическая защита: микрофон и динамики требуют наушники либо проверенную AEC.",
       ),
     );
   }
@@ -198,6 +224,7 @@ function warning(kind: string, text: string): HTMLElement {
 }
 
 function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
+  const control = translationControlState(state.snapshot);
   const section = element("section", "status-band");
   section.id = "status";
   const text = element("div");
@@ -207,7 +234,7 @@ function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
       "p",
       "",
       [
-        state.snapshot.translation_running ? "Перевод запущен" : "Перевод остановлен",
+        control.summary,
         `Provider: ${state.snapshot.provider_id}`,
         `Provider health: ${providerHealthText()}`,
         `Diagnostics: ${model.diagnostics.checkpoint ?? "idle"}`,
@@ -220,7 +247,7 @@ function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
   );
   pill.append(
     element("span", "status-dot"),
-    textNode(state.snapshot.translation_running ? "Запущен" : "Остановлен"),
+    textNode(control.statusText),
   );
   section.append(text, pill);
   return section;
@@ -228,10 +255,11 @@ function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
 
 function controlsBand(): HTMLElement {
   const section = element("section", "control-band");
+  const control = translationControlState(state.snapshot);
   section.append(
     commandButton(
-      state.snapshot.translation_running ? "Stop" : "Start",
-      state.snapshot.translation_running ? "translator_stop" : "translator_start",
+      control.label,
+      control.command,
       undefined,
       "translation",
     ),
@@ -239,6 +267,24 @@ function controlsBand(): HTMLElement {
     debugControl("debug_text"),
     debugControl("debug_capture"),
   );
+  const devices = state.snapshot.devices;
+  if (devices && ["unknown_unsafe", "user_confirmed_headphones"].includes(devices.acoustic.mode)) {
+    const confirmed = devices.acoustic.mode === "user_confirmed_headphones";
+    const intent = headphoneConfirmationIntent(state.snapshot, !confirmed);
+    const headphones = element("div", "control-item");
+    headphones.append(
+      element("p", "", confirmed
+        ? "Наушники подтверждены вами. Это не проверка AEC; подтверждение сбрасывается после перезапуска или изменения устройств."
+        : `Тип выхода не определён: ${devices.sink.selected?.name ?? "нет устройства"}. Подтверждайте только реально подключённые наушники, не колонки.`),
+      commandButton(
+        confirmed ? "Отозвать подтверждение наушников" : "Подтвердить, что подключены наушники",
+        intent?.command ?? null,
+        intent?.args,
+        "headphones",
+      ),
+    );
+    section.append(headphones);
+  }
   return section;
 }
 
@@ -246,6 +292,7 @@ function providerControl(): HTMLElement {
   const wrap = element("label", "control-item");
   wrap.append(element("span", "", "Provider"));
   const select = selectControl<ProviderId>(
+    "provider",
     state.snapshot.provider_id,
     [
       ["local", "Local"],
@@ -267,6 +314,7 @@ function providerControl(): HTMLElement {
   const optIn = element("label", "inline-check");
   const checkbox = element("input") as HTMLInputElement;
   checkbox.type = "checkbox";
+  checkbox.id = "cloud-opt-in";
   checkbox.checked = state.cloudOptIn;
   checkbox.disabled = state.busy !== null || !state.connected;
   checkbox.addEventListener("change", () => {
@@ -305,6 +353,7 @@ function debugControl(control: DebugControl): HTMLElement {
       : state.snapshot.debug_capture_enabled;
   const button = element("button", `control-button ${enabled ? "active" : ""}`);
   button.type = "button";
+  button.id = control;
   button.disabled = state.busy !== null;
   const controlState = enabled ? "On" : "Off";
   button.textContent = isDebugText
@@ -367,6 +416,7 @@ function audioMixSlider(
 
   const input = element("input") as HTMLInputElement;
   input.type = "range";
+  input.id = `audio-mix-${field}`;
   input.min = "0";
   input.max = "100";
   input.step = "1";
@@ -422,6 +472,7 @@ function directionPanel(directionId: AudioDirection): HTMLElement {
   );
 
   const mode = selectControl<TranslationMode>(
+    `${directionId}-mode`,
     latency?.current_mode ?? "quality_first",
     [
       ["quality_first", "Quality"],
@@ -437,6 +488,7 @@ function directionPanel(directionId: AudioDirection): HTMLElement {
   );
 
   const voice = selectControl<VoiceGender>(
+    `${directionId}-voice`,
     direction.voice_profile.gender,
     [
       ["male", "Мужской"],
@@ -472,6 +524,7 @@ function directionToggle(direction: DirectionState): HTMLElement {
   const label = element("label", `direction-toggle ${enabled ? "enabled" : ""}`);
   const input = element("input") as HTMLInputElement;
   input.type = "checkbox";
+  input.id = `${direction.direction_id}-enabled`;
   input.checked = enabled;
   input.disabled = state.busy !== null || !state.connected;
   input.addEventListener("change", () => {
@@ -486,6 +539,7 @@ function pairButton(direction: DirectionState, source: Language, target: Languag
     direction.source_language === source && direction.target_language === target;
   const button = element("button", `segment ${active ? "active" : ""}`);
   button.type = "button";
+  button.id = `${direction.direction_id}-pair-${source}-${target}`;
   button.textContent = `${source.toUpperCase()} → ${target.toUpperCase()}`;
   button.disabled = state.busy !== null || active;
   button.addEventListener("click", () => {
@@ -610,6 +664,43 @@ function diagnosticsSection(model: ReturnType<typeof buildUiModel>): HTMLElement
   return section;
 }
 
+function aecCalibrationSection(): HTMLElement {
+  const section = element("section", "section-band");
+  const control = aecCalibrationControlState(
+    state.calibrationStatus,
+    state.calibrationError,
+    state.calibrationCancelRequested,
+  );
+  section.append(sectionHeading("AEC-калибровка", control.label));
+  const guidance = element(
+    "p",
+    "empty",
+    "Калибровка воспроизводит слышимый тестовый сигнал. Запускайте её только в согласованное окно без звонка.",
+  );
+  const actions = element("div", "inline-controls");
+  const start = element("button", "control-button", "Начать калибровку") as HTMLButtonElement;
+  start.type = "button";
+  start.id = "aec-calibration-start";
+  start.disabled = !state.connected || state.snapshot.translation_running || state.busy !== null || !control.canStart;
+  start.addEventListener("click", () => void invokeCalibrationAction("translator_start_aec_calibration"));
+  const cancel = element(
+    "button",
+    "control-button",
+    state.calibrationStatus?.state === "succeeded" ? "Освободить AEC" : "Отменить калибровку",
+  ) as HTMLButtonElement;
+  cancel.type = "button";
+  cancel.id = "aec-calibration-cancel";
+  cancel.disabled = !state.connected || state.busy !== null || control.cancelAttemptId === null;
+  cancel.addEventListener("click", () => {
+    if (control.cancelAttemptId) {
+      void invokeCalibrationAction("translator_cancel_aec_calibration", control.cancelAttemptId);
+    }
+  });
+  actions.append(start, cancel);
+  section.append(guidance, actions);
+  return section;
+}
+
 function debugTextSection(model: ReturnType<typeof buildUiModel>): HTMLElement {
   const section = element("section", "section-band");
   section.append(sectionHeading("Debug text", model.debugTextWarning ? "Visible" : "Hidden"));
@@ -639,6 +730,7 @@ function commandButton(
   busyKey: string,
 ): HTMLButtonElement {
   const button = element("button", "control-button") as HTMLButtonElement;
+  button.id = `command-${busyKey}`;
   button.type = "button";
   button.textContent = state.busy === busyKey ? "..." : label;
   button.disabled = state.busy !== null || !state.connected || command === null;
@@ -659,6 +751,7 @@ async function invokeAction(
     return;
   }
   state.busy = busyKey;
+  controlRevision += 1;
   state.error = null;
   render();
   try {
@@ -668,16 +761,61 @@ async function invokeAction(
     }
     applySnapshot(snapshot);
   } catch (error) {
-    state.error = safeErrorMessage(error);
-    render();
+    const message = safeErrorMessage(error);
+    try {
+      applySnapshot(await invokeDaemon<RuntimeSnapshot>("translator_status"));
+    } catch {
+      state.connected = false;
+      wasDisconnected = true;
+      clearDebugText("daemon_restart");
+    }
+    state.error = message;
   } finally {
+    controlRevision += 1;
     state.busy = null;
     render();
   }
 }
 
+async function invokeCalibrationAction(
+  command: "translator_start_aec_calibration" | "translator_cancel_aec_calibration",
+  attemptId?: string,
+): Promise<void> {
+  calibrationRevision += 1;
+  controlRevision += 1;
+  state.busy = "aec-calibration";
+  state.calibrationError = null;
+  if (command === "translator_cancel_aec_calibration") {
+    state.calibrationCancelRequested = attemptId ?? null;
+  }
+  render();
+  try {
+    const status = await invokeDaemon<AecCalibrationStatus>(
+      command,
+      attemptId ? { attemptId } : undefined,
+    );
+    applyCalibrationStatus(status);
+  } catch (error) {
+    state.calibrationError = safeErrorMessage(error);
+    if (command === "translator_cancel_aec_calibration") {
+      state.calibrationCancelRequested = null;
+    }
+  } finally {
+    calibrationRevision += 1;
+    controlRevision += 1;
+    state.busy = null;
+    render();
+  }
+}
+
+function applyCalibrationStatus(status: AecCalibrationStatus): void {
+  state.calibrationStatus = status;
+  state.calibrationError = null;
+  state.calibrationCancelRequested = aecCalibrationPendingCancel(status, state.calibrationCancelRequested);
+  render();
+}
+
 function queueAudioMixChange(field: AudioMixField, value: number): void {
-  updateLocalAudioMix(field, value);
   if (audioMixTimers[field] !== undefined) {
     window.clearTimeout(audioMixTimers[field]);
   }
@@ -688,7 +826,6 @@ function queueAudioMixChange(field: AudioMixField, value: number): void {
 }
 
 function flushAudioMixChange(field: AudioMixField, value: number): void {
-  updateLocalAudioMix(field, value);
   if (audioMixTimers[field] !== undefined) {
     window.clearTimeout(audioMixTimers[field]);
     delete audioMixTimers[field];
@@ -697,29 +834,21 @@ function flushAudioMixChange(field: AudioMixField, value: number): void {
 }
 
 async function invokeAudioMixChange(field: AudioMixField, value: number): Promise<void> {
-  if (!state.connected) {
+  if (!state.connected || state.busy !== null) {
     return;
   }
   const intent = currentAudioMixPatchIntent(field, value, state.snapshot);
   if (!intent) {
     return;
   }
-  try {
-    const snapshot = await invokeDaemon<RuntimeSnapshot>(intent.command, intent.args);
-    applySnapshot(snapshot);
-  } catch (error) {
-    state.error = safeErrorMessage(error);
-    state.lastUpdated = new Date();
-    render();
-  }
-}
-
-function updateLocalAudioMix(field: AudioMixField, value: number): void {
-  const current: AudioMixVolumes = buildUiModel(state.snapshot).audioMix;
-  state.snapshot.audio_mix = { ...current, [field]: value };
+  await invokeAction(intent.command, intent.args, "audio-mix");
 }
 
 async function refreshStatus(): Promise<void> {
+  if (state.busy !== null) {
+    return;
+  }
+  const revision = controlRevision;
   if (!tauriRuntimeAvailable()) {
     state.connected = false;
     state.error = "Tauri runtime недоступен: открыт browser preview.";
@@ -730,14 +859,20 @@ async function refreshStatus(): Promise<void> {
 
   try {
     const snapshot = await invokeDaemon<RuntimeSnapshot>("translator_status");
+    if (revision !== controlRevision || state.busy !== null) {
+      return;
+    }
     if (wasDisconnected) {
       clearDebugText("daemon_restart");
+      state.error = null;
     }
     wasDisconnected = false;
     state.connected = true;
-    state.error = null;
     applySnapshot(snapshot);
   } catch (error) {
+    if (revision !== controlRevision || state.busy !== null) {
+      return;
+    }
     if (!wasDisconnected) {
       clearDebugText("daemon_restart");
     }
@@ -746,6 +881,21 @@ async function refreshStatus(): Promise<void> {
     state.error = safeErrorMessage(error);
     state.lastUpdated = new Date();
     render();
+  }
+}
+
+async function refreshCalibrationStatus(): Promise<void> {
+  const revision = calibrationRevision;
+  try {
+    const status = await invokeDaemon<AecCalibrationStatus>("translator_aec_calibration_status");
+    if (revision === calibrationRevision) {
+      applyCalibrationStatus(status);
+    }
+  } catch (error) {
+    if (revision === calibrationRevision) {
+      state.calibrationError = safeErrorMessage(error);
+      render();
+    }
   }
 }
 
@@ -883,11 +1033,13 @@ function latencyState(directionId: AudioDirection): LatencyPolicyState | undefin
 }
 
 function selectControl<T extends string>(
+  controlId: string,
   value: T,
   options: Array<[T, string]>,
   onChange: (value: T) => void,
 ): HTMLSelectElement {
   const select = element("select") as HTMLSelectElement;
+  select.id = controlId;
   select.disabled = state.busy !== null || !state.connected;
   for (const [optionValue, label] of options) {
     const option = element("option") as HTMLOptionElement;
@@ -966,7 +1118,14 @@ function preconditionsList(preconditions: Record<string, unknown> | null): HTMLE
 
 function safeErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "code" in error) {
-    return String((error as { code: unknown }).code);
+    const code = String((error as { code: unknown }).code);
+    if (code === "microphone_original_unavailable") {
+      return "Оригинал микрофона недоступен: безопасный аудиопоток не создан. Громкость не изменена.";
+    }
+    if (code === "audio_mix_discovery_failed") {
+      return "Аудиопоток для изменения громкости недоступен. Громкость не изменена.";
+    }
+    return code;
   }
   if (error instanceof Error) {
     return error.message;

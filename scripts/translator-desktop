@@ -1,12 +1,18 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash -p
 set -euo pipefail
 
 script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
 project_root="$(cd -- "$(dirname -- "${script_path}")/.." && pwd)"
+profile=translator
+if [ "${0##*/}" = translator-preview ] || [ "${1:-}" = --preview ]; then
+  profile=translator-preview
+  if [ "${1:-}" = --preview ]; then shift; fi
+fi
+unit_name="${profile}.service"
 unit_source="${project_root}/systemd/translator.service"
-config_root="${XDG_CONFIG_HOME:-"$HOME/.config"}"
-systemd_user_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user"
-autostart_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/autostart"
+config_root="$(/usr/bin/systemd-path user-configuration)"
+systemd_user_dir="${config_root}/systemd/user"
+autostart_dir="${config_root}/autostart"
 unit_target="${systemd_user_dir}/translator.service"
 autostart_target="${autostart_dir}/translator-ui.desktop"
 user_bin_dir="${HOME}/.local/bin"
@@ -17,9 +23,337 @@ ui_binary_target="${user_bin_dir}/translator-ui"
 daemon_binary_source="${project_root}/target/release/translator-daemon"
 daemon_binary_target="${user_bin_dir}/translator-daemon"
 ui_project_dir="${project_root}/apps/translator-ui"
+if [ "${profile}" = translator-preview ]; then
+  unit_source="${project_root}/systemd/translator-preview.service"
+  unit_target="${systemd_user_dir}/translator-preview.service"
+  command_target="${user_bin_dir}/translator-preview"
+  daemon_binary_target="${daemon_binary_source}"
+  ui_binary_target="${ui_binary_source}"
+fi
 
 usage() {
   printf 'usage: %s {install|up|start|stop|down|restart|status|logs|disable|uninstall}\n' "${0##*/}" >&2
+}
+
+service_environment_runtime_code='
+import hashlib
+import os
+import re
+import stat
+import sys
+
+MAX_ENVIRONMENT_BYTES = 65536
+MAX_ENVIRONMENT_LINES = 256
+ALLOWED_KEYS = frozenset({
+    "OPENAI_API_KEY",
+    "TRANSLATOR_ASR_MODEL_ID",
+    "TRANSLATOR_MT_MODEL_ID",
+    "TRANSLATOR_CONTINUATION_TAIL_RMS",
+    "TRANSLATOR_CUDA_LIBRARY_PATH",
+    "TRANSLATOR_DISABLE_HEADPHONE_AEC",
+    "TRANSLATOR_ENABLE_HEADPHONE_AEC",
+    "TRANSLATOR_LOCAL_RUNTIME_MODE",
+    "TRANSLATOR_MODEL_CACHE_ROOT",
+    "TRANSLATOR_PYTHON",
+    "TRANSLATOR_SIDECAR_ROOT",
+    "TRANSLATOR_VAD_ADAPTIVE_SILENCE_MS",
+    "TRANSLATOR_VAD_CONFIRMATION_FRAMES",
+    "TRANSLATOR_VAD_MAX_UTTERANCE_MS",
+    "TRANSLATOR_VAD_MIN_RMS",
+    "TRANSLATOR_VAD_MIN_UTTERANCE_MS",
+})
+KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def refuse(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(78)
+
+
+def checked_open(path, flags, message, *, dir_fd=None, mode=None):
+    try:
+        if mode is None:
+            return os.open(path, flags, dir_fd=dir_fd)
+        return os.open(path, flags, mode, dir_fd=dir_fd)
+    except OSError:
+        refuse(message)
+
+
+def check_directory(fd, expected_mode, exact_mode):
+    info = os.fstat(fd)
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        refuse("refusing unsafe service environment directory")
+    if exact_mode and mode != expected_mode:
+        refuse("refusing unsafe service environment directory mode")
+    if not exact_mode and mode & 0o022:
+        refuse("refusing attacker-writable service configuration root")
+
+
+def check_environment_file(fd):
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        refuse("refusing unsafe service environment file")
+    if info.st_size > MAX_ENVIRONMENT_BYTES:
+        refuse("refusing oversized service environment file")
+    return info
+
+
+def signature(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_stable_file(fd, before):
+    def read_once():
+        chunks = []
+        remaining = MAX_ENVIRONMENT_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    data = read_once()
+    middle = os.fstat(fd)
+    os.lseek(fd, 0, os.SEEK_SET)
+    verification_data = read_once()
+    after = os.fstat(fd)
+    expected_size = before.st_size
+    if (
+        len(data) > MAX_ENVIRONMENT_BYTES
+        or len(data) != expected_size
+        or len(verification_data) != expected_size
+    ):
+        refuse("refusing unstable service environment file")
+    if signature(before) != signature(middle) or signature(middle) != signature(after):
+        refuse("refusing service environment file changed during read")
+    if hashlib.sha256(data).digest() != hashlib.sha256(verification_data).digest():
+        refuse("refusing service environment content changed during read")
+    return data
+
+
+def parse_environment(data):
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        refuse("refusing non-UTF-8 service environment file")
+    if "\x00" in text:
+        refuse("refusing NUL in service environment file")
+
+    lines = text.split("\n")
+    if len(lines) > MAX_ENVIRONMENT_LINES:
+        refuse("refusing too many service environment lines")
+    parsed = {}
+    for line in lines:
+        if line.endswith("\r"):
+            line = line[:-1]
+        if "\r" in line:
+            refuse("refusing malformed service environment line")
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or KEY_PATTERN.fullmatch(key) is None:
+            refuse("refusing malformed service environment line")
+        if key not in ALLOWED_KEYS:
+            refuse("unsupported service environment key")
+        if key in parsed:
+            refuse("refusing duplicate service environment key")
+        parsed[key] = value
+    return parsed
+
+
+def open_environment_tree(root, create):
+    if not os.path.isabs(root):
+        refuse("refusing non-absolute service configuration root")
+    if create:
+        previous_umask = os.umask(0o077)
+        try:
+            os.makedirs(root, mode=0o700, exist_ok=True)
+        except OSError:
+            refuse("failed to create service configuration root safely")
+        finally:
+            os.umask(previous_umask)
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    root_fd = checked_open(
+        root,
+        directory_flags,
+        "refusing unsafe service configuration root",
+    )
+    check_directory(root_fd, 0, False)
+
+    if create:
+        try:
+            os.mkdir(profile, mode=0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        except OSError:
+            refuse("failed to create service environment directory safely")
+    environment_directory_fd = checked_open(
+        profile,
+        directory_flags,
+        "refusing unsafe service environment directory",
+        dir_fd=root_fd,
+    )
+    check_directory(environment_directory_fd, 0o700, True)
+
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    if create:
+        try:
+            environment_fd = os.open(
+                "environment",
+                file_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=environment_directory_fd,
+            )
+            os.fchmod(environment_fd, 0o600)
+        except FileExistsError:
+            environment_fd = checked_open(
+                "environment",
+                file_flags,
+                "refusing unsafe service environment file",
+                dir_fd=environment_directory_fd,
+            )
+        except OSError:
+            refuse("failed to create service environment file safely")
+    else:
+        environment_fd = checked_open(
+            "environment",
+            file_flags,
+            "refusing unsafe service environment file",
+            dir_fd=environment_directory_fd,
+        )
+    return root_fd, environment_directory_fd, environment_fd
+
+
+def open_daemon(daemon_path, bundle_root, profile):
+    if not os.path.isabs(bundle_root):
+        refuse("refusing non-absolute translator bundle root")
+    expected = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "translator-daemon")
+    if profile == "translator-preview":
+        expected = os.path.join(bundle_root, "target", "release", "translator-daemon")
+    if daemon_path != expected or not os.path.isabs(daemon_path):
+        refuse("refusing unexpected translator daemon path")
+    fd = checked_open(
+        daemon_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        "refusing unsafe translator daemon executable",
+    )
+    info = os.fstat(fd)
+    mode = stat.S_IMODE(info.st_mode)
+    if (
+        not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+        or mode & 0o100 == 0 or mode & 0o022
+    ):
+        refuse("refusing unsafe translator daemon executable")
+    return fd
+
+
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+root = sys.argv[2] if len(sys.argv) > 2 else ""
+profile = sys.argv[-1]
+if (
+    mode not in {"prepare", "exec", "check"}
+    or profile not in {"translator", "translator-preview"}
+    or len(sys.argv) != (4 if mode == "prepare" else 6)
+):
+    refuse("invalid service environment runtime mode")
+if mode == "check":
+    os.close(open_daemon(sys.argv[3], sys.argv[4], profile))
+    raise SystemExit(0)
+
+root_fd, environment_directory_fd, environment_fd = open_environment_tree(
+    root, mode == "prepare"
+)
+environment_info = check_environment_file(environment_fd)
+environment_data = read_stable_file(environment_fd, environment_info)
+service_environment = parse_environment(environment_data)
+if mode == "prepare":
+    os.close(environment_fd)
+    os.close(environment_directory_fd)
+    os.close(root_fd)
+    raise SystemExit(0)
+
+if len(sys.argv) != 6:
+    refuse("invalid daemon wrapper arguments")
+daemon_path = sys.argv[3]
+bundle_root = sys.argv[4]
+
+os.close(environment_fd)
+os.close(environment_directory_fd)
+os.close(root_fd)
+
+daemon_fd = open_daemon(daemon_path, bundle_root, profile)
+
+daemon_environment = dict(os.environ)
+for inherited_key in tuple(daemon_environment):
+    if (
+        inherited_key.startswith("LD_")
+        or inherited_key.startswith("PYTHON")
+        or inherited_key in {"BASH_ENV", "ENV", "SHELLOPTS"}
+    ):
+        daemon_environment.pop(inherited_key, None)
+daemon_environment.setdefault("TRANSLATOR_SIDECAR_ROOT", os.path.join(bundle_root, "sidecar"))
+sidecar_root = service_environment.get(
+    "TRANSLATOR_SIDECAR_ROOT", daemon_environment["TRANSLATOR_SIDECAR_ROOT"]
+)
+daemon_environment.setdefault(
+    "TRANSLATOR_PYTHON", os.path.join(sidecar_root, ".venv", "bin", "python")
+)
+daemon_environment.update(service_environment)
+daemon_arguments = [daemon_path]
+if profile == "translator-preview":
+    runtime_parent = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not os.path.isabs(runtime_parent):
+        refuse("preview requires an absolute user runtime directory")
+    daemon_environment["XDG_RUNTIME_DIR"] = os.path.join(runtime_parent, profile)
+    daemon_environment["XDG_STATE_HOME"] = os.path.join(
+        os.environ.get("XDG_STATE_HOME", os.path.join(os.environ["HOME"], ".local", "state")),
+        profile,
+    )
+    daemon_environment["PULSE_SERVER"] = os.environ.get(
+        "PULSE_SERVER", "unix:" + os.path.join(runtime_parent, "pulse", "native")
+    )
+    for key in tuple(daemon_environment):
+        if key.startswith("TRANSLATOR_AEC_"):
+            daemon_environment.pop(key)
+    for key, value in {
+        "TRANSLATOR_ASR_MODEL_ID": "faster-whisper-large-v3-turbo",
+        "TRANSLATOR_MT_MODEL_ID": "hy-mt2-1.8b-gguf-q4-k-m",
+        "TRANSLATOR_MODEL_CACHE_ROOT": os.path.join(bundle_root, "model-cache"),
+    }.items():
+        daemon_environment[key] = service_environment.get(key, value)
+    cuda_dirs = [os.path.join(bundle_root, "cuda", "nvidia", part, "lib")
+                 for part in ("cudnn", "cuda_nvrtc")]
+    if all(os.path.isdir(path) for path in cuda_dirs):
+        daemon_environment["TRANSLATOR_CUDA_LIBRARY_PATH"] = service_environment.get(
+            "TRANSLATOR_CUDA_LIBRARY_PATH", os.pathsep.join(cuda_dirs)
+        )
+    daemon_arguments += ["--listen", "127.0.0.1:47682"]
+os.execve(daemon_fd, daemon_arguments, daemon_environment)
+'
+
+prepare_service_environment() {
+  /usr/bin/python3 -I -c "${service_environment_runtime_code}" prepare "${config_root}" "${profile}"
+}
+
+run_daemon_with_service_environment() {
+  exec /usr/bin/python3 -I -c "${service_environment_runtime_code}" exec "${1}" "${2}" "${project_root}" "${profile}"
 }
 
 write_autostart() {
@@ -66,6 +400,7 @@ build_ui_binary_if_available() {
 }
 
 install_ui_binary_if_available() {
+  if [ "${profile}" = translator-preview ]; then return 0; fi
   if ! build_ui_binary_if_available; then
     printf '%s\n' 'translator-ui install skipped: tauri build is unavailable or failed' >&2
     return 0
@@ -86,6 +421,7 @@ install_ui_binary_if_available() {
 }
 
 install_daemon_binary_if_available() {
+  if [ "${profile}" = translator-preview ]; then return 0; fi
   if [ ! -x "${daemon_binary_source}" ]; then
     return 0
   fi
@@ -110,6 +446,11 @@ remove_command_if_owned() {
 }
 
 install_unit() {
+  if [ "${profile}" = translator-preview ]; then
+    install_preview_unit
+    return
+  fi
+  prepare_service_environment
   test -f "${unit_source}"
   install_command
   install_daemon_binary_if_available
@@ -118,21 +459,87 @@ install_unit() {
   install -m 600 "${unit_source}" "${unit_target}"
   write_autostart
   systemctl --user daemon-reload
-  systemctl --user enable translator.service
+  systemctl --user enable "${unit_name}"
+}
+
+install_preview_unit() {
+  if [ -e "${command_target}" ] || [ -L "${command_target}" ] ||
+     [ -e "${unit_target}" ] || [ -L "${unit_target}" ]; then
+    printf '%s\n' 'refusing existing preview installation; uninstall it before replacement' >&2
+    exit 73
+  fi
+  for payload in "${daemon_binary_source}" "${ui_binary_source}" "${project_root}/sidecar/.venv/bin/python"; do
+    if [ ! -x "${payload}" ]; then
+      printf '%s\n' 'preview payload is incomplete' >&2
+      exit 78
+    fi
+  done
+  /usr/bin/python3 -I -c "${service_environment_runtime_code}" check "${config_root}" "${daemon_binary_source}" "${project_root}" "${profile}"
+  if ! /usr/bin/timeout 10 /usr/bin/env -i HOME="${HOME}" PATH=/usr/bin:/bin LANG=C.UTF-8 \
+      "${project_root}/sidecar/.venv/bin/python" -I -B -c \
+      'from piper.phonemize_espeak import EspeakPhonemizer; p=EspeakPhonemizer(); assert all(p.phonemize(v, "Preview check.") for v in ("en-us", "ru"))' \
+      >/dev/null 2>&1; then
+    printf '%s\n' 'preview Piper preflight failed; use a shorter private payload directory' >&2
+    exit 78
+  fi
+  test -f "${unit_source}"
+  prepare_service_environment
+  preview_command_owned=false
+  preview_unit_owned=false
+  trap 'preview_install_rollback' EXIT
+  preview_command_owned=true
+  install_command
+  install -d -m 700 "${systemd_user_dir}"
+  preview_unit_owned=true
+  install -m 600 "${unit_source}" "${unit_target}"
+  systemctl --user daemon-reload
+  trap - EXIT
+}
+
+preview_install_rollback() {
+  if [ "${preview_command_owned}" = true ] && [ -L "${command_target}" ]; then
+    existing_target="$(readlink -f -- "${command_target}" 2>/dev/null || true)"
+    if [ "${existing_target}" = "${script_target}" ]; then unlink -- "${command_target}"; fi
+  fi
+  if [ "${preview_unit_owned}" = true ] && [ -f "${unit_target}" ] && [ ! -L "${unit_target}" ]; then
+    unlink -- "${unit_target}"
+  fi
+}
+
+refuse_live_production() {
+  if systemctl --user is-active --quiet translator.service ||
+     curl -sS -m 0.5 -o /dev/null http://127.0.0.1:47681/v1/status >/dev/null 2>&1; then
+    printf '%s\n' 'preview refuses concurrent production audio; stop the canonical service explicitly' >&2
+    exit 73
+  fi
 }
 
 unit_file_loaded() {
-  systemctl --user list-unit-files translator.service --no-legend 2>/dev/null | grep -q '^translator\.service'
+  systemctl --user list-unit-files "${unit_name}" --no-legend 2>/dev/null | grep -Fq "${unit_name} "
 }
 
 start_unit_installing_if_needed() {
+  if [ "${profile}" = translator-preview ]; then
+    refuse_live_production
+    if [ ! -L "${command_target}" ] ||
+       [ "$(readlink -f -- "${command_target}")" != "${script_target}" ] ||
+       ! unit_file_loaded; then
+      printf '%s\n' 'install this preview payload before starting it' >&2
+      exit 78
+    fi
+    prepare_service_environment
+    systemctl --user start "${unit_name}"
+    return
+  fi
+  prepare_service_environment
   install_command
   install_daemon_binary_if_available
   install_ui_binary_if_available
   if ! unit_file_loaded; then
     install_unit
   fi
-  systemctl --user start translator.service
+  prepare_service_environment
+  systemctl --user start "${unit_name}"
 }
 
 wait_for_daemon_api() {
@@ -142,7 +549,9 @@ wait_for_daemon_api() {
 
   attempt=0
   while [ "${attempt}" -lt 50 ]; do
-    if curl -sS -m 0.5 -o /dev/null http://127.0.0.1:47681/v1/status >/dev/null 2>&1; then
+    api_port=47681
+    if [ "${profile}" = translator-preview ]; then api_port=47682; fi
+    if curl -sS -m 0.5 -o /dev/null "http://127.0.0.1:${api_port}/v1/status" >/dev/null 2>&1; then
       return 0
     fi
     attempt=$((attempt + 1))
@@ -153,7 +562,7 @@ wait_for_daemon_api() {
 }
 
 ensure_ui_running() {
-  if pgrep -u "$(id -u)" -x translator-ui >/dev/null 2>&1; then
+  if [ "${profile}" != translator-preview ] && pgrep -u "$(id -u)" -x translator-ui >/dev/null 2>&1; then
     return 0
   fi
 
@@ -171,12 +580,27 @@ ensure_ui_running() {
     return 0
   fi
 
+  if [ "${profile}" = translator-preview ]; then
+    preview_runtime="${XDG_RUNTIME_DIR:?}/translator-preview"
+    if [ -n "${WAYLAND_DISPLAY:-}" ] && [ "${WAYLAND_DISPLAY#/}" = "${WAYLAND_DISPLAY}" ]; then
+      export WAYLAND_DISPLAY="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
+    fi
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+    export TRANSLATOR_DAEMON_URL=http://127.0.0.1:47682
+    export XDG_RUNTIME_DIR="${preview_runtime}"
+  fi
   if ! setsid -f "${ui_command}" >/dev/null 2>&1; then
     printf '%s\n' 'translator-ui launch failed; daemon remains running' >&2
   fi
 }
 
 cleanup_audio_graph() {
+  if [ "${profile}" = translator-preview ]; then
+    PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR:?}/pulse/native}" \
+      XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}/translator-preview" \
+      "${daemon_binary_target}" --audio-graph-cleanup >/dev/null
+    return
+  fi
   if command -v translator-daemon >/dev/null 2>&1; then
     translator-daemon --audio-graph-cleanup >/dev/null || true
   else
@@ -186,7 +610,7 @@ cleanup_audio_graph() {
 
 stop_unit_and_cleanup() {
   if unit_file_loaded; then
-    systemctl --user stop translator.service
+    systemctl --user stop "${unit_name}"
   else
     printf '%s\n' 'translator.service is not installed; only audio graph cleanup will run' >&2
   fi
@@ -194,7 +618,7 @@ stop_unit_and_cleanup() {
 }
 
 print_service_summary() {
-  systemctl --user show translator.service \
+  systemctl --user show "${unit_name}" \
     --property=LoadState \
     --property=ActiveState \
     --property=SubState \
@@ -205,17 +629,28 @@ print_service_summary() {
 
 stop_unit_if_loaded() {
   if unit_file_loaded; then
-    systemctl --user stop translator.service || true
+    systemctl --user stop "${unit_name}" || true
   fi
 }
 
 disable_unit_if_loaded() {
   if unit_file_loaded; then
-    systemctl --user disable translator.service || true
+    systemctl --user disable "${unit_name}" || true
   fi
 }
 
 case "${1:-}" in
+  _run-bundle-daemon)
+    if [ "${profile}" != translator-preview ] || [ "$#" -ne 2 ]; then exit 64; fi
+    refuse_live_production
+    run_daemon_with_service_environment "${2}" "${daemon_binary_source}"
+    ;;
+  _run-daemon)
+    if [ "$#" -ne 3 ]; then
+      exit 64
+    fi
+    run_daemon_with_service_environment "${2}" "${3}"
+    ;;
   install)
     install_unit
     ;;
@@ -247,7 +682,7 @@ case "${1:-}" in
     ;;
   status)
     print_service_summary
-    systemctl --user status translator.service --no-pager
+    systemctl --user status "${unit_name}" --no-pager
     ;;
   logs)
     log_lines="${2:-80}"
@@ -257,19 +692,20 @@ case "${1:-}" in
         exit 64
         ;;
     esac
-    journalctl --user-unit translator.service --no-pager -n "${log_lines}"
+    journalctl --user-unit "${unit_name}" --no-pager -n "${log_lines}"
     ;;
   disable)
     stop_unit_if_loaded
-    systemctl --user disable translator.service
+    systemctl --user disable "${unit_name}"
     ;;
   uninstall)
     stop_unit_if_loaded
     disable_unit_if_loaded
     remove_command_if_owned
-    rm -f -- "${unit_target}" "${autostart_target}"
+    rm -f -- "${unit_target}"
+    if [ "${profile}" != translator-preview ]; then rm -f -- "${autostart_target}"; fi
     systemctl --user daemon-reload
-    systemctl --user reset-failed translator.service || true
+    systemctl --user reset-failed "${unit_name}" || true
     cleanup_audio_graph
     ;;
   *)

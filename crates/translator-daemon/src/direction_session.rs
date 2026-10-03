@@ -74,6 +74,9 @@ pub enum DirectionEffect {
     },
     Latency {
         utterance_id: Option<Uuid>,
+        asr_first_text_ms: Option<u32>,
+        asr_final_text_ms: Option<u32>,
+        mt_first_text_ms: Option<u32>,
         tts_first_audio_ms: Option<u32>,
         provider_total_ms: Option<u32>,
     },
@@ -168,8 +171,17 @@ impl DirectionSession {
         self.contract.stream_id
     }
 
+    pub(crate) fn is_drained(&self) -> bool {
+        self.collecting_utterance.is_none() && self.active_utterances.is_empty()
+    }
+
     pub const fn provider_contract(&self) -> &ProviderSessionContract {
         &self.contract
+    }
+
+    /// Returns the current watchdog phase deadline, not an end-to-end audio deadline.
+    pub fn next_watchdog_deadline_ns(&self) -> Option<u64> {
+        self.coordinator.next_phase_deadline_ns()
     }
 
     pub fn open_request(&self) -> ProviderRequest {
@@ -336,6 +348,9 @@ impl DirectionSession {
                     .as_deref()
                     .map(parse_utterance)
                     .transpose()?,
+                asr_first_text_ms: value.asr_first_text_ms,
+                asr_final_text_ms: value.asr_final_text_ms,
+                mt_first_text_ms: value.mt_first_text_ms,
                 tts_first_audio_ms: value.tts_first_audio_ms,
                 provider_total_ms: value.provider_total_ms,
             }]),

@@ -1,0 +1,87 @@
+# These are temporary upstream exceptions, not remediations. OSV-Scanner stops
+# ignoring each advisory after ignoreUntil, making the release gate fail closed.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=proc-macro-error@1.0.4; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > glib@0.18.5 > glib-macros@0.18.5 > proc-macro-error@1.0.4; risk=informational unmaintained build-time proc macro with no vulnerable function or patched release; renewal_evidence=cargo tree path plus upstream glib/gtk macro replacement review; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gdkwayland-sys@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-runtime-wry@2.11.4 > tao@0.35.3 > gdkwayland-sys@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gdk@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-runtime-wry@2.11.4 > wry@0.55.1 > gdkx11@0.18.2 > gdk@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=atk@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > gtk@0.18.2 > atk@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gdkx11-sys@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-runtime-wry@2.11.4 > wry@0.55.1 > gdkx11@0.18.2 > gdkx11-sys@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gtk@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > gtk@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=atk-sys@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > gtk@0.18.2 > atk@0.18.2 > atk-sys@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gdkx11@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-runtime-wry@2.11.4 > wry@0.55.1 > gdkx11@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gdk-sys@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-runtime-wry@2.11.4 > wry@0.55.1 > gdkx11@0.18.2 > gdk@0.18.2 > gdk-sys@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gtk3-macros@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > gtk@0.18.2 > gtk3-macros@0.18.2; risk=informational unmaintained build-time GTK3 proc macro with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=gtk-sys@0.18.2; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > gtk@0.18.2 > gtk-sys@0.18.2; risk=informational unmaintained GTK3 binding with no vulnerable function or compatible maintained Tauri Linux replacement; renewal_evidence=cargo tree path plus upstream Tauri migration review and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=glib@0.18.5; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > glib@0.18.5; risk=VariantStrIter Iterator and DoubleEndedIterator implementations are unsound and no compatible patched GTK3 line exists; renewal_evidence=direct project Rust source must contain neither VariantStrIter nor its public array_iter_str constructor, cargo tree path, upstream Tauri migration review, and Linux UI smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=unic-char-range@0.9.0; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-utils@2.9.3 > urlpattern@0.3.0 > unic-ucd-ident@0.9.0 > unic-char-property@0.9.0 > unic-char-range@0.9.0; risk=informational unmaintained parser dependency with no vulnerable function or compatible Tauri replacement; renewal_evidence=cargo tree path plus upstream tauri-utils/urlpattern replacement review and build smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=unic-common@0.9.0; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-utils@2.9.3 > urlpattern@0.3.0 > unic-ucd-ident@0.9.0 > unic-ucd-version@0.9.0 > unic-common@0.9.0; risk=informational unmaintained parser dependency with no vulnerable function or compatible Tauri replacement; renewal_evidence=cargo tree path plus upstream tauri-utils/urlpattern replacement review and build smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=unic-char-property@0.9.0; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-utils@2.9.3 > urlpattern@0.3.0 > unic-ucd-ident@0.9.0 > unic-char-property@0.9.0; risk=informational unmaintained parser dependency with no vulnerable function or compatible Tauri replacement; renewal_evidence=cargo tree path plus upstream tauri-utils/urlpattern replacement review and build smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=unic-ucd-version@0.9.0; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-utils@2.9.3 > urlpattern@0.3.0 > unic-ucd-ident@0.9.0 > unic-ucd-version@0.9.0; risk=informational unmaintained parser dependency with no vulnerable function or compatible Tauri replacement; renewal_evidence=cargo tree path plus upstream tauri-utils/urlpattern replacement review and build smoke; status=temporary-not-resolved"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2026-12-01
+reason = "owner=translator-desktop; package=unic-ucd-ident@0.9.0; dependency_path=translator-ui@0.1.0 > tauri@2.11.5 > tauri-utils@2.9.3 > urlpattern@0.3.0 > unic-ucd-ident@0.9.0; risk=informational unmaintained parser dependency with no vulnerable function or compatible Tauri replacement; renewal_evidence=cargo tree path plus upstream tauri-utils/urlpattern replacement review and build smoke; status=temporary-not-resolved"

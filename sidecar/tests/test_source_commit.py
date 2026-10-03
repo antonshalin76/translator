@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import logging
-from threading import Event, Lock
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from uuid import uuid4
 
 import pytest
 
+from translator_sidecar.local.inference_scheduler import SchedulerRequestRejected
 from translator_sidecar.local.source_commit import (
     SourceCommit,
     SourceCommitProtocolError,
@@ -261,6 +262,7 @@ def test_native_failure_is_sanitized_and_never_retried(
         raise RuntimeError(marker)
 
     if failure_at == "translation":
+
         def operation() -> str:
             return commit.finalize(
                 "private source",
@@ -316,10 +318,7 @@ def test_async_callbacks_are_owned_exactly_once_by_commit_boundary() -> None:
             end_of_utterance=True,
             translate=translate,
         )
-        frames = [
-            frame
-            async for frame in commit.stream_once(synthesize)
-        ]
+        frames = [frame async for frame in commit.stream_once(synthesize)]
 
         assert translated == "stable translation"
         assert frames == [b"frame-1", b"frame-2"]
@@ -331,6 +330,26 @@ def test_async_callbacks_are_owned_exactly_once_by_commit_boundary() -> None:
         ):
             async for _frame in commit.stream_once(synthesize):
                 pass
+
+    asyncio.run(scenario())
+
+
+def test_async_commit_preserves_sanitized_request_rejection_and_fails_closed() -> None:
+    async def scenario() -> None:
+        commit = SourceCommit(uuid4())
+
+        async def rejected(_source: str) -> str:
+            raise SchedulerRequestRejected("private request marker")
+
+        with pytest.raises(SchedulerRequestRejected, match="rejected") as raised:
+            await commit.finalize_async(
+                "private source", end_of_utterance=True, translate=rejected
+            )
+        assert "private request marker" not in repr(raised.value)
+        with pytest.raises(SourceCommitProtocolError, match="failed"):
+            await commit.finalize_async(
+                "private source", end_of_utterance=True, translate=rejected
+            )
 
     asyncio.run(scenario())
 
@@ -382,10 +401,7 @@ def test_concurrent_async_callbacks_enter_once() -> None:
             yield b"frame"
 
         async def consume() -> list[bytes]:
-            return [
-                frame
-                async for frame in commit.stream_once(synthesize)
-            ]
+            return [frame async for frame in commit.stream_once(synthesize)]
 
         first_synthesis = asyncio.create_task(consume())
         await asyncio.wait_for(synthesis_entered.wait(), timeout=1)

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash -p
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

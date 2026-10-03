@@ -17,6 +17,40 @@ fn pcm_format() -> PcmFormat {
 }
 
 #[test]
+fn voice_override_presence_is_policy_neutral_and_preserves_wire_values() {
+    for value in ["models/fixture.onnx", "", " \t"] {
+        for (model, provider) in [(true, false), (false, true), (true, true)] {
+            let profile = VoiceProfile {
+                language: Language::En,
+                gender: VoiceGender::Female,
+                engine: VoiceEngine::Piper,
+                model_path: model.then(|| value.to_owned()),
+                provider_voice_id: provider.then(|| value.to_owned()),
+            };
+            assert!(profile.has_overrides());
+            let encoded = serde_json::to_value(&profile).unwrap();
+            assert_eq!(
+                serde_json::from_value::<VoiceProfile>(encoded).unwrap(),
+                profile
+            );
+        }
+    }
+    for literal in [
+        r#"{"language":"en","gender":"female","engine":"piper"}"#,
+        r#"{"language":"en","gender":"female","engine":"piper","model_path":null,"provider_voice_id":null}"#,
+    ] {
+        let profile: VoiceProfile = serde_json::from_str(literal).unwrap();
+        assert!(!profile.has_overrides());
+        assert!(
+            serde_json::to_value(profile)
+                .unwrap()
+                .get("model_path")
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn provider_health_matches_the_versioned_wire_shape() {
     let health = ProviderHealth {
         schema_version: ProviderHealthVersion::V1,

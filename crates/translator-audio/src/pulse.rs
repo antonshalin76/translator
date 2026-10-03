@@ -1,12 +1,14 @@
+use crate::module_list::{PactlModule, parse_module_list};
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::command::{CommandResult, CommandRunError, CommandRunner, SystemCommandRunner};
-use crate::journal::{JournalSession, JournalStore, OwnedModule, OwnershipJournal};
+use crate::journal::{JournalSession, JournalStore, OwnedModule, OwnershipJournal, check_deadline};
 use crate::{
     AudioEndpointState, AudioGraph, AudioGraphError, AudioGraphErrorCode, AudioGraphState,
     EndpointKind, EndpointRole, GraphHealth,
@@ -67,12 +69,6 @@ impl RawGraph {
     }
 }
 
-#[derive(Debug)]
-struct PactlModule {
-    name: String,
-    argument: String,
-}
-
 pub struct PulseAudioGraph<R = SystemCommandRunner> {
     runner: R,
     journal: JournalStore,
@@ -96,51 +92,41 @@ where
         }
     }
 
-    fn inspect_raw(&self) -> Result<RawGraph, AudioGraphError> {
+    fn inspect_raw(&self, deadline: Instant) -> Result<RawGraph, AudioGraphError> {
         Ok(RawGraph {
-            sinks: self.inspect_endpoint_kind("sinks")?,
-            sources: self.inspect_endpoint_kind("sources")?,
+            sinks: self.inspect_endpoint_kind("sinks", deadline)?,
+            sources: self.inspect_endpoint_kind("sources", deadline)?,
         })
     }
 
     fn inspect_endpoint_kind(
         &self,
         kind: &str,
+        deadline: Instant,
     ) -> Result<Vec<PactlEndpointSummary>, AudioGraphError> {
         let result = self.run_pactl(
             &["--format=json", "list", kind],
             AudioGraphErrorCode::GraphInspectionFailed,
+            deadline,
         )?;
         let endpoints: Vec<PactlEndpoint> = serde_json::from_slice(result.stdout())
             .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::GraphInspectionFailed))?;
+        check_deadline(deadline)?;
         Ok(endpoints.into_iter().map(Into::into).collect())
     }
 
-    fn inspect_modules(&self) -> Result<HashMap<u32, PactlModule>, AudioGraphError> {
+    fn inspect_modules(
+        &self,
+        deadline: Instant,
+    ) -> Result<HashMap<u32, PactlModule>, AudioGraphError> {
         let result = self.run_pactl(
             &["list", "short", "modules"],
             AudioGraphErrorCode::CleanupFailed,
+            deadline,
         )?;
-        let text = std::str::from_utf8(result.stdout())
+        let modules = parse_module_list(result.stdout())
             .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::CleanupFailed))?;
-        let mut modules = HashMap::new();
-        for line in text.lines() {
-            let mut fields = line.splitn(4, '\t');
-            let Some(id) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Some(name) = fields.next() else {
-                continue;
-            };
-            let argument = fields.next().unwrap_or_default();
-            modules.insert(
-                id,
-                PactlModule {
-                    name: name.to_owned(),
-                    argument: argument.to_owned(),
-                },
-            );
-        }
+        check_deadline(deadline)?;
         Ok(modules)
     }
 
@@ -196,53 +182,62 @@ where
     fn create_endpoints(
         &mut self,
         session: &JournalSession,
+        deadline: Instant,
     ) -> Result<AudioGraphState, AudioGraphError> {
         let mut ownership = OwnershipJournal::empty(self.next_generation.clone());
+        check_deadline(deadline)?;
         session.save(&ownership)?;
         for role in EndpointRole::ORDER {
-            let module_id = match self.load_endpoint(role, &ownership.generation) {
+            let module_id = match self.load_endpoint(role, &ownership.generation, deadline) {
                 Ok(module_id) => module_id,
                 Err(load_error) => {
-                    if self.rollback_new_modules(session, &mut ownership).is_err() {
-                        return Err(AudioGraphError::new(AudioGraphErrorCode::RollbackFailed));
+                    check_deadline(deadline)?;
+                    if load_error.code() == AudioGraphErrorCode::DeadlineExpired {
+                        return Err(load_error);
                     }
+                    self.rollback_new_modules(session, &mut ownership, deadline)?;
                     return Err(load_error);
                 }
             };
             ownership.modules.push(OwnedModule { role, module_id });
             if session.save(&ownership).is_err() {
-                if self.rollback_new_modules(session, &mut ownership).is_err() {
-                    return Err(AudioGraphError::new(AudioGraphErrorCode::RollbackFailed));
-                }
+                check_deadline(deadline)?;
+                self.rollback_new_modules(session, &mut ownership, deadline)?;
                 return Err(AudioGraphError::new(
                     AudioGraphErrorCode::OwnershipJournalIo,
                 ));
             }
+            check_deadline(deadline)?;
         }
 
-        let raw = match self.inspect_raw() {
+        let raw = match self.inspect_raw(deadline) {
             Ok(raw) => raw,
             Err(inspection_error) => {
-                if self.rollback_new_modules(session, &mut ownership).is_err() {
-                    return Err(AudioGraphError::new(AudioGraphErrorCode::RollbackFailed));
-                }
+                check_deadline(deadline)?;
+                self.rollback_new_modules(session, &mut ownership, deadline)?;
                 return Err(inspection_error);
             }
         };
         if !self.journal_matches_graph(&raw, &ownership) {
-            if self.rollback_new_modules(session, &mut ownership).is_err() {
-                return Err(AudioGraphError::new(AudioGraphErrorCode::RollbackFailed));
-            }
+            self.rollback_new_modules(session, &mut ownership, deadline)?;
             return Err(AudioGraphError::new(
                 AudioGraphErrorCode::EndpointVerificationFailed,
             ));
         }
-        Ok(self.state_from(&raw, Some(&ownership)))
+        let state = self.state_from(&raw, Some(&ownership));
+        check_deadline(deadline)?;
+        Ok(state)
     }
 
-    fn load_endpoint(&self, role: EndpointRole, generation: &str) -> Result<u32, AudioGraphError> {
+    fn load_endpoint(
+        &self,
+        role: EndpointRole,
+        generation: &str,
+        deadline: Instant,
+    ) -> Result<u32, AudioGraphError> {
         let args = load_args(role, generation);
-        let result = self.run_pactl_owned(&args, AudioGraphErrorCode::ModuleLoadFailed)?;
+        let result =
+            self.run_pactl_owned(&args, AudioGraphErrorCode::ModuleLoadFailed, deadline)?;
         let module_id = std::str::from_utf8(result.stdout())
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok())
@@ -254,18 +249,19 @@ where
         &mut self,
         session: &JournalSession,
         ownership: &mut OwnershipJournal,
+        deadline: Instant,
     ) -> Result<(), AudioGraphError> {
         while let Some(module) = ownership.modules.last().cloned() {
             let modules = self
-                .inspect_modules()
-                .map_err(|_| AudioGraphError::new(AudioGraphErrorCode::RollbackFailed))?;
+                .inspect_modules(deadline)
+                .map_err(|error| stage_error(error, AudioGraphErrorCode::RollbackFailed))?;
             match modules.get(&module.module_id) {
                 Some(discovered)
                     if module_matches(module.role, discovered, &ownership.generation) =>
                 {
-                    if self.unload_module(module.module_id).is_err() {
+                    if let Err(error) = self.unload_module(module.module_id, deadline) {
                         session.save(ownership)?;
-                        return Err(AudioGraphError::new(AudioGraphErrorCode::RollbackFailed));
+                        return Err(stage_error(error, AudioGraphErrorCode::RollbackFailed));
                     }
                 }
                 Some(_) => {
@@ -274,9 +270,11 @@ where
                 }
                 None => {}
             }
+            check_deadline(deadline)?;
             ownership.modules.pop();
             session.save(ownership)?;
         }
+        check_deadline(deadline)?;
         session.save(ownership)
     }
 
@@ -300,8 +298,10 @@ where
         }
 
         for module in modules.values() {
-            if let Some(role) = module_claimed_role(module, &journal.generation)
-                && !module_matches(role, module, &journal.generation)
+            if module.argument.contains(&journal.generation)
+                && !EndpointRole::ORDER
+                    .into_iter()
+                    .any(|role| module_matches(role, module, &journal.generation))
             {
                 return Err(AudioGraphError::new(failure_code));
             }
@@ -359,17 +359,16 @@ where
         &mut self,
         session: &JournalSession,
         journal: &mut OwnershipJournal,
+        deadline: Instant,
     ) -> Result<Vec<u32>, AudioGraphError> {
         let mut unloaded = Vec::new();
         while let Some(module) = journal.modules.last().cloned() {
-            let modules = self.inspect_modules()?;
+            let modules = self.inspect_modules(deadline)?;
             match modules.get(&module.module_id) {
                 Some(discovered)
                     if module_matches(module.role, discovered, &journal.generation) =>
                 {
-                    if self.unload_module(module.module_id).is_err() {
-                        return Err(AudioGraphError::new(AudioGraphErrorCode::CleanupFailed));
-                    }
+                    self.unload_module(module.module_id, deadline)?;
                     unloaded.push(module.module_id);
                 }
                 Some(_) => {
@@ -377,6 +376,7 @@ where
                 }
                 None => {}
             }
+            check_deadline(deadline)?;
             journal.modules.pop();
             if journal.modules.is_empty() {
                 session.remove()?;
@@ -384,43 +384,54 @@ where
                 session.save(journal)?;
             }
         }
+        check_deadline(deadline)?;
         session.remove()?;
+        check_deadline(deadline)?;
         Ok(unloaded)
     }
 
-    fn unload_module(&self, module_id: u32) -> Result<(), AudioGraphError> {
+    fn unload_module(&self, module_id: u32, deadline: Instant) -> Result<(), AudioGraphError> {
         self.run_pactl_owned(
             &["unload-module".to_owned(), module_id.to_string()],
             AudioGraphErrorCode::CleanupFailed,
+            deadline,
         )?;
-        Ok(())
+        check_deadline(deadline)
     }
 
     fn run_pactl(
         &self,
         args: &[&str],
         failure_code: AudioGraphErrorCode,
+        deadline: Instant,
     ) -> Result<CommandResult, AudioGraphError> {
         let owned: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
-        self.run_pactl_owned(&owned, failure_code)
+        let result = self.run_pactl_owned(&owned, failure_code, deadline)?;
+        check_deadline(deadline)?;
+        Ok(result)
     }
 
     fn run_pactl_owned(
         &self,
         args: &[String],
         failure_code: AudioGraphErrorCode,
+        deadline: Instant,
     ) -> Result<CommandResult, AudioGraphError> {
-        let result = self
-            .runner
-            .run("pactl", args)
-            .map_err(|error| match error {
-                CommandRunError::NotFound => {
-                    AudioGraphError::new(AudioGraphErrorCode::PactlMissing)
-                }
-                CommandRunError::SpawnFailed | CommandRunError::TimedOut => {
-                    AudioGraphError::new(failure_code)
-                }
-            })?;
+        check_deadline(deadline)?;
+        let result =
+            self.runner
+                .run_until("pactl", args, deadline)
+                .map_err(|error| match error {
+                    CommandRunError::NotFound => {
+                        AudioGraphError::new(AudioGraphErrorCode::PactlMissing)
+                    }
+                    CommandRunError::SpawnFailed | CommandRunError::TimedOut => {
+                        AudioGraphError::new(failure_code)
+                    }
+                    CommandRunError::DeadlineExpired => {
+                        AudioGraphError::new(AudioGraphErrorCode::DeadlineExpired)
+                    }
+                })?;
         if result.is_success() {
             Ok(result)
         } else {
@@ -433,10 +444,13 @@ impl<R> AudioGraph for PulseAudioGraph<R>
 where
     R: CommandRunner,
 {
-    fn ensure_endpoints(&mut self) -> Result<AudioGraphState, AudioGraphError> {
-        let session = self.journal.lock()?;
-        let journal = session.load()?;
-        let raw = self.inspect_raw()?;
+    fn ensure_endpoints_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<AudioGraphState, AudioGraphError> {
+        let session = self.journal.lock_until(deadline)?;
+        let journal = session.load_until(deadline)?;
+        let raw = self.inspect_raw(deadline)?;
         if raw.has_duplicate_required_endpoint() {
             return Err(AudioGraphError::new(AudioGraphErrorCode::DuplicateEndpoint));
         }
@@ -446,69 +460,85 @@ where
                 if raw.has_any_required_endpoint() {
                     return Err(AudioGraphError::new(AudioGraphErrorCode::DuplicateEndpoint));
                 }
-                self.create_endpoints(&session)
+                self.create_endpoints(&session, deadline)
             }
             Some(journal) => {
-                let modules = self.inspect_modules()?;
+                let modules = self.inspect_modules(deadline)?;
                 let mut reconciled = self.reconcile_ownership(
                     &raw,
                     &journal,
                     &modules,
                     AudioGraphErrorCode::DuplicateEndpoint,
                 )?;
+                check_deadline(deadline)?;
                 if reconciled != journal {
                     session.save(&reconciled)?;
                 }
                 if self.journal_matches_graph(&raw, &reconciled) {
-                    return Ok(self.state_from(&raw, Some(&reconciled)));
+                    let state = self.state_from(&raw, Some(&reconciled));
+                    check_deadline(deadline)?;
+                    return Ok(state);
                 }
 
-                self.cleanup_reconciled(&session, &mut reconciled)?;
-                let cleaned = self.inspect_raw()?;
+                self.cleanup_reconciled(&session, &mut reconciled, deadline)?;
+                let cleaned = self.inspect_raw(deadline)?;
                 if cleaned.has_any_required_endpoint() {
                     return Err(AudioGraphError::new(AudioGraphErrorCode::DuplicateEndpoint));
                 }
-                self.create_endpoints(&session)
+                self.create_endpoints(&session, deadline)
             }
         }
     }
 
-    fn inspect(&self) -> Result<AudioGraphState, AudioGraphError> {
-        let session = self.journal.lock()?;
-        let journal = session.load()?;
-        let raw = self.inspect_raw()?;
+    fn inspect_until(&self, deadline: Instant) -> Result<AudioGraphState, AudioGraphError> {
+        let session = self.journal.read_only_until(deadline)?;
+        let journal = session.load_until(deadline)?;
+        let raw = self.inspect_raw(deadline)?;
         if raw.has_duplicate_required_endpoint() {
             return Err(AudioGraphError::new(AudioGraphErrorCode::DuplicateEndpoint));
         }
         let Some(journal) = journal else {
-            return Ok(self.state_from(&raw, None));
+            let state = self.state_from(&raw, None);
+            check_deadline(deadline)?;
+            return Ok(state);
         };
-        let modules = self.inspect_modules()?;
+        let modules = self.inspect_modules(deadline)?;
         let reconciled = self.reconcile_ownership(
             &raw,
             &journal,
             &modules,
             AudioGraphErrorCode::GraphInspectionFailed,
         )?;
-        Ok(self.state_from(&raw, Some(&reconciled)))
+        let state = self.state_from(&raw, Some(&reconciled));
+        check_deadline(deadline)?;
+        Ok(state)
     }
 
-    fn cleanup_owned(&mut self) -> Result<Vec<u32>, AudioGraphError> {
-        let session = self.journal.lock()?;
-        let Some(journal) = session.load()? else {
+    fn cleanup_owned_until(&mut self, deadline: Instant) -> Result<Vec<u32>, AudioGraphError> {
+        let session = self.journal.lock_until(deadline)?;
+        let Some(journal) = session.load_until(deadline)? else {
             return Ok(Vec::new());
         };
-        let raw = self.inspect_raw()?;
+        let raw = self.inspect_raw(deadline)?;
         if raw.has_duplicate_required_endpoint() {
             return Err(AudioGraphError::new(AudioGraphErrorCode::CleanupFailed));
         }
-        let modules = self.inspect_modules()?;
+        let modules = self.inspect_modules(deadline)?;
         let mut reconciled =
             self.reconcile_ownership(&raw, &journal, &modules, AudioGraphErrorCode::CleanupFailed)?;
+        check_deadline(deadline)?;
         if reconciled != journal {
             session.save(&reconciled)?;
         }
-        self.cleanup_reconciled(&session, &mut reconciled)
+        self.cleanup_reconciled(&session, &mut reconciled, deadline)
+    }
+}
+
+fn stage_error(error: AudioGraphError, failure_code: AudioGraphErrorCode) -> AudioGraphError {
+    if error.code() == AudioGraphErrorCode::DeadlineExpired {
+        error
+    } else {
+        AudioGraphError::new(failure_code)
     }
 }
 
@@ -531,7 +561,7 @@ fn load_args(role: EndpointRole, generation: &str) -> Vec<String> {
                 "channel_map=mono",
             ],
             format!(
-                "sink_properties=device.description=Translator_Mic_Out translator.owner=true translator.generation={generation}"
+                "sink_properties=\"device.description=Translator_Mic_Out translator.owner=true translator.generation={generation}\""
             ),
         ),
         EndpointRole::VirtualMicSource => (
@@ -545,7 +575,7 @@ fn load_args(role: EndpointRole, generation: &str) -> Vec<String> {
                 "remix=no",
             ],
             format!(
-                "source_properties=device.description=Translator_Virtual_Mic translator.owner=true translator.generation={generation}"
+                "source_properties=\"device.description=Translator_Virtual_Mic translator.owner=true translator.generation={generation}\""
             ),
         ),
         EndpointRole::RemoteInSink => (
@@ -558,7 +588,7 @@ fn load_args(role: EndpointRole, generation: &str) -> Vec<String> {
                 "channel_map=front-left,front-right",
             ],
             format!(
-                "sink_properties=device.description=Translator_Remote_In translator.owner=true translator.generation={generation}"
+                "sink_properties=\"device.description=Translator_Remote_In translator.owner=true translator.generation={generation}\""
             ),
         ),
     };
@@ -568,75 +598,8 @@ fn load_args(role: EndpointRole, generation: &str) -> Vec<String> {
 }
 
 fn module_matches(role: EndpointRole, module: &PactlModule, generation: &str) -> bool {
-    let (expected_module, required_arguments): (&str, &[(&str, &str)]) = match role {
-        EndpointRole::MicOutSink => (
-            "module-null-sink",
-            &[
-                ("sink_name", "translator_mic_out"),
-                ("rate", "48000"),
-                ("channels", "1"),
-                ("channel_map", "mono"),
-                ("sink_properties", "device.description=Translator_Mic_Out"),
-            ],
-        ),
-        EndpointRole::VirtualMicSource => (
-            "module-remap-source",
-            &[
-                ("master", "translator_mic_out.monitor"),
-                ("source_name", "translator_virtual_mic"),
-                ("channels", "1"),
-                ("channel_map", "mono"),
-                ("remix", "no"),
-                (
-                    "source_properties",
-                    "device.description=Translator_Virtual_Mic",
-                ),
-            ],
-        ),
-        EndpointRole::RemoteInSink => (
-            "module-null-sink",
-            &[
-                ("sink_name", "translator_remote_in"),
-                ("rate", "48000"),
-                ("channels", "2"),
-                ("channel_map", "front-left,front-right"),
-                ("sink_properties", "device.description=Translator_Remote_In"),
-            ],
-        ),
-    };
-    let arguments: HashMap<_, _> = module
-        .argument
-        .split_whitespace()
-        .filter_map(|argument| argument.split_once('='))
-        .collect();
-    module.name == expected_module
-        && required_arguments
-            .iter()
-            .all(|(key, value)| arguments.get(key) == Some(value))
-        && arguments.get("translator.owner") == Some(&"true")
-        && arguments.get("translator.generation") == Some(&generation)
-}
-
-fn module_claimed_role(module: &PactlModule, generation: &str) -> Option<EndpointRole> {
-    let arguments: HashMap<_, _> = module
-        .argument
-        .split_whitespace()
-        .filter_map(|argument| argument.split_once('='))
-        .collect();
-    if arguments.get("translator.owner") != Some(&"true")
-        || arguments.get("translator.generation") != Some(&generation)
-    {
-        return None;
-    }
-    match (
-        arguments.get("sink_name").copied(),
-        arguments.get("source_name").copied(),
-    ) {
-        (Some("translator_mic_out"), None) => Some(EndpointRole::MicOutSink),
-        (Some("translator_remote_in"), None) => Some(EndpointRole::RemoteInSink),
-        (None, Some("translator_virtual_mic")) => Some(EndpointRole::VirtualMicSource),
-        _ => None,
-    }
+    let expected = load_args(role, generation);
+    module.name == expected[1] && module.argument == expected[2..].join(" ")
 }
 
 fn role_index(role: EndpointRole) -> usize {

@@ -1,0 +1,249 @@
+#!/usr/bin/python3
+"""Build a private, host-specific preview from already-built release binaries."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import importlib.metadata
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "sidecar"))
+
+from translator_sidecar.local.model_manifest import load_manifest
+
+MODEL_IDS = (
+    "faster-whisper-large-v3-turbo",
+    "faster-whisper-small",
+    "hy-mt2-1.8b-gguf-q4-k-m",
+    "piper-ru-dmitri-medium",
+    "piper-en-ryan-medium",
+    "piper-ru-irina-medium",
+    "piper-en-hfc-female-medium",
+)
+CUDA_DISTRIBUTIONS = {
+    "nvidia-cudnn-cu12": ("9.10.2.21", "cudnn"),
+    "nvidia-cuda-nvrtc-cu12": ("12.8.93", "cuda_nvrtc"),
+}
+
+
+def digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def copy_models(manifest, destination: Path) -> int:
+    total = 0
+    for model_id in MODEL_IDS:
+        model = manifest.models[model_id]
+        relative = model.cache_path.relative_to(manifest.cache_root)
+        for entry in model.files:
+            target = destination / relative / entry.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with (
+                manifest.open_runtime_file(model_id, entry.path) as (fd, _),
+                os.fdopen(os.dup(fd), "rb") as source,
+                target.open("xb") as output,
+            ):
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+            if (
+                target.stat().st_size != entry.size_bytes
+                or digest(target) != entry.sha256
+            ):
+                raise ValueError("copied model does not match pinned manifest")
+            target.chmod(0o600)
+            total += entry.size_bytes
+    return total
+
+
+def copy_cuda(site_packages: Path, destination: Path) -> dict[str, str]:
+    distributions = {
+        item.metadata["Name"]: item
+        for item in importlib.metadata.distributions(path=[str(site_packages)])
+    }
+    versions = {}
+    for name, (version, component) in CUDA_DISTRIBUTIONS.items():
+        distribution = distributions.get(name)
+        if distribution is None or distribution.version != version:
+            raise ValueError("required pinned CUDA distribution is missing")
+        libraries = [
+            entry
+            for entry in distribution.files or ()
+            if str(entry.parent) == f"nvidia/{component}/lib" and ".so." in entry.name
+        ]
+        if not libraries:
+            raise ValueError("CUDA distribution has no libraries")
+        for entry in libraries:
+            source = Path(distribution.locate_file(entry))
+            if source.is_symlink() or not source.is_file():
+                raise ValueError("CUDA library is not a regular file")
+            target = destination / entry
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copyfile(source, target)
+            checksum = base64.urlsafe_b64encode(bytes.fromhex(digest(target)))
+            if (
+                entry.hash is None
+                or entry.hash.mode != "sha256"
+                or checksum.decode().rstrip("=") != entry.hash.value
+                or target.stat().st_size != entry.size
+            ):
+                raise ValueError("CUDA library does not match vendor RECORD")
+            target.chmod(0o600)
+        for entry in distribution.files or ():
+            if entry.name in {"METADATA", "RECORD", "License.txt", "LICENSE"}:
+                target = destination / "provenance" / name / entry.name
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.copyfile(distribution.locate_file(entry), target)
+                target.chmod(0o600)
+        versions[name] = version
+    return versions
+
+
+def package(output: Path, cache: Path, source_tree: str, cuda_root: Path) -> Path:
+    os.umask(0o077)
+    if not output.is_absolute() or not cache.is_absolute():
+        raise ValueError("absolute output/cache paths required")
+    if output.resolve().is_relative_to(ROOT.resolve()):
+        raise ValueError("preview output must be outside the checkout")
+    if output.exists():
+        raise ValueError("output already exists; refusing to overwrite evidence")
+    actual_tree = subprocess.check_output(
+        ["git", "write-tree"], cwd=ROOT, text=True
+    ).strip()
+    if source_tree != actual_tree:
+        raise ValueError("source tree does not match the frozen index")
+    subprocess.run(["git", "diff", "--exit-code", "--quiet"], cwd=ROOT, check=True)
+    for name in ("translator-daemon", "translator-ui"):
+        binary = ROOT / "target/release" / name
+        if (
+            not binary.is_file()
+            or binary.is_symlink()
+            or not os.access(binary, os.X_OK)
+        ):
+            raise ValueError("fresh release binary is missing")
+    ui_check = subprocess.run(
+        [str(ROOT / "target/release/translator-ui"), "--check-bundled-ui"],
+        check=True,
+        timeout=10,
+        capture_output=True,
+        text=True,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"DISPLAY", "WAYLAND_DISPLAY"}
+        },
+    )
+    if ui_check.stdout.strip() != "bundled-ui-ok":
+        raise ValueError("binary did not verify bundled UI assets")
+    os.environ["TRANSLATOR_MODEL_CACHE_ROOT"] = str(cache)
+    manifest = load_manifest(ROOT / "models/manifest.json")
+    output.mkdir(mode=0o700)
+    payload = output / "translator-preview-20261002"
+    payload.mkdir(mode=0o700)
+    for relative in (
+        "scripts/translator-desktop",
+        "systemd/translator-preview.service",
+        "models/manifest.json",
+        "sidecar/pyproject.toml",
+        "sidecar/uv.lock",
+        "target/release/translator-daemon",
+        "target/release/translator-ui",
+    ):
+        target = payload / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+        target.chmod(0o755 if relative.startswith(("scripts/", "target/")) else 0o600)
+    shutil.copytree(
+        ROOT / "sidecar/translator_sidecar",
+        payload / "sidecar/translator_sidecar",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    shutil.copy2(ROOT / "docs/stabilization/preview-install.md", payload / "README.md")
+    model_bytes = copy_models(manifest, payload / "model-cache")
+    cuda_versions = copy_cuda(cuda_root, payload / "cuda")
+    subprocess.run(
+        [
+            "uv",
+            "sync",
+            "--frozen",
+            "--no-dev",
+            "--no-editable",
+            "--offline",
+            "--python",
+            "/usr/bin/python3.12",
+            "--project",
+            str(payload / "sidecar"),
+        ],
+        check=True,
+        timeout=180,
+    )
+    # The current runtime derives its manifest from the installed module location.
+    installed_manifest = payload / "sidecar/.venv/lib/python3.12/models/manifest.json"
+    installed_manifest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "models/manifest.json", installed_manifest)
+    metadata = {
+        "kind": "translator-private-preview",
+        "release": False,
+        "source_tree": source_tree,
+        "build_profile": "release",
+        "ui_assets": "embedded_verified",
+        "python": "3.12",
+        "cuda_distributions": cuda_versions,
+        "models": list(MODEL_IDS),
+        "model_bytes": model_bytes,
+        "manifest_sha256": digest(ROOT / "models/manifest.json"),
+        "aec": "unavailable",
+        "full_chain_quality": "not_established",
+        "source_aggregate": "not_done",
+        "simultaneous_production": False,
+        "host_dependencies": [
+            "Python 3.12",
+            "PipeWire/Pulse",
+            "libpulse.so.0 (libpulse0)",
+            "Ollama llama-server/CUDA12",
+            "NVIDIA driver",
+        ],
+    }
+    (payload / "preview.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    sums = []
+    for path in sorted(payload.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            sums.append(f"{digest(path)}  {path.relative_to(payload)}\n")
+    (payload / "SHA256SUMS").write_text("".join(sums))
+    archive = output / (payload.name + ".tar.gz")
+    with tarfile.open(archive, "w:gz", compresslevel=1) as bundle:
+        bundle.add(payload, arcname=payload.name)
+    (output / "SHA256SUMS").write_text(f"{digest(archive)}  {archive.name}\n")
+    return archive
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--model-cache", type=Path, required=True)
+    parser.add_argument("--source-tree", required=True)
+    parser.add_argument("--cuda-site-packages", type=Path, required=True)
+    arguments = parser.parse_args()
+    archive = package(
+        arguments.output,
+        arguments.model_cache,
+        arguments.source_tree,
+        arguments.cuda_site_packages,
+    )
+    print(
+        json.dumps(
+            {"archive": str(archive), "sha256": digest(archive), "release": False}
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

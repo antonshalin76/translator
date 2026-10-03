@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Exercise real native PCM and graph ownership without using host audio.
+set -euo pipefail
+umask 077
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+backend=${1:-all}
+scope=${2:-all}
+receipts=${3:-$(mktemp -d /tmp/translator-native-pcm-receipts-XXXXXXXX)}
+case "$backend" in pulse|pipewire|all) ;; *) exit 2;; esac
+case "$scope" in native|lifecycle|graph|all) ;; *) exit 2;; esac
+[[ "$receipts" = /* && "$receipts" != "$ROOT" && "$receipts" != "$ROOT/"* ]]
+mkdir -p "$receipts"
+if [ "$backend" = all ]; then
+    "$0" pulse "$scope" "$receipts"
+    exec "$0" pipewire "$scope" "$receipts"
+fi
+for command in cargo pactl python3 rg timeout; do command -v "$command" >/dev/null; done
+if [ "$backend" = pipewire ]; then
+    for command in pipewire pipewire-pulse wireplumber pw-dump; do command -v "$command" >/dev/null; done
+    wireplumber --version | rg -q '0\.4\.' || {
+        echo 'PRIVATE_BACKEND prerequisite=wireplumber_0.4_policy_scripts UNAVAILABLE' >&2
+        exit 2
+    }
+else
+    command -v pulseaudio >/dev/null
+fi
+cd "$ROOT"
+export CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 LC_ALL=C
+fixture=$(mktemp -d "/tmp/translator-loopback-${backend}-XXXXXXXX")
+receipt="$receipts/$(basename "$fixture")"
+mkdir -m700 "$receipt"
+export XDG_RUNTIME_DIR="$fixture" PIPEWIRE_RUNTIME_DIR="$fixture" PULSE_RUNTIME_PATH="$fixture"
+export XDG_CONFIG_HOME="$fixture/config" XDG_STATE_HOME="$fixture/state" XDG_CACHE_HOME="$fixture/cache"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$fixture/no-session-bus" DBUS_SYSTEM_BUS_ADDRESS="unix:path=$fixture/no-system-bus"
+export PIPEWIRE_REMOTE=translator-test-core PULSE_SERVER="unix:$fixture/native"
+export PIPEWIRE_CONFIG_DIR="$ROOT/tests/fixtures/native-pcm"
+core_pid=0 policy_pid=0 pulse_pid=0
+cleanup() {
+    result=$?
+    trap - EXIT
+    for pid in "$pulse_pid" "$policy_pid" "$core_pid"; do
+        if [ "$pid" -gt 0 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    done
+    for pid in "$pulse_pid" "$policy_pid" "$core_pid"; do
+        if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then result=1; fi
+    done
+    if timeout 2 pactl info >/dev/null 2>&1; then result=1; fi
+    cp "$fixture"/*.log "$receipt/" || true
+    printf 'PRIVATE_BACKEND_TEARDOWN backend=%s core=%s policy=%s pulse=%s result=%s\n' "$backend" "$core_pid" "$policy_pid" "$pulse_pid" "$result"
+    exit "$result"
+}
+trap cleanup EXIT
+sha256sum crates/translator-audio/src/original_microphone.rs \
+    crates/translator-audio/src/original_microphone/native_pcm_fixture.rs \
+    crates/translator-audio/src/pcm.rs Cargo.lock \
+    crates/translator-daemon/src/main.rs "$0" > "$receipt/source.sha256"
+if [ "$backend" = pipewire ]; then
+    policy="$fixture/policy"
+    mkdir -p "$policy/policy.lua.d"
+    cp "$PIPEWIRE_CONFIG_DIR/policy.conf" "$policy/"
+    cp -L /usr/share/wireplumber/policy.lua.d/{00-functions,10-default-policy,90-enable-all}.lua "$policy/policy.lua.d/"
+    cp "$PIPEWIRE_CONFIG_DIR/80-fixture.lua" "$policy/policy.lua.d/"
+    pipewire -c isolated-core.conf > "$fixture/core.log" 2>&1 &
+    core_pid=$!
+    for attempt in {1..100}; do [ ! -S "$fixture/translator-test-core" ] || break; sleep 0.02; done
+    test -S "$fixture/translator-test-core"
+    PIPEWIRE_CONFIG_DIR="$policy" WIREPLUMBER_CONFIG_DIR="$policy" WIREPLUMBER_DATA_DIR=/usr/share/wireplumber \
+        wireplumber -c policy.conf > "$fixture/policy.log" 2>&1 &
+    policy_pid=$!
+    pipewire-pulse -c isolated-pulse.conf > "$fixture/pulse.log" 2>&1 &
+    pulse_pid=$!
+else
+    pulseaudio --daemonize=no --exit-idle-time=-1 --disallow-exit=yes --use-pid-file=no --disable-shm=yes -n \
+        -L "module-native-protocol-unix socket=$fixture/native auth-anonymous=1" > "$fixture/pulse.log" 2>&1 &
+    pulse_pid=$!
+fi
+for attempt in {1..100}; do if pactl info >/dev/null 2>&1; then break; fi; sleep 0.02; done
+pactl info > "$receipt/server.txt"
+pactl --format=json list cards | python3 -I -B -c 'import json,sys; assert json.load(sys.stdin)==[]; print("PRIVATE_HARDWARE cards=0 virtual_only=true")'
+for sink in translator_test_mic translator_test_out translator_mic_out translator_remote_in; do
+    pactl load-module module-null-sink "sink_name=$sink" rate=48000 channels=1 > /dev/null
+done
+if [ "$scope" != graph ]; then
+    skip=()
+    if [ "$scope" = lifecycle ]; then skip=(--skip private_pulse_native_numbered_pcm_conservation_and_stall); fi
+    # This supplier version never emits Pulse stream-suspension notifications.
+    # Do not turn an unavailable fault-injection precondition into a product PASS.
+    if [ "$backend" = pipewire ] && rg -qx 'Server Name: PulseAudio \(on PipeWire 1\.0\.5\)' "$receipt/server.txt"; then
+        skip+=(--skip private_pulse_native_suspended_endpoint_revokes)
+        echo 'PRIVATE_FAULT_PRECONDITION test=stream_suspension backend=pipewire1.0.5 UNAVAILABLE'
+    fi
+    cargo test --offline --locked -j1 -p translator-audio --lib private_pulse_ -- --ignored --nocapture "${skip[@]}"
+fi
+if [ "$scope" != native ]; then
+    cargo test --offline --locked -j1 -p translator-daemon --bin translator-daemon \
+        private_pulse_native_ -- --ignored --nocapture
+fi
+for kind in sink-inputs source-outputs; do
+    pactl --format=json list "$kind" | python3 -I -B -c 'import json,sys; assert json.load(sys.stdin)==[]; print("PRIVATE_STREAMS empty=true")'
+done
+if [ "$backend" = pipewire ]; then
+    PIPEWIRE_CONFIG_DIR=/usr/share/pipewire pw-dump > "$receipt/pipewire-graph.json"
+fi
+printf 'PRIVATE_BACKEND_ACCEPTANCE backend=%s scope=%s PASS\n' "$backend" "$scope"

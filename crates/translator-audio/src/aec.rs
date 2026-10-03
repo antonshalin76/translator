@@ -1,5 +1,7 @@
+use crate::module_list::{PactlModule, parse_module_list};
 use std::collections::HashMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,9 +9,6 @@ use crate::{CommandRunError, CommandRunner, SystemCommandRunner};
 
 pub const AEC_SOURCE: &str = "translator_aec_source";
 pub const AEC_SINK: &str = "translator_aec_sink";
-pub const AEC_ERLE_THRESHOLD_DB: f64 = 15.0;
-
-const POWER_EPSILON: f64 = 1e-12;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AecPhysicalPair {
@@ -47,7 +46,6 @@ pub enum AecErrorCode {
     CleanupFailed,
     NotOwned,
     AlreadyOwned,
-    InvalidValidationInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +75,6 @@ impl fmt::Display for AecError {
             AecErrorCode::CleanupFailed => "AEC cleanup failed",
             AecErrorCode::NotOwned => "No AEC module is owned by this runtime",
             AecErrorCode::AlreadyOwned => "An AEC module is already owned by this runtime",
-            AecErrorCode::InvalidValidationInput => "AEC validation input is invalid",
         })
     }
 }
@@ -86,7 +83,9 @@ impl std::error::Error for AecError {}
 
 #[derive(Debug, Clone)]
 struct OwnedAecModule {
-    module_id: u32,
+    module_id: Option<u32>,
+    unload_attempted: bool,
+    acquisition_complete: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,12 +95,6 @@ struct PactlEndpoint {
     owner_module: u32,
     #[serde(default)]
     properties: HashMap<String, String>,
-}
-
-#[derive(Debug)]
-struct PactlModule {
-    name: String,
-    argument: String,
 }
 
 pub struct PulseAecGraph<R = SystemCommandRunner> {
@@ -133,40 +126,102 @@ where
     }
 
     pub fn load_owned(&mut self) -> Result<AecGraphState, AecError> {
+        self.load_owned_until(Instant::now() + Duration::from_secs(2))
+    }
+
+    pub fn load_owned_until(&mut self, deadline: Instant) -> Result<AecGraphState, AecError> {
         if self.owned.is_some() {
             return Err(AecError::new(AecErrorCode::AlreadyOwned));
         }
-        let result = self.run(&self.load_args(), AecErrorCode::ModuleLoadFailed)?;
+        check_deadline(deadline, AecErrorCode::ModuleLoadFailed)?;
+        // A timed-out process may already have created the module. Keep its
+        // generation as a recovery obligation even without a returned ID.
+        self.owned = Some(OwnedAecModule {
+            module_id: None,
+            unload_attempted: false,
+            acquisition_complete: false,
+        });
+        let result = self.run(&self.load_args(), AecErrorCode::ModuleLoadFailed, deadline);
+        self.owned
+            .as_mut()
+            .expect("load obligation exists")
+            .acquisition_complete = true;
+        let result = result?;
         let module_id = std::str::from_utf8(result.stdout())
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok())
             .ok_or_else(|| AecError::new(AecErrorCode::ModuleLoadFailed))?;
-        self.owned = Some(OwnedAecModule { module_id });
-        self.inspect_owned()
+        self.owned
+            .as_mut()
+            .expect("load obligation exists")
+            .module_id = Some(module_id);
+        self.inspect_owned_until(deadline)
     }
 
     pub fn inspect_owned(&self) -> Result<AecGraphState, AecError> {
+        self.inspect_owned_until(Instant::now() + Duration::from_secs(2))
+    }
+
+    /// Recover only a graph bearing the caller's exact persisted generation.
+    /// Failed inspection remains a cleanup obligation, never permission to load.
+    pub fn recover_owned_until(&mut self, deadline: Instant) -> Result<AecGraphState, AecError> {
+        if self
+            .owned
+            .as_ref()
+            .is_some_and(|owned| owned.module_id.is_some())
+        {
+            return Err(AecError::new(AecErrorCode::AlreadyOwned));
+        }
+        check_deadline(deadline, AecErrorCode::InspectionFailed)?;
+        self.owned = Some(OwnedAecModule {
+            module_id: None,
+            unload_attempted: false,
+            acquisition_complete: false,
+        });
+        let modules = self.inspect_modules(AecErrorCode::InspectionFailed, deadline)?;
+        if !modules.values().any(|module| self.module_matches(module)) {
+            return Err(AecError::new(AecErrorCode::NotOwned));
+        }
+        let module_id = self.unique_module(&modules, None, AecErrorCode::OwnershipMismatch)?;
+        self.owned
+            .as_mut()
+            .expect("recovery obligation exists")
+            .module_id = Some(module_id);
+        self.inspect_endpoints_state(module_id, deadline)
+    }
+
+    pub fn inspect_owned_until(&self, deadline: Instant) -> Result<AecGraphState, AecError> {
         let owned = self
             .owned
             .as_ref()
             .ok_or_else(|| AecError::new(AecErrorCode::NotOwned))?;
-        let modules = self.inspect_modules(AecErrorCode::InspectionFailed)?;
-        let module = modules
-            .get(&owned.module_id)
-            .ok_or_else(|| AecError::new(AecErrorCode::OwnershipMismatch))?;
-        if !self.module_matches(module) {
+        if owned.unload_attempted || owned.module_id.is_none() {
             return Err(AecError::new(AecErrorCode::OwnershipMismatch));
         }
+        let modules = self.inspect_modules(AecErrorCode::InspectionFailed, deadline)?;
+        let module_id =
+            self.unique_module(&modules, owned.module_id, AecErrorCode::OwnershipMismatch)?;
+        self.inspect_endpoints_state(module_id, deadline)
+    }
 
+    fn inspect_endpoints_state(
+        &self,
+        module_id: u32,
+        deadline: Instant,
+    ) -> Result<AecGraphState, AecError> {
         let source = self.exact_endpoint(
-            self.inspect_endpoints("sources")?,
+            self.inspect_endpoints("sources", deadline)?,
             AEC_SOURCE,
-            owned.module_id,
+            module_id,
         )?;
-        let sink =
-            self.exact_endpoint(self.inspect_endpoints("sinks")?, AEC_SINK, owned.module_id)?;
+        let sink = self.exact_endpoint(
+            self.inspect_endpoints("sinks", deadline)?,
+            AEC_SINK,
+            module_id,
+        )?;
+        check_deadline(deadline, AecErrorCode::InspectionFailed)?;
         Ok(AecGraphState {
-            module_id: owned.module_id,
+            module_id,
             source_id: source.index,
             sink_id: sink.index,
             pair: self.pair.clone(),
@@ -175,69 +230,149 @@ where
     }
 
     pub fn cleanup_owned(&mut self) -> Result<Option<u32>, AecError> {
+        self.cleanup_owned_until(Instant::now() + Duration::from_secs(2))
+    }
+
+    pub fn cleanup_owned_until(&mut self, deadline: Instant) -> Result<Option<u32>, AecError> {
         let Some(owned) = self.owned.as_ref() else {
             return Ok(None);
         };
-        let module_id = owned.module_id;
-        self.inspect_for_cleanup(module_id)?;
+        let modules = self.inspect_modules(AecErrorCode::CleanupRefused, deadline)?;
+        if owned.module_id.is_none()
+            && owned.acquisition_complete
+            && !modules.values().any(|module| self.module_matches(module))
+        {
+            self.confirm_unknown_absence(&modules, deadline)?;
+            self.owned = None;
+            return Ok(None);
+        }
+        if owned.unload_attempted
+            && let Some(module_id) = owned.module_id
+            && !modules.contains_key(&module_id)
+        {
+            self.confirm_absence(&modules, module_id, deadline)?;
+            self.owned = None;
+            return Ok(Some(module_id));
+        }
+        let module_id =
+            self.unique_module(&modules, owned.module_id, AecErrorCode::CleanupRefused)?;
+        self.owned
+            .as_mut()
+            .expect("cleanup obligation exists")
+            .module_id = Some(module_id);
+        self.inspect_for_cleanup(module_id, deadline)?;
+        self.owned = Some(OwnedAecModule {
+            module_id: Some(module_id),
+            unload_attempted: true,
+            acquisition_complete: true,
+        });
         self.run(
             &["unload-module".to_owned(), module_id.to_string()],
             AecErrorCode::CleanupFailed,
+            deadline,
         )?;
+        let modules = self.inspect_modules(AecErrorCode::CleanupFailed, deadline)?;
+        self.confirm_absence(&modules, module_id, deadline)?;
         self.owned = None;
         Ok(Some(module_id))
     }
 
-    fn inspect_for_cleanup(&self, module_id: u32) -> Result<(), AecError> {
-        let modules = self
-            .inspect_modules(AecErrorCode::CleanupRefused)
-            .map_err(|_| AecError::new(AecErrorCode::CleanupRefused))?;
-        let module = modules
-            .get(&module_id)
-            .ok_or_else(|| AecError::new(AecErrorCode::CleanupRefused))?;
-        if !self.module_matches(module) {
-            return Err(AecError::new(AecErrorCode::CleanupRefused));
-        }
+    fn inspect_for_cleanup(&self, module_id: u32, deadline: Instant) -> Result<(), AecError> {
         let sources = self
-            .inspect_endpoints("sources")
+            .inspect_endpoints("sources", deadline)
             .map_err(|_| AecError::new(AecErrorCode::CleanupRefused))?;
         self.verify_cleanup_endpoints(sources, AEC_SOURCE, module_id)?;
         let sinks = self
-            .inspect_endpoints("sinks")
+            .inspect_endpoints("sinks", deadline)
             .map_err(|_| AecError::new(AecErrorCode::CleanupRefused))?;
         self.verify_cleanup_endpoints(sinks, AEC_SINK, module_id)
+    }
+
+    fn unique_module(
+        &self,
+        modules: &HashMap<u32, PactlModule>,
+        expected: Option<u32>,
+        failure: AecErrorCode,
+    ) -> Result<u32, AecError> {
+        let mut matching = modules
+            .iter()
+            .filter(|(_, module)| self.module_matches(module));
+        let Some((&id, _)) = matching.next() else {
+            return Err(AecError::new(failure));
+        };
+        if matching.next().is_some() || expected.is_some_and(|expected| expected != id) {
+            return Err(AecError::new(failure));
+        }
+        Ok(id)
+    }
+
+    fn confirm_absence(
+        &self,
+        modules: &HashMap<u32, PactlModule>,
+        module_id: u32,
+        deadline: Instant,
+    ) -> Result<(), AecError> {
+        if modules.contains_key(&module_id)
+            || modules.values().any(|module| self.module_matches(module))
+        {
+            return Err(AecError::new(AecErrorCode::CleanupFailed));
+        }
+        for (kind, name) in [("sources", AEC_SOURCE), ("sinks", AEC_SINK)] {
+            let endpoints = self.inspect_endpoints(kind, deadline)?;
+            if endpoints.iter().any(|endpoint| {
+                endpoint.name == name
+                    || endpoint.owner_module == module_id
+                    || endpoint.properties.get("translator.generation") == Some(&self.generation)
+            }) {
+                return Err(AecError::new(AecErrorCode::CleanupFailed));
+            }
+        }
+        check_deadline(deadline, AecErrorCode::CleanupFailed)
+    }
+
+    fn confirm_unknown_absence(
+        &self,
+        modules: &HashMap<u32, PactlModule>,
+        deadline: Instant,
+    ) -> Result<(), AecError> {
+        if modules
+            .values()
+            .any(|module| self.module_matches(module) || self.module_has_generation(module))
+        {
+            return Err(AecError::new(AecErrorCode::CleanupRefused));
+        }
+        for (kind, name) in [("sources", AEC_SOURCE), ("sinks", AEC_SINK)] {
+            let endpoints = self
+                .inspect_endpoints(kind, deadline)
+                .map_err(|_| AecError::new(AecErrorCode::CleanupRefused))?;
+            if endpoints.iter().any(|endpoint| {
+                endpoint.name == name
+                    || endpoint.properties.get("translator.generation") == Some(&self.generation)
+            }) {
+                return Err(AecError::new(AecErrorCode::CleanupRefused));
+            }
+        }
+        check_deadline(deadline, AecErrorCode::CleanupRefused)
     }
 
     fn inspect_modules(
         &self,
         failure_code: AecErrorCode,
+        deadline: Instant,
     ) -> Result<HashMap<u32, PactlModule>, AecError> {
         let result = self.run(
             &["list".to_owned(), "short".to_owned(), "modules".to_owned()],
             failure_code,
+            deadline,
         )?;
-        let text = std::str::from_utf8(result.stdout()).map_err(|_| AecError::new(failure_code))?;
-        let mut modules = HashMap::new();
-        for line in text.lines() {
-            let mut fields = line.splitn(4, '\t');
-            let Some(id) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Some(name) = fields.next() else {
-                continue;
-            };
-            modules.insert(
-                id,
-                PactlModule {
-                    name: name.to_owned(),
-                    argument: fields.next().unwrap_or_default().to_owned(),
-                },
-            );
-        }
-        Ok(modules)
+        parse_module_list(result.stdout()).map_err(|_| AecError::new(failure_code))
     }
 
-    fn inspect_endpoints(&self, kind: &str) -> Result<Vec<PactlEndpoint>, AecError> {
+    fn inspect_endpoints(
+        &self,
+        kind: &str,
+        deadline: Instant,
+    ) -> Result<Vec<PactlEndpoint>, AecError> {
         let result = self.run(
             &[
                 "--format=json".to_owned(),
@@ -245,6 +380,7 @@ where
                 kind.to_owned(),
             ],
             AecErrorCode::InspectionFailed,
+            deadline,
         )?;
         serde_json::from_slice(result.stdout())
             .map_err(|_| AecError::new(AecErrorCode::InspectionFailed))
@@ -288,35 +424,16 @@ where
     }
 
     fn module_matches(&self, module: &PactlModule) -> bool {
-        let arguments: HashMap<_, _> = module
-            .argument
-            .split_whitespace()
-            .filter_map(|argument| argument.split_once('='))
-            .collect();
-        let owner_count = module.argument.matches("translator.owner=true").count();
-        let generation_token = format!("translator.generation={}", self.generation);
-        let generation_count = module.argument.matches(&generation_token).count();
-        let source_properties = format!(
-            "source_properties='device.description=Translator_AEC_Source translator.owner=true translator.generation={}'",
-            self.generation
-        );
-        let sink_properties = format!(
-            "sink_properties='device.description=Translator_AEC_Sink translator.owner=true translator.generation={}'",
-            self.generation
-        );
         module.name == "module-echo-cancel"
-            && arguments.get("source_master") == Some(&self.pair.source.as_str())
-            && arguments.get("sink_master") == Some(&self.pair.sink.as_str())
-            && arguments.get("source_name") == Some(&AEC_SOURCE)
-            && arguments.get("sink_name") == Some(&AEC_SINK)
-            && arguments.get("rate") == Some(&"48000")
-            && arguments.get("channels") == Some(&"1")
-            && arguments.get("channel_map") == Some(&"mono")
-            && arguments.get("aec_method") == Some(&"webrtc")
-            && module.argument.matches(&source_properties).count() == 1
-            && module.argument.matches(&sink_properties).count() == 1
-            && owner_count == 2
-            && generation_count == 2
+            && module
+                .argument
+                .split_whitespace()
+                .eq(self.load_args()[2..].join(" ").split_whitespace())
+    }
+
+    fn module_has_generation(&self, module: &PactlModule) -> bool {
+        let marker = format!("translator.generation={}", self.generation);
+        argument_contains_generation_marker(&module.argument, &marker)
     }
 
     fn endpoint_matches(&self, endpoint: &PactlEndpoint, module_id: u32) -> bool {
@@ -360,21 +477,32 @@ where
         &self,
         args: &[String],
         failure_code: AecErrorCode,
+        deadline: Instant,
     ) -> Result<crate::CommandResult, AecError> {
-        let result = self
-            .runner
-            .run("pactl", args)
-            .map_err(|error| match error {
-                CommandRunError::NotFound => AecError::new(AecErrorCode::PactlMissing),
-                CommandRunError::SpawnFailed | CommandRunError::TimedOut => {
-                    AecError::new(failure_code)
-                }
-            })?;
+        check_deadline(deadline, failure_code)?;
+        let result =
+            self.runner
+                .run_until("pactl", args, deadline)
+                .map_err(|error| match error {
+                    CommandRunError::NotFound => AecError::new(AecErrorCode::PactlMissing),
+                    CommandRunError::SpawnFailed
+                    | CommandRunError::TimedOut
+                    | CommandRunError::DeadlineExpired => AecError::new(failure_code),
+                })?;
+        check_deadline(deadline, failure_code)?;
         if result.is_success() {
             Ok(result)
         } else {
             Err(AecError::new(failure_code))
         }
+    }
+}
+
+fn check_deadline(deadline: Instant, failure: AecErrorCode) -> Result<(), AecError> {
+    if Instant::now() >= deadline {
+        Err(AecError::new(failure))
+    } else {
+        Ok(())
     }
 }
 
@@ -385,114 +513,12 @@ fn is_safe_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AecDeviceMetadata {
-    pub source_name: String,
-    pub sink_name: String,
-    pub source_geometry: String,
-    pub sink_geometry: String,
-    pub sink_port: String,
-    pub sink_volume_percent: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct AecPowerWindow {
-    pub sequence: u64,
-    pub raw_power: f64,
-    pub clean_power: f64,
-    pub noise_power: f64,
-}
-
-impl AecPowerWindow {
-    pub fn new(sequence: u64, raw_power: f64, clean_power: f64, noise_power: f64) -> Self {
-        Self {
-            sequence,
-            raw_power,
-            clean_power,
-            noise_power,
-        }
-    }
-
-    pub fn erle_db(self) -> Result<f64, AecError> {
-        if ![self.raw_power, self.clean_power, self.noise_power]
-            .into_iter()
-            .all(|power| power.is_finite() && power >= 0.0)
-        {
-            return Err(AecError::new(AecErrorCode::InvalidValidationInput));
-        }
-        let raw = (self.raw_power - self.noise_power).max(POWER_EPSILON);
-        let clean = (self.clean_power - self.noise_power).max(POWER_EPSILON);
-        let erle = 10.0 * (raw / clean).log10();
-        if erle.is_finite() {
-            Ok(erle)
-        } else {
-            Err(AecError::new(AecErrorCode::InvalidValidationInput))
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AecFarEndCounters {
-    pub vad_triggers: u64,
-    pub provider_requests: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AecValidationInput {
-    pub metadata: AecDeviceMetadata,
-    pub windows: Vec<AecPowerWindow>,
-    pub far_end: AecFarEndCounters,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AecValidationRecord {
-    pub metadata: AecDeviceMetadata,
-    pub window_count: usize,
-    pub median_erle_db: f64,
-    pub erle_passed: bool,
-    pub far_end: AecFarEndCounters,
-    pub far_end_passed: bool,
-    pub validated: bool,
-}
-
-pub fn evaluate_aec(input: AecValidationInput) -> Result<AecValidationRecord, AecError> {
-    if input.windows.is_empty()
-        || input.metadata.source_name.is_empty()
-        || input.metadata.sink_name.is_empty()
-        || input.metadata.source_geometry.is_empty()
-        || input.metadata.sink_geometry.is_empty()
-        || input.metadata.sink_port.is_empty()
-        || input.metadata.sink_volume_percent > 100
-        || input
-            .windows
-            .windows(2)
-            .any(|pair| pair[0].sequence >= pair[1].sequence)
-    {
-        return Err(AecError::new(AecErrorCode::InvalidValidationInput));
-    }
-
-    let mut erle_values = input
-        .windows
-        .iter()
-        .copied()
-        .map(AecPowerWindow::erle_db)
-        .collect::<Result<Vec<_>, _>>()?;
-    erle_values.sort_by(f64::total_cmp);
-    let middle = erle_values.len() / 2;
-    let median_erle_db = if erle_values.len() % 2 == 0 {
-        (erle_values[middle - 1] + erle_values[middle]) / 2.0
-    } else {
-        erle_values[middle]
-    };
-    let erle_passed = median_erle_db >= AEC_ERLE_THRESHOLD_DB;
-    let far_end_passed = input.far_end.vad_triggers == 0 && input.far_end.provider_requests == 0;
-    Ok(AecValidationRecord {
-        metadata: input.metadata,
-        window_count: input.windows.len(),
-        median_erle_db,
-        erle_passed,
-        far_end: input.far_end,
-        far_end_passed,
-        validated: erle_passed && far_end_passed,
+fn argument_contains_generation_marker(argument: &str, marker: &str) -> bool {
+    let bytes = argument.as_bytes();
+    argument.match_indices(marker).any(|(index, _)| {
+        let end = index + marker.len();
+        !bytes.get(end).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || *byte == b'.' || *byte == b'_' || *byte == b'-'
+        })
     })
 }

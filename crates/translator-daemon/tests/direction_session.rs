@@ -27,6 +27,51 @@ fn config() -> DirectionRuntimeConfig {
     }
 }
 
+#[test]
+fn voice_override_builtin_session_wire_preserves_gender_engine_and_no_overrides() {
+    for (provider, engine, expected_engine) in [
+        (
+            ProviderId::Local,
+            VoiceEngine::Piper,
+            translator_ipc::provider::VoiceEngine::Piper,
+        ),
+        (
+            ProviderId::Openai,
+            VoiceEngine::Openai,
+            translator_ipc::provider::VoiceEngine::Openai,
+        ),
+    ] {
+        for (gender, expected_gender) in [
+            (
+                VoiceGender::Male,
+                translator_ipc::provider::VoiceGender::Male,
+            ),
+            (
+                VoiceGender::Female,
+                translator_ipc::provider::VoiceGender::Female,
+            ),
+        ] {
+            let mut config = config();
+            config.provider_id = provider;
+            config.voice_engine = engine;
+            config.voice_gender = gender;
+            let open = DirectionSession::new(config).open_request();
+            let Some(provider_request::Request::OpenSession(open)) = open.request else {
+                panic!("expected real Open request");
+            };
+            let profile = open.voice_profile.unwrap();
+            assert_eq!(
+                profile.language,
+                translator_ipc::provider::Language::En as i32
+            );
+            assert_eq!(profile.gender, expected_gender as i32);
+            assert_eq!(profile.engine, expected_engine as i32);
+            assert!(profile.model_path.is_none());
+            assert!(profile.provider_voice_id.is_none());
+        }
+    }
+}
+
 fn frame(sequence: u64) -> PcmFrame {
     PcmFrame::try_new(
         sequence,
@@ -57,6 +102,53 @@ fn opened(session: &DirectionSession) -> ProviderEvent {
             },
         )),
     }
+}
+
+#[test]
+fn direction_next_watchdog_deadline_projects_current_phase_without_advancing_it() {
+    let mut session = DirectionSession::new(config());
+    let stream_id = session.stream_id();
+    let utterance_id = Uuid::new_v4();
+    assert_eq!(session.next_watchdog_deadline_ns(), None);
+    session.handle_provider_event(&opened(&session), 0).unwrap();
+    session
+        .handle_capture(CaptureEvent::SpeechStarted {
+            stream_id,
+            utterance_id,
+            capture_monotonic_ns: 1_000_000_000,
+        })
+        .unwrap();
+    assert_eq!(session.next_watchdog_deadline_ns(), Some(13_000_000_000));
+    session
+        .handle_capture(CaptureEvent::Frame {
+            stream_id,
+            utterance_id,
+            frame: frame(150),
+            end_of_utterance: true,
+        })
+        .unwrap();
+    for _ in 0..3 {
+        assert_eq!(session.next_watchdog_deadline_ns(), Some(10_000_000_000));
+    }
+    assert!(session.poll(10_000_000_000).unwrap().is_empty());
+    assert!(matches!(
+        session.poll(10_000_000_001).unwrap().as_slice(),
+        [DirectionWatchdogEffect::PurgeAndSend(_)]
+    ));
+    let cancel_deadline = 10_250_000_001;
+    assert_eq!(session.next_watchdog_deadline_ns(), Some(cancel_deadline));
+    assert!(matches!(
+        session.poll(cancel_deadline + 1).unwrap().as_slice(),
+        [DirectionWatchdogEffect::PurgeAndSend(_)]
+    ));
+    let close_deadline =
+        cancel_deadline + 1 + translator_daemon::CLOSE_ACK_TIMEOUT.as_nanos() as u64;
+    assert_eq!(session.next_watchdog_deadline_ns(), Some(close_deadline));
+    assert_eq!(
+        session.poll(close_deadline).unwrap(),
+        vec![DirectionWatchdogEffect::RestartSidecar]
+    );
+    assert_eq!(session.next_watchdog_deadline_ns(), None);
 }
 
 #[test]
@@ -374,10 +466,77 @@ fn direction_session_exposes_privacy_safe_provider_latency() {
         effects.as_slice(),
         [DirectionEffect::Latency {
             utterance_id: Some(observed),
+            asr_first_text_ms: Some(100),
+            asr_final_text_ms: Some(200),
+            mt_first_text_ms: Some(300),
             tts_first_audio_ms: Some(400),
             provider_total_ms: Some(500),
         }] if *observed == utterance_id
     ));
+}
+
+#[test]
+fn direction_session_preserves_partial_provider_latency() {
+    let cases = [
+        (None, None, None, None, Some(1)),
+        (Some(0), Some(0), None, None, Some(10)),
+        (Some(0), Some(10), Some(20), None, Some(30)),
+    ];
+    for (
+        asr_first_text_ms,
+        asr_final_text_ms,
+        mt_first_text_ms,
+        tts_first_audio_ms,
+        provider_total_ms,
+    ) in cases
+    {
+        let mut session = DirectionSession::new(config());
+        session.handle_provider_event(&opened(&session), 0).unwrap();
+        let utterance_id = Uuid::new_v4();
+        session
+            .handle_capture(CaptureEvent::SpeechStarted {
+                stream_id: session.stream_id(),
+                utterance_id,
+                capture_monotonic_ns: 500_000_000,
+            })
+            .unwrap();
+        session
+            .handle_capture(CaptureEvent::Frame {
+                stream_id: session.stream_id(),
+                utterance_id,
+                frame: frame(0),
+                end_of_utterance: true,
+            })
+            .unwrap();
+        let event = ProviderEvent {
+            event: Some(provider_event::Event::Latency(ProviderLatency {
+                schema_version: "translator.provider.latency.v1".into(),
+                session_id: session.session_id().to_string(),
+                direction_id: ProviderDirection::Microphone.into(),
+                stream_id: session.stream_id().to_string(),
+                event_sequence: 2,
+                utterance_id: Some(utterance_id.to_string()),
+                asr_first_text_ms,
+                asr_final_text_ms,
+                mt_first_text_ms,
+                tts_first_audio_ms,
+                provider_total_ms,
+            })),
+        };
+        assert_eq!(
+            session
+                .handle_provider_event(&event, 1_000_000_000)
+                .unwrap(),
+            vec![DirectionEffect::Latency {
+                utterance_id: Some(utterance_id),
+                asr_first_text_ms,
+                asr_final_text_ms,
+                mt_first_text_ms,
+                tts_first_audio_ms,
+                provider_total_ms,
+            }]
+        );
+    }
 }
 
 #[test]

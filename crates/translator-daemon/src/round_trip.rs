@@ -225,6 +225,7 @@ impl std::fmt::Debug for RoundTripDebugText {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RoundTripStatus {
+    pub cleanup_pending: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,6 +250,7 @@ struct Session {
     safe_error: Option<RoundTripErrorCode>,
     debug_text: Option<RoundTripDebugText>,
     exact_pcm: Option<ExactPcmProof>,
+    cleanup_pending: bool,
 }
 
 #[derive(Debug, Default)]
@@ -262,15 +264,23 @@ impl RoundTripSelfTest {
         preconditions: RoundTripPreconditions,
         at_ms: u64,
     ) -> Result<Uuid, RoundTripErrorCode> {
+        self.start_with_id(preconditions, at_ms, Uuid::new_v4())
+    }
+
+    pub(crate) fn start_with_id(
+        &mut self,
+        preconditions: RoundTripPreconditions,
+        at_ms: u64,
+        id: Uuid,
+    ) -> Result<Uuid, RoundTripErrorCode> {
         if self
             .session
             .as_ref()
-            .is_some_and(|session| !session.checkpoint.is_terminal())
+            .is_some_and(|session| session.cleanup_pending || !session.checkpoint.is_terminal())
         {
             return Err(RoundTripErrorCode::AlreadyRunning);
         }
         validate_preconditions(preconditions)?;
-        let id = Uuid::new_v4();
         self.session = Some(Session {
             id,
             started_at_ms: at_ms,
@@ -280,6 +290,7 @@ impl RoundTripSelfTest {
             safe_error: None,
             debug_text: None,
             exact_pcm: None,
+            cleanup_pending: false,
         });
         Ok(id)
     }
@@ -381,11 +392,41 @@ impl RoundTripSelfTest {
         true
     }
 
+    pub fn begin_cleanup(&mut self, session_id: Uuid) {
+        if let Some(session) = self
+            .session
+            .as_mut()
+            .filter(|session| session.id == session_id)
+        {
+            session.cleanup_pending = true;
+        }
+    }
+
+    pub fn set_cleanup_pending(&mut self, session_id: Uuid, pending: bool) -> bool {
+        let Some(session) = self
+            .session
+            .as_mut()
+            .filter(|session| session.id == session_id)
+        else {
+            return false;
+        };
+        session.cleanup_pending = pending;
+        if pending {
+            session.checkpoint = RoundTripCheckpoint::Failed;
+            session
+                .safe_error
+                .get_or_insert(RoundTripErrorCode::RuntimeFailed);
+            session.debug_text = None;
+        }
+        true
+    }
+
     pub fn status(&self, include_debug_text: bool) -> RoundTripStatus {
         let Some(session) = self.session.as_ref() else {
             return RoundTripStatus::default();
         };
         RoundTripStatus {
+            cleanup_pending: session.cleanup_pending,
             session_id: Some(session.id),
             checkpoint: Some(session.checkpoint),
             recursion_count: session.recursion_count,
@@ -412,7 +453,9 @@ impl RoundTripSelfTest {
     }
 }
 
-fn validate_preconditions(preconditions: RoundTripPreconditions) -> Result<(), RoundTripErrorCode> {
+pub(crate) fn validate_preconditions(
+    preconditions: RoundTripPreconditions,
+) -> Result<(), RoundTripErrorCode> {
     if !preconditions.headphones {
         return Err(RoundTripErrorCode::HeadphonesRequired);
     }

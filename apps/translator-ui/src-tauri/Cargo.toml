@@ -11,6 +11,10 @@ description = "Local full-duplex translator control surface"
 name = "translator-ui"
 path = "src/main.rs"
 
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

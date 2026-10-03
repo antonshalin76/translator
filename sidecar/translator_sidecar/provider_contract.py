@@ -8,6 +8,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+MAX_TERMINAL_UTTERANCES_PER_SESSION = 4096
+
+
+class ProviderProtocolError(ValueError):
+    """A provider request violates the shared session contract."""
+
 
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -78,6 +84,10 @@ class VoiceProfile(ContractModel):
     engine: VoiceEngine
     model_path: str | None = None
     provider_voice_id: str | None = None
+
+    @property
+    def has_overrides(self) -> bool:
+        return self.model_path is not None or self.provider_voice_id is not None
 
 
 class PcmFormat(ContractModel):

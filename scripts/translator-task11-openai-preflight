@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SIDECAR = ROOT / "sidecar"
 if str(SIDECAR) not in sys.path:
@@ -34,7 +33,6 @@ from translator_sidecar.provider_contract import (  # noqa: E402
     VoiceProfile,
 )
 
-
 DEFAULT_REPORT = ROOT / "docs/benchmarks/task11-openai-adapter-preflight.json"
 SCHEMA_VERSION = "translator.task11-openai-adapter-preflight.v1"
 SYNTHETIC_COMPARISON_STATUSES = {
@@ -48,7 +46,7 @@ SYNTHETIC_COMPARISON_STATUSES = {
 
 
 def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def read_json(path: str) -> dict[str, Any]:
@@ -204,10 +202,16 @@ def build_report() -> dict[str, Any]:
     }
     if previous_report:
         previous_credential_probe = previous_report.get("credential_model_probe")
-        if previous_credential_probe and previous_credential_probe.get("status") == "passed":
+        if (
+            previous_credential_probe
+            and previous_credential_probe.get("status") == "passed"
+        ):
             credential_model_probe = previous_credential_probe
         previous_websocket_smoke = previous_report.get("realtime_websocket_smoke")
-        if previous_websocket_smoke and previous_websocket_smoke.get("status") == "passed":
+        if (
+            previous_websocket_smoke
+            and previous_websocket_smoke.get("status") == "passed"
+        ):
             realtime_websocket_smoke = previous_websocket_smoke
     websocket_passed = realtime_websocket_smoke["status"] == "passed"
     synthetic_speech_comparison = preserved_synthetic_speech_comparison(
@@ -227,9 +231,9 @@ def build_report() -> dict[str, Any]:
             "OpenAI sidecar runtime is wired; credentialed real-app OpenAI route smoke is pending"
             if synthetic_passed
             else (
-            "credential and realtime websocket smoke passed; synthetic speech latency comparison is pending"
-            if websocket_passed
-            else "credentialed OpenAI run is pending"
+                "credential and realtime websocket smoke passed; synthetic speech latency comparison is pending"
+                if websocket_passed
+                else "credentialed OpenAI run is pending"
             )
         ),
     }
@@ -245,9 +249,9 @@ def build_report() -> dict[str, Any]:
             "OpenAI sidecar runtime is wired; credentialed real-app OpenAI route smoke is pending"
             if synthetic_passed
             else (
-            "credentialed real-app OpenAI smoke is pending after websocket smoke"
-            if websocket_passed
-            else "credentialed real-app OpenAI smoke is pending"
+                "credentialed real-app OpenAI smoke is pending after websocket smoke"
+                if websocket_passed
+                else "credentialed real-app OpenAI smoke is pending"
             )
         ),
     }

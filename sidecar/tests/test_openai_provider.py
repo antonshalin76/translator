@@ -5,6 +5,7 @@ import re
 from uuid import UUID, uuid4
 
 import pytest
+from test_provider_contract import VOICE_OVERRIDE_CASES
 
 from translator_sidecar.openai_provider import (
     OPENAI_REALTIME_TRANSLATION_ENDPOINT,
@@ -69,13 +70,109 @@ def request(
             language=target,
             gender=VoiceGender.MALE,
             engine=VoiceEngine.OPENAI,
-            provider_voice_id="alloy",
         ),
         debug_text_enabled=debug_text_enabled,
     )
 
 
-def test_openai_preflight_blocks_without_cloud_opt_in_and_never_starts_network() -> None:
+@pytest.mark.parametrize(
+    "model_path,provider_voice_id",
+    [*VOICE_OVERRIDE_CASES, pytest.param(None, "alloy", id="formerly-ignored-alloy")],
+)
+def test_preflight_refuses_voice_override_without_open_or_connect_plan(
+    model_path, provider_voice_id
+):
+    value = request()
+    value = value.model_copy(
+        update={
+            "voice_profile": value.voice_profile.model_copy(
+                update={
+                    "model_path": model_path,
+                    "provider_voice_id": provider_voice_id,
+                }
+            )
+        }
+    )
+    adapter = OpenAIRealtimeAdapter(
+        OpenAIRealtimeConfig(cloud_opt_in=True),
+        environ={"OPENAI_API_KEY": "synthetic-credential"},
+        start_network_session=lambda: pytest.fail("preflight must not start network"),
+    )
+    result = adapter.preflight_open_session(value)
+    assert (
+        not result.can_start and result.opened is None and result.connect_plan is None
+    )
+    assert not result.network_session_started
+    assert result.error.code is SafeErrorCode.PROVIDER_UNAVAILABLE
+    assert result.error.retryable is False
+    assert result.health.safe_error.code is SafeErrorCode.PROVIDER_UNAVAILABLE
+    assert result.health.safe_error.retryable is False
+    assert "private-voice-override" not in json.dumps(result.safe_report())
+
+
+@pytest.mark.parametrize(
+    "provider_id,consent,credential,expected,retryable",
+    [
+        (ProviderId.LOCAL, False, False, SafeErrorCode.PROVIDER_UNAVAILABLE, False),
+        (ProviderId.LOCAL, True, True, SafeErrorCode.PROVIDER_UNAVAILABLE, False),
+        (ProviderId.OPENAI, False, False, SafeErrorCode.CLOUD_NOT_ENABLED, False),
+        (ProviderId.OPENAI, False, True, SafeErrorCode.CLOUD_NOT_ENABLED, False),
+        (ProviderId.OPENAI, True, False, SafeErrorCode.PROVIDER_AUTH_FAILED, True),
+    ],
+)
+def test_preflight_voice_override_keeps_existing_auth_error_precedence(
+    provider_id, consent, credential, expected, retryable
+):
+    value = request()
+    value = value.model_copy(
+        update={
+            "provider_id": provider_id,
+            "voice_profile": value.voice_profile.model_copy(
+                update={"provider_voice_id": "alloy"}
+            ),
+        }
+    )
+    adapter = OpenAIRealtimeAdapter(
+        OpenAIRealtimeConfig(cloud_opt_in=consent),
+        environ={"OPENAI_API_KEY": "synthetic-credential"} if credential else {},
+    )
+    result = adapter.preflight_open_session(value)
+    assert (
+        not result.can_start and result.opened is None and result.connect_plan is None
+    )
+    assert result.error.code is expected and result.error.retryable is retryable
+    assert not result.network_session_started
+
+
+@pytest.mark.parametrize("language", [Language.RU, Language.EN])
+@pytest.mark.parametrize("gender", [VoiceGender.MALE, VoiceGender.FEMALE])
+def test_preflight_builtin_profiles_preserve_existing_translation_negotiation(
+    language, gender
+):
+    value = request(
+        AudioDirection.MICROPHONE if language is Language.EN else AudioDirection.SPEAKER
+    )
+    value = value.model_copy(
+        update={
+            "voice_profile": value.voice_profile.model_copy(update={"gender": gender})
+        }
+    )
+    adapter = OpenAIRealtimeAdapter(
+        OpenAIRealtimeConfig(cloud_opt_in=True),
+        environ={"OPENAI_API_KEY": "synthetic-secret"},
+    )
+    result = adapter.preflight_open_session(value)
+    assert result.can_start and result.opened is not None and result.error is None
+    assert result.connect_plan["target_language"] == language.value
+    assert build_session_update_event(value)["session"]["audio"]["output"] == {
+        "language": language.value
+    }
+    assert result.opened.negotiated_output_format == openai_pcm_format()
+
+
+def test_openai_preflight_blocks_without_cloud_opt_in_and_never_starts_network() -> (
+    None
+):
     network_started = False
 
     def mark_network_started() -> None:
@@ -104,10 +201,13 @@ def test_openai_preflight_blocks_without_cloud_opt_in_and_never_starts_network()
 
 
 def test_openai_config_pins_the_official_translation_endpoint() -> None:
-    assert OpenAIRealtimeConfig(
-        cloud_opt_in=True,
-        endpoint=OPENAI_REALTIME_TRANSLATION_ENDPOINT,
-    ).endpoint == OPENAI_REALTIME_TRANSLATION_ENDPOINT
+    assert (
+        OpenAIRealtimeConfig(
+            cloud_opt_in=True,
+            endpoint=OPENAI_REALTIME_TRANSLATION_ENDPOINT,
+        ).endpoint
+        == OPENAI_REALTIME_TRANSLATION_ENDPOINT
+    )
 
     with pytest.raises(ValueError, match="translation_endpoint_must_be_official"):
         OpenAIRealtimeConfig(
@@ -139,7 +239,9 @@ def test_openai_preflight_blocks_missing_credentials_without_network_session() -
     assert rendered["credential_present"] is False
 
 
-def test_openai_ready_preflight_negotiates_cloud_capabilities_without_secret_leak() -> None:
+def test_openai_ready_preflight_negotiates_cloud_capabilities_without_secret_leak() -> (
+    None
+):
     adapter = OpenAIRealtimeAdapter(
         OpenAIRealtimeConfig(cloud_opt_in=True),
         environ={"OPENAI_API_KEY": "credential-present-secret"},
@@ -168,7 +270,9 @@ def test_openai_ready_preflight_negotiates_cloud_capabilities_without_secret_lea
     assert not re.search(r"sk-[A-Za-z0-9_-]+", rendered)
 
 
-def test_openai_preflight_rejects_provider_identity_mismatch_without_network_session() -> None:
+def test_openai_preflight_rejects_provider_identity_mismatch_without_network_session() -> (
+    None
+):
     adapter = OpenAIRealtimeAdapter(
         OpenAIRealtimeConfig(cloud_opt_in=True),
         environ={"OPENAI_API_KEY": "credential-present-secret"},
@@ -195,7 +299,7 @@ def test_websocket_event_builders_match_translation_session_contract() -> None:
     assert build_session_update_event(session) == {
         "type": "session.update",
         "session": {
-            "audio": {"output": {"language": "ru"}}
+            "audio": {"input": {"transcription": None}, "output": {"language": "ru"}}
         },
     }
     assert build_input_audio_append_event(pcm) == {
@@ -217,7 +321,10 @@ def test_openai_event_mapping_respects_debug_text_gate_and_audio_contract() -> N
     pcm = b"\x01\x02" * (24_000 * 200 // 1000)
     audio_events = adapter.map_realtime_events(
         session,
-        {"type": "session.output_audio.delta", "delta": build_input_audio_append_event(pcm)["audio"]},
+        {
+            "type": "session.output_audio.delta",
+            "delta": build_input_audio_append_event(pcm)["audio"],
+        },
         stream_id=stream_id,
         utterance_id=utterance_id,
         now_ns=123_000_000,

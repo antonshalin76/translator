@@ -13,6 +13,24 @@ fn secure_temp() -> tempfile::TempDir {
 }
 
 #[test]
+fn socket_ancestor_symlink_is_rejected_without_unlinking() {
+    let temp = secure_temp();
+    let real = temp.path().join("real");
+    let parent = real.join("session");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::set_permissions(&parent, PermissionsExt::from_mode(0o700)).unwrap();
+    let socket = parent.join("sidecar.sock");
+    drop(UnixListener::bind(&socket).unwrap());
+    let uid = std::fs::metadata(&parent).unwrap().uid();
+    let link = temp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let result =
+        remove_stale_sidecar_socket(&link.join("session/sidecar.sock"), uid, ChildState::Reaped);
+    assert_eq!(result, Err(StaleSocketError::InsecureParent));
+    assert!(socket.exists());
+}
+
+#[test]
 fn missing_socket_is_already_clean_only_after_reap() {
     let temp = secure_temp();
     let socket = temp.path().join("sidecar.sock");

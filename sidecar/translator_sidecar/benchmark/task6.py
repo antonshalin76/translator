@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import hashlib
 import json
 import math
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
-from typing import Mapping, Protocol, Sequence
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
-from jiwer import wer
 import regex
+from jiwer import wer
 from sacrebleu.metrics import CHRF
 
 from translator_sidecar.provider_contract import Language, TranslationMode
-
 
 _SCHEMA_VERSION = "translator.quality-corpus.v4"
 _REQUIRED_SCENARIOS = frozenset({"short", "long", "duplex_overlap"})
@@ -103,6 +102,7 @@ class QualityCorpus:
 class CriticalViolation:
     case_id: str
     kind: str
+    layer: Literal["mt", "audible"]
 
 
 @dataclass(frozen=True)
@@ -181,7 +181,7 @@ class AsrBenchmarkReport:
     audio_throughput_x: float
     cpu_percent_peak: float
     rss_bytes_peak: int
-    gpu_percent_peak: float
+    gpu_percent_peak: float | None
     vram_mib_peak: int
 
 
@@ -202,7 +202,7 @@ class DuplexBenchmarkReport:
     en_to_ru_latency_ms: tuple[float, ...]
     cpu_percent_peak: float
     rss_bytes_peak: int
-    gpu_percent_peak: float
+    gpu_percent_peak: float | None
     vram_mib_peak: int
 
     @property
@@ -231,7 +231,7 @@ class AsrAdapter(Protocol):
     ) -> str: ...
 
 
-ResourceSample = tuple[float, int, float, int]
+ResourceSample = tuple[float, int, float | None, int]
 
 
 class _PeriodicResourceSampler:
@@ -495,8 +495,11 @@ def run_quality_benchmark(
                     translated,
                     target_language,
                 )
+                if not isinstance(transcript, str) or not transcript.strip():
+                    raise ValueError("audible transcription is unavailable")
             except Exception:
                 drop_count += 1
+                transcript = ""
             else:
                 successful_latencies.append((now_ns() - started_ns) / 1_000_000)
             outputs[target_language].append(translated)
@@ -521,6 +524,7 @@ def run_quality_benchmark(
         critical_review_content_sha256=critical_review_content_sha256(
             corpus,
             outputs=outputs,
+            synthesized_transcripts=transcripts,
         ),
         excluded_warmups=len(corpus.warmups),
         measured_per_direction=len(corpus.cases),
@@ -533,16 +537,19 @@ def critical_review_content_sha256(
     corpus: QualityCorpus,
     *,
     outputs: Mapping[Language, Sequence[str]],
+    synthesized_transcripts: Mapping[Language, Sequence[str]],
 ) -> str:
     _validate_measurements(outputs, len(corpus.cases))
+    _validate_measurements(synthesized_transcripts, len(corpus.cases))
     rows = []
     for source_language, target_language in (
         (Language.RU, Language.EN),
         (Language.EN, Language.RU),
     ):
-        for case, output in zip(
+        for case, output, transcript in zip(
             corpus.cases,
             outputs[target_language],
+            synthesized_transcripts[target_language],
             strict=True,
         ):
             rows.append(
@@ -553,16 +560,31 @@ def critical_review_content_sha256(
                         f"{source_language.value}_to_{target_language.value}"
                     ),
                     "output": output,
+                    "audible_transcript": transcript,
+                    "layer_verdicts": {
+                        layer: [
+                            violation.kind
+                            for violation in _critical_violations(
+                                case,
+                                text,
+                                target_language=target_language,
+                                layer=layer,
+                            )
+                        ]
+                        for layer, text in (("mt", output), ("audible", transcript))
+                    },
                     "reference": (
                         case.en if target_language is Language.EN else case.ru
                     ),
-                    "source": (
-                        case.ru if source_language is Language.RU else case.en
-                    ),
+                    "source": (case.ru if source_language is Language.RU else case.en),
                 }
             )
     canonical = json.dumps(
-        {"corpus_id": corpus.corpus_id, "rows": rows},
+        {
+            "schema_version": "translator.critical-review.v2",
+            "corpus_id": corpus.corpus_id,
+            "rows": rows,
+        },
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -709,10 +731,11 @@ def _resource_peaks(
 ) -> ResourceSample:
     if not samples:
         raise CorpusError("resource samples are empty")
+    gpu_samples = [sample[2] for sample in samples if sample[2] is not None]
     return (
         max(sample[0] for sample in samples),
         max(sample[1] for sample in samples),
-        max(sample[2] for sample in samples),
+        max(gpu_samples) if gpu_samples else None,
         max(sample[3] for sample in samples),
     )
 
@@ -731,11 +754,15 @@ def _evaluate_direction(
     synthesized_wer = wer(list(outputs), list(synthesized_transcripts))
     violations = tuple(
         violation
-        for case, output in zip(cases, outputs, strict=True)
+        for case, output, transcript in zip(
+            cases, outputs, synthesized_transcripts, strict=True
+        )
+        for layer, text in (("mt", output), ("audible", transcript))
         for violation in _critical_violations(
             case,
-            output,
+            text,
             target_language=target_language,
+            layer=layer,
         )
     )
     return DirectionQuality(
@@ -750,6 +777,7 @@ def _critical_violations(
     output: str,
     *,
     target_language: Language,
+    layer: Literal["mt", "audible"],
 ) -> tuple[CriticalViolation, ...]:
     violations: list[CriticalViolation] = []
     for kind in case.critical:
@@ -759,7 +787,7 @@ def _critical_violations(
                 output,
                 target_language=target_language,
             ):
-                violations.append(CriticalViolation(case.case_id, kind))
+                violations.append(CriticalViolation(case.case_id, kind, layer))
         elif kind == "name":
             aliases = (
                 case.accepted_en_names
@@ -783,7 +811,7 @@ def _critical_violations(
                 allowed_sentence_initials=allowed_sentence_initials,
                 target_language=target_language,
             ):
-                violations.append(CriticalViolation(case.case_id, kind))
+                violations.append(CriticalViolation(case.case_id, kind, layer))
         elif kind == "negation":
             anchors = (
                 case.negation_en_anchors
@@ -796,7 +824,7 @@ def _critical_violations(
                 target_language=target_language,
             )
             if not has_negation:
-                violations.append(CriticalViolation(case.case_id, kind))
+                violations.append(CriticalViolation(case.case_id, kind, layer))
     return tuple(violations)
 
 
@@ -804,12 +832,12 @@ def _digits(value: str) -> str:
     return "".join(regex.findall(r"\p{Nd}", value))
 
 
-def _numeric_expressions(value: str) -> set[str]:
+def _numeric_expressions(value: str) -> tuple[str, ...]:
     expressions = regex.findall(
         r"(?<!\p{N})\p{N}+(?:\s*[:.,/-]\s*\p{N}+)*(?!\p{N})",
         value,
     )
-    return {_digits(expression) for expression in expressions}
+    return tuple(_digits(expression) for expression in expressions)
 
 
 def _number_is_preserved(
@@ -826,7 +854,7 @@ def _number_is_preserved(
             else case.number_role_ru_anchors
         )
         output_tokens = _word_tokens(output)
-        return expressions == {_digits(case.value)} and any(
+        return expressions == (_digits(case.value),) and any(
             _contains_token_sequence(output_tokens, _word_tokens(anchor))
             for anchor in anchors
         )
@@ -919,9 +947,7 @@ def _name_is_preserved(
         for token in output_tokens
     ):
         return False
-    conjunctions = (
-        {"and", "or"} if target_language is Language.EN else {"и", "или"}
-    )
+    conjunctions = {"and", "or"} if target_language is Language.EN else {"и", "или"}
     return all(
         (start == 0 or folded_tokens[start - 1] not in conjunctions)
         and (end == len(folded_tokens) or folded_tokens[end] not in conjunctions)
@@ -936,9 +962,7 @@ def _negation_is_scoped(
     target_language: Language,
 ) -> bool:
     negation_words = (
-        {"not", "no", "never"}
-        if target_language is Language.EN
-        else {"не", "нет", "никогда"}
+        {"not", "no", "never"} if target_language is Language.EN else {"не", "никогда"}
     )
     anchor_tokens = tuple(_word_tokens(anchor) for anchor in anchors)
     for raw_clause in regex.split(r"[.;!?]+", output):
@@ -953,6 +977,12 @@ def _negation_is_scoped(
                 if tokens[anchor_index : anchor_index + len(expected)] != expected:
                     continue
                 if anchor_index > 0 and tokens[anchor_index - 1] in negation_words:
+                    return True
+                if (
+                    target_language is Language.RU
+                    and anchor_index > 1
+                    and tokens[anchor_index - 2 : anchor_index] == ("не", "нужно")
+                ):
                     return True
     return False
 

@@ -1,0 +1,1778 @@
+#!/usr/bin/python3
+"""One frozen, sequential, device-free acceptance matrix for the native AEC stage."""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import math
+import os
+import pwd
+import re
+import runpy
+import secrets
+import select
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNNER = ROOT / "scripts/translator-aec-backend-check"
+BACKEND = ROOT / "target/debug/translator-aec-backend"
+FIXTURE = ROOT / "target/debug/translator-aec-fixture"
+WITNESS = ROOT / "target/debug/translator-aec-witness"
+PLUGIN = Path("/usr/lib/x86_64-linux-gnu/spa-0.2/aec/libspa-aec-webrtc.so")
+LIBRARIES = tuple(Path("/usr/lib/x86_64-linux-gnu") / name for name in (
+    "libpipewire-0.3.so.0", "libasound.so.2", "libspeexdsp.so.1",
+    "libcrypto.so.3", "libseccomp.so.2",
+))
+GI_MODULE = Path("/usr/lib/python3/dist-packages/gi")
+GI_FILES = tuple(
+    sorted(path for path in GI_MODULE.rglob("*") if path.suffix in (".py", ".so"))
+)
+GI_TYPELIBS = tuple(
+    Path("/usr/lib/x86_64-linux-gnu/girepository-1.0") / f"{name}-2.0.typelib"
+    for name in ("GLib", "GObject", "Gio")
+)
+GI_LIBRARIES = tuple(
+    Path("/usr/lib/x86_64-linux-gnu") / f"lib{name}-2.0.so.0"
+    for name in ("glib", "gobject", "gio")
+)
+DYNAMIC_MODULES = (
+    *(
+        Path("/usr/lib/x86_64-linux-gnu/pipewire-0.3") / f"libpipewire-module-{name}.so"
+        for name in (
+            "protocol-native",
+            "profiler",
+            "metadata",
+            "spa-node-factory",
+            "client-node",
+            "access",
+            "adapter",
+            "link-factory",
+        )
+    ),
+    Path("/usr/lib/x86_64-linux-gnu/spa-0.2/audioconvert/libspa-audioconvert.so"),
+    Path("/usr/lib/x86_64-linux-gnu/spa-0.2/support/libspa-support.so"),
+)
+EXECUTABLES = (
+    Path("/usr/bin/pipewire"),
+    Path("/usr/bin/pw-link"),
+    Path("/usr/bin/bwrap"),
+    Path("/usr/bin/systemd-run"),
+    Path("/usr/bin/python3"),
+    Path("/usr/bin/ffmpeg"),
+)
+SOURCES = (
+    RUNNER,
+    Path(__file__),
+    ROOT / "crates/translator-aec-backend/build.rs",
+    ROOT / "crates/translator-aec-backend/src/native.c",
+    ROOT / "crates/translator-aec-backend/src/main.rs",
+    ROOT / "crates/translator-aec-backend/src/physical.c",
+    ROOT / "crates/translator-aec-backend/src/control_policy.c",
+    ROOT / "crates/translator-aec-backend/src/callback_history.h",
+    ROOT / "crates/translator-aec-backend/src/fixture.c",
+    ROOT / "crates/translator-aec-backend/src/witness.c",
+    ROOT / "crates/translator-audio/src/aec_backend.rs",
+    ROOT / "crates/translator-audio/src/aec_native_source.rs",
+    ROOT / "crates/translator-audio/src/aec_measurement.rs",
+    ROOT / "crates/translator-audio/src/aec_validation.rs",
+    ROOT / "crates/translator-audio/tests/aec_backend_wire.rs",
+    ROOT / "crates/translator-daemon/src/aec_backend_session.rs",
+    ROOT / "crates/translator-daemon/src/aec_native_engine.rs",
+    ROOT / "crates/translator-daemon/src/aec_runtime_observer.rs",
+    ROOT / "crates/translator-daemon/src/aec_validation.rs",
+    ROOT / "crates/translator-daemon/src/aec_validation_control.rs",
+    ROOT / "crates/translator-daemon/src/aec_admission.rs",
+    ROOT / "crates/translator-daemon/src/acoustic_admission.rs",
+    ROOT / "crates/translator-daemon/src/audio_operation_gate.rs",
+    ROOT / "crates/translator-daemon/src/translation_runtime.rs",
+    ROOT / "crates/translator-daemon/src/main.rs",
+    ROOT / "crates/translator-daemon/tests/aec_backend_session.rs",
+    ROOT / "Cargo.lock",
+)
+
+
+def sha256_file(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def frozen_inputs() -> dict[str, str]:
+    runner = runpy.run_path(str(RUNNER), run_name="aec_stage_freeze")
+    paths = {
+        **{f"binary:{p.name}": p for p in (BACKEND, FIXTURE, WITNESS)},
+        "plugin": PLUGIN,
+        **{f"dlopen:{p.name}": p for p in DYNAMIC_MODULES},
+        **{f"runtime:{p.name}": p for p in (*LIBRARIES, *EXECUTABLES)},
+        **{f"gi:{p.relative_to(GI_MODULE)}": p for p in GI_FILES},
+        **{f"typelib:{p.name}": p for p in GI_TYPELIBS},
+        **{f"gio-lib:{p.name}": p for p in GI_LIBRARIES},
+        **{f"source:{p.relative_to(ROOT)}": p for p in SOURCES},
+    }
+    tests = [
+        path
+        for path in (ROOT / "target/debug/deps").glob("aec_backend_session-*")
+        if path.is_file() and os.access(path, os.X_OK)
+    ]
+    if not tests:
+        raise RuntimeError("prebuilt native owner test executable missing")
+    paths.update({f"owner-test:{path.name}": path for path in tests})
+    speech_dir = (
+        Path(pwd.getpwuid(os.getuid()).pw_dir)
+        / ".local/state/translator-product-evidence-20260923"
+        / "fleurs-validation-asr-20260923"
+    )
+    speech_sources = runner["SPEECH_SOURCES"]
+    for role, (name, expected) in speech_sources.items():
+        source = speech_dir / name
+        if sha256_file(source) != expected:
+            raise RuntimeError("pinned speech source hash mismatch: " + role)
+        paths[f"speech:{role}"] = source
+    if len(paths) != len(
+        (
+            BACKEND,
+            FIXTURE,
+            WITNESS,
+            PLUGIN,
+            *LIBRARIES,
+            *DYNAMIC_MODULES,
+            *EXECUTABLES,
+            *GI_FILES,
+            *GI_TYPELIBS,
+            *GI_LIBRARIES,
+            *SOURCES,
+            *tests,
+            *speech_sources,
+        )
+    ):
+        raise RuntimeError("frozen AEC input names collide")
+    for artifact in (
+        BACKEND,
+        FIXTURE,
+        WITNESS,
+        PLUGIN,
+        *LIBRARIES,
+        *DYNAMIC_MODULES,
+        *EXECUTABLES,
+        *GI_LIBRARIES,
+        *(path for path in GI_FILES if path.suffix == ".so"),
+    ):
+        inspected = subprocess.run(
+            ["/usr/bin/ldd", str(artifact)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if inspected.returncode:
+            raise RuntimeError("runtime dependency inspection failed: " + artifact.name)
+        for token in re.findall(r"(?<!\S)/[^\s()]+", inspected.stdout):
+            dependency = Path(token)
+            if dependency.is_file():
+                label = f"linked:{dependency.resolve(strict=True).name}"
+                if label in paths and paths[label].resolve(
+                    strict=True
+                ) != dependency.resolve(strict=True):
+                    raise RuntimeError("linked runtime dependency names collide")
+                paths[label] = dependency
+    hashes = {
+        label: sha256_file(path.resolve(strict=True)) for label, path in paths.items()
+    }
+    for name in (
+        "PRIVATE_CONFIG",
+        "CLIENT_CONFIG",
+        "SESSION",
+        "PREFLIGHT",
+        "SCOPE_BOOTSTRAP",
+    ):
+        hashes[f"config:{name}"] = hashlib.sha256(
+            runner[name].encode("utf-8")
+        ).hexdigest()
+    return hashes
+
+
+def native_test_binary_from_build_output(output: str) -> Path:
+    paths = []
+    for line in output.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            item.get("reason") == "compiler-artifact"
+            and item.get("target", {}).get("name") == "aec_backend_session"
+            and "test" in item.get("target", {}).get("kind", [])
+            and item.get("profile", {}).get("test") is True
+            and isinstance(item.get("executable"), str)
+        ):
+            paths.append(Path(item["executable"]))
+    if len(paths) != 1:
+        raise ValueError("expected exactly one fresh native test executable")
+    return paths[0]
+
+
+def native_test_command(binary: Path, name: str) -> list[str]:
+    if not re.fullmatch(r"(?:session::scope_tests::)?[a-z][a-z0-9_]+", name):
+        raise ValueError("invalid native test name")
+    return [str(binary), "--exact", name, "--ignored", "--nocapture"]
+
+
+def parse_native_lifecycle(payload: bytes, expected_unit: str) -> str:
+    if len(payload) > 4096 or (payload and not payload.endswith(b"\n")):
+        raise ValueError("native lifecycle record incomplete or oversized")
+    if re.fullmatch(r"translator-aec-[0-9a-f]{32}", expected_unit) is None:
+        raise ValueError("invalid expected scope unit")
+    if not payload:
+        return "NO_REQUEST"
+    events = []
+    base = {"event", "unit", "pid", "session"}
+    for line in payload.splitlines():
+        try:
+            event = json.loads(line)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise ValueError("native lifecycle record malformed") from error
+        if not isinstance(event, dict):
+            raise ValueError("native lifecycle record invalid")
+        kind = event.get("event")
+        keys = base | (
+            {"manager_owner"}
+            if kind == "P"
+            else {"manager_owner", "job"}
+            if kind == "A"
+            else set()
+        )
+        if (
+            kind not in ("P", "A", "N")
+            or set(event) != keys
+            or event["unit"] != expected_unit
+            or type(event["pid"]) is not int
+            or event["pid"] <= 0
+            or not isinstance(event["session"], str)
+            or re.fullmatch(r"[0-9a-f]{16}", event["session"]) is None
+        ):
+            raise ValueError("native lifecycle identity invalid")
+        if kind in ("P", "A") and (
+            not isinstance(event["manager_owner"], str)
+            or re.fullmatch(r":[0-9]+\.[0-9]+", event["manager_owner"]) is None
+        ):
+            raise ValueError("native lifecycle manager identity invalid")
+        if kind == "A" and (
+            not isinstance(event["job"], str)
+            or re.fullmatch(r"/org/freedesktop/systemd1/job/[1-9][0-9]*", event["job"])
+            is None
+        ):
+            raise ValueError("native lifecycle job identity invalid")
+        events.append(event)
+    if len(events) > 2 or events[0]["event"] not in ("P", "N"):
+        raise ValueError("native lifecycle order invalid")
+    if len(events) == 1:
+        return "PENDING" if events[0]["event"] == "P" else "N"
+    if events[0]["event"] != "P" or events[1]["event"] not in ("A", "N"):
+        raise ValueError("native lifecycle terminal invalid")
+    if any(events[1][key] != events[0][key] for key in ("unit", "pid", "session")):
+        raise ValueError("native lifecycle terminal identity changed")
+    if events[1]["event"] == "A" and (
+        events[1]["manager_owner"] != events[0]["manager_owner"]
+    ):
+        raise ValueError("native lifecycle manager changed")
+    return events[1]["event"]
+
+
+def native_case_settled(
+    lifecycle: str,
+    direct_scope_test: bool,
+    test_passed: bool,
+    lifecycle_eof: bool,
+    inner_scope_absent: bool,
+) -> bool:
+    if not lifecycle_eof or not inner_scope_absent:
+        return False
+    return lifecycle in ("A", "N", "NO_REQUEST")
+
+
+def native_case_accepted(
+    lifecycle: str,
+    direct_scope_test: bool,
+    test_passed: bool,
+) -> bool:
+    expected = "NO_REQUEST" if direct_scope_test else "A"
+    return test_passed and lifecycle == expected
+
+
+def marker(stderr: str, prefix: str) -> dict[str, object] | None:
+    lines = [
+        line[len(prefix) :] for line in stderr.splitlines() if line.startswith(prefix)
+    ]
+    if len(lines) != 1:
+        return None
+    try:
+        result = json.loads(lines[0])
+    except ValueError:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def valid_component_states(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"backend", "fixture", "witness"}:
+        return False
+    sessions = set()
+    numeric = (
+        "callback",
+        "expected_position",
+        "position",
+        "duration",
+        "clock",
+        "xrun",
+        "sequence",
+        "valid_mask",
+        "queue_head",
+        "queue_tail",
+    )
+    for role, state in value.items():
+        if not isinstance(state, dict) or (
+            set(state)
+            != {
+                "status",
+                "session",
+                "source",
+                "reason",
+                *numeric,
+            }
+            or state.get("status") != "NOT_FAILED"
+            or state.get("source") != role
+            or type(state.get("reason")) is not int
+            or state["reason"] != 0
+            or not isinstance(state.get("session"), str)
+            or re.fullmatch(r"[0-9a-f]{16}", state["session"]) is None
+            or any(type(state.get(key)) is not int or state[key] < 0 for key in numeric)
+            or state["callback"] == 0
+            or state["duration"] != 480
+            or state["clock"] == 0xFFFFFFFF
+            or not 0 < state["valid_mask"] <= 7
+        ):
+            return False
+        sessions.add(state["session"])
+    return len(sessions) == 1
+
+
+def trial_receipt(
+    case: str, payload: dict[str, object], frozen: dict[str, str]
+) -> bool:
+    startup = case in ("startup-delay-250", "startup-delay-750")
+    fixture_mode = "prevalid-once" if startup else case
+    frames = 100 if startup else 4500
+    identity = payload.get("identity")
+    expected_identity = {
+        "backend": frozen["binary:translator-aec-backend"],
+        "fixture": frozen["binary:translator-aec-fixture"],
+        "witness": frozen["binary:translator-aec-witness"],
+        "aec_plugin": frozen["plugin"],
+    }
+    if not (
+        payload.get("status") == "NONPHYSICAL_TRIAL_PASS"
+        and payload.get("aec_proof") is False
+        and payload.get("cleanup_reaped") is True
+        and payload.get("fixture_mode") == fixture_mode
+        and type(payload.get("frames")) is int
+        and payload["frames"] == frames
+        and identity == expected_identity
+        and payload.get("plugin_mapped") is True
+        and valid_component_states(payload.get("component_states"))
+        and finite_number(payload.get("raw_peak"))
+        and payload["raw_peak"] > 0
+        and finite_number(payload.get("clean_peak"))
+        and payload["clean_peak"] > 0
+        and type(payload.get("changed_samples")) is int
+        and payload["changed_samples"] > 0
+        and finite_number(payload.get("cleanup_ms"))
+        and payload["cleanup_ms"] >= 0
+    ):
+        return False
+    if startup:
+        counters = payload.get("prevalid")
+        return (
+            payload.get("fixture_delay_ms") == int(case.rsplit("-", 1)[1])
+            and payload.get("metric") is None
+            and payload.get("speech") is None
+            and isinstance(counters, dict)
+            and all(
+                type(counters.get(key)) is int and counters[key] >= 0
+                for key in ("quarantined", "empty", "sentinel")
+            )
+            and counters["quarantined"] == counters["empty"] + counters["sentinel"]
+            and counters["empty"] > 0
+            and counters["sentinel"] > 0
+        )
+    if payload.get("fixture_delay_ms") != 0:
+        return False
+    metric = payload.get("metric")
+    if not isinstance(metric, dict):
+        return False
+    if case in ("far-only", "speech-far", "wrong-reference", "speech-wrong-reference"):
+        erle = metric.get("median_erle_db")
+        if not finite_number(erle):
+            return False
+        if case in ("far-only", "speech-far") and erle < 15:
+            return False
+        if case in ("wrong-reference", "speech-wrong-reference") and erle >= 15:
+            return False
+    elif case in ("near-only", "speech-near"):
+        active = metric.get("active_seconds")
+        corr = metric.get("minimum_waveform_correlation")
+        level = metric.get("median_level_change_db")
+        minimum_level = metric.get("minimum_level_change_db_diagnostic")
+        maximum_level = metric.get("maximum_level_change_db_diagnostic")
+        if not (
+            type(active) is int
+            and 20 <= active <= 30
+            and finite_number(corr)
+            and corr >= 0.90
+            and all(
+                finite_number(value) and abs(value) <= 3
+                for value in (level, minimum_level, maximum_level)
+            )
+            and minimum_level <= level <= maximum_level
+        ):
+            return False
+    else:
+        return False
+    if case.startswith("speech-"):
+        speech = payload.get("speech")
+        sources = speech.get("sources") if isinstance(speech, dict) else None
+        runner = runpy.run_path(str(RUNNER), run_name="aec_stage_speech_identity")
+        expected = runner["SPEECH_SOURCES"]
+        return (
+            isinstance(speech, dict)
+            and speech.get("dataset") == "Google FLEURS"
+            and speech.get("license") == "CC-BY-4.0"
+            and isinstance(sources, dict)
+            and all(
+                isinstance(sources.get(role), dict)
+                and sources[role].get("id") == name
+                and sources[role].get("source_sha256") == digest
+                and sources[role].get("prepared_samples") == 60 * 48000
+                and re.fullmatch(
+                    r"[0-9a-f]{64}", str(sources[role].get("prepared_sha256"))
+                )
+                is not None
+                for role, (name, digest) in expected.items()
+            )
+        )
+    return payload.get("speech") is None
+
+
+def owner_receipt(case: str, returncode: int, stdout: str) -> bool:
+    expected_names = {
+        "owner-contract": {
+            "cancel_is_shared_and_reaps_owned_process_group",
+            "concurrent_cancel_calls_join_one_cleanup",
+            "dropped_caller_still_drives_cleanup",
+            "no_progress_is_bounded_and_cannot_become_success",
+            "exited_leader_does_not_release_descendant_group",
+            "isolated_runner_rejects_stream_with_foreign_session",
+            "exact_stream_requires_clean_eof_exit_and_cleanup_before_result",
+            "late_fatal_extra_frame_partial_eof_and_nonzero_exit_never_return_result",
+            "owner_shutdown_joins_the_same_cleanup_task",
+            "failed_first_cleanup_keeps_live_descendant_owned_until_retry",
+            "session::scope_tests::replaced_scope_cannot_receive_kill",
+            "session::scope_tests::unavailable_kill_control_retains_cleanup_obligation",
+            "session::scope_tests::failed_cgroup_write_keeps_owner_pending_until_scope_is_gone",
+            "session::scope_tests::panicked_cleanup_task_never_reports_idle",
+            "owned_group_is_a_private_session",
+            "same_session_member_in_other_group_prevents_early_reap",
+            "session::scope_tests::late_scope_is_bound_before_retry_kill",
+            "session::scope_tests::absent_scope_does_not_clear_late_creation_obligation",
+            "session::scope_tests::collector_panic_keeps_process_custody",
+            "session::scope_tests::caller_runtime_drop_does_not_drop_process_custody",
+            "session::scope_tests::concurrent_shutdown_calls_share_entry_deadline",
+            "session::scope_tests::shutdown_during_held_startup_still_cancels_within_entry_budget",
+            "session::scope_tests::trusted_runner_command_has_no_caller_control",
+            "session::scope_tests::explicit_manager_rejection_releases_absent_scope_custody",
+            "session::scope_tests::admitted_then_vanished_scope_releases_custody",
+            "session::scope_tests::invalid_or_conflicting_manager_marker_cannot_settle_creation",
+            "session::scope_tests::pre_request_exit_without_marker_releases_owner_after_reap",
+            "session::scope_tests::sent_request_then_eof_without_terminal_remains_unknown",
+            "session::scope_tests::observed_scope_is_killed_while_manager_outcome_is_unknown",
+        },
+        "owner-native": {
+            "isolated_native_stream_is_owned_and_cancelled",
+            "killed_runner_cannot_leave_scope_or_early_idle",
+            "isolated_native_exact_stream_yields_nonadmissible_result_after_cleanup",
+            "session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal",
+            "session::scope_tests::no_frame_runner_reaps_detached_scope_member",
+        },
+    }[case]
+    expected = len(expected_names)
+    names = re.findall(r"^test ([^\s]+) \.\.\. ok$", stdout, re.MULTILINE)
+    summary = re.findall(
+        r"^test result: ok\. (\d+) passed; 0 failed; "
+        r"(\d+) ignored; 0 measured; (\d+) filtered out",
+        stdout,
+        re.MULTILINE,
+    )
+    return (
+        returncode == 0
+        and len(names) == expected
+        and set(names) == expected_names
+        and len(summary) == 1
+        and summary[0]
+        == (
+            str(expected),
+            "5" if case == "owner-contract" else "0",
+            "0" if case == "owner-contract" else "29",
+        )
+    )
+
+
+def classify(
+    case: str, returncode: int, stdout: str, stderr: str, frozen: dict[str, str]
+) -> tuple[bool, dict[str, object]]:
+    if case.startswith("fault:"):
+        fault = marker(stderr, "AEC_FAULT_RECEIPT=")
+        diagnostic = marker(stderr, "AEC_NATIVE_DIAGNOSTICS=")
+        failure_lines = [
+            line
+            for line in stderr.splitlines()
+            if line.startswith("AEC isolated session NOT_DONE:")
+        ]
+        expected = {
+            "raw-unlink": (10, "AEC helper FATAL reason=10"),
+            "reference-unlink": (10, "AEC helper FATAL reason=10"),
+            "output-unlink": (10, "AEC helper FATAL reason=10"),
+            "helper-crash": (None, "AEC helper disconnected"),
+            "server-stop": (1, "AEC helper FATAL reason=1"),
+            "corrupt-ipc": (None, "AEC IPC session mismatch"),
+            "queue-overflow": (None, "AEC session stopped or timed out"),
+            "clock-reset": (None, "AEC FRAME gap or graph change"),
+            "generation-replacement": (None, "AEC FRAME provenance invalid"),
+            "aec-error": (6, "AEC helper FATAL reason=6"),
+        }
+        expected_reason, expected_text = expected[case.split(":", 1)[1]]
+        valid = (
+            returncode == 2
+            and fault is not None
+            and fault.get("fault") == case.split(":", 1)[1]
+            and fault.get("injection_at_frame") == 10
+            and fault.get("injection_confirmed") is True
+            and fault.get("post_injection_failure") is True
+            and fault.get("cleanup_reaped") is True
+            and re.fullmatch(r"[0-9a-f]{16}", str(fault.get("session"))) is not None
+            and diagnostic is not None
+            and diagnostic.get("session") == fault.get("session")
+            and diagnostic.get("fatal_reason") == expected_reason
+            and (expected_reason is None or diagnostic.get("fatal_processed", 0) >= 10)
+            and len(failure_lines) == 1
+            and expected_text in failure_lines[0]
+        )
+        return bool(valid), {"fault": fault, "diagnostic": diagnostic}
+    if case.startswith("mutant:"):
+        mutant = marker(stderr, "AEC_MUTANT_RECEIPT=")
+        valid = (
+            returncode == 2
+            and mutant is not None
+            and mutant.get("mutant") == case.split(":", 1)[1]
+            and mutant.get("applied_frames") == 4500
+            and mutant.get("scorer_rejected") is True
+            and mutant.get("cleanup_reaped") is True
+            and re.fullmatch(r"[0-9a-f]{16}", str(mutant.get("session"))) is not None
+        )
+        return bool(valid), {"mutant": mutant}
+    if case == "meta-gap":
+        diagnostic = marker(stderr, "AEC_NATIVE_DIAGNOSTICS=")
+        valid = (
+            returncode == 2
+            and diagnostic is not None
+            and diagnostic.get("fatal_reason") == 4
+            and diagnostic.get("fatal_processed") == 0
+            and diagnostic.get("status") == "OBSERVED"
+            and diagnostic.get("source") == "backend"
+            and diagnostic.get("buffer_reason") == [7, 7, 0]
+            and diagnostic.get("raw_chunk") == [1920, 4, 0]
+            and diagnostic.get("reference_chunk") == [1920, 4, 0]
+            and isinstance(diagnostic.get("raw_header"), list)
+            and isinstance(diagnostic.get("reference_header"), list)
+            and len(diagnostic["raw_header"]) == 3
+            and len(diagnostic["reference_header"]) == 3
+            and diagnostic["raw_header"][0] == 1
+            and diagnostic["reference_header"][0] == 1
+            and type(diagnostic["raw_header"][1]) is int
+            and type(diagnostic["reference_header"][1]) is int
+            and diagnostic["raw_header"][1] & 18 == 18
+            and diagnostic["reference_header"][1] & 18 == 18
+            and diagnostic.get("started") == 1
+            and type(diagnostic.get("callback")) is int
+            and diagnostic["callback"] >= 1
+            and "cleanup_reaped=True" in stderr
+        )
+        return bool(valid), {"diagnostic": diagnostic}
+    if returncode != 0:
+        diagnostics = {}
+        for key, prefix in (
+            ("components", "AEC_COMPONENT_DIAGNOSTICS="),
+            ("backend", "AEC_NATIVE_DIAGNOSTICS="),
+            ("fixture", "AEC_FIXTURE_DIAGNOSTICS="),
+            ("callback_backend", "AEC_CALLBACK_DIAGNOSTICS_BACKEND="),
+            ("callback_fixture", "AEC_CALLBACK_DIAGNOSTICS_FIXTURE="),
+            ("callback_witness", "AEC_CALLBACK_DIAGNOSTICS_WITNESS="),
+        ):
+            lines = [line for line in stderr.splitlines() if line.startswith(prefix)]
+            limit = 16384 if key.startswith("callback_") else 4096
+            if len(lines) == 1 and len(lines[0]) <= limit:
+                parsed = marker(stderr, prefix)
+                if parsed is not None:
+                    diagnostics[key] = parsed
+        failures = [
+            line
+            for line in stderr.splitlines()
+            if line.startswith("AEC isolated session NOT_DONE:")
+        ]
+        return False, {
+            "reason": "nonzero exit",
+            "diagnostics": diagnostics,
+            "failure": failures[0]
+            if len(failures) == 1 and len(failures[0]) <= 512
+            else None,
+        }
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return False, {"reason": "missing JSON receipt"}
+    if not isinstance(payload, dict):
+        return False, {"reason": "invalid JSON receipt"}
+    if case == "lifecycle":
+        events = payload.get("events")
+        valid = (
+            payload.get("status") == "NONPHYSICAL_LIFECYCLE_PASS"
+            and payload.get("completed_cycles") == 100
+            and payload.get("aec_proof") is False
+            and isinstance(events, list)
+            and len(events) == 100
+            and all(
+                isinstance(event, dict)
+                and event.get("cycle") == index
+                and event.get("case")
+                == (
+                    "cancel"
+                    if index % 5 == 0
+                    else "seq-skew"
+                    if index % 5 == 1
+                    else "normal"
+                )
+                and event.get("exit") == (0 if index % 5 >= 2 else 2)
+                and event.get("failure") is None
+                and event.get("scope_absent") is True
+                and event.get("owned_process_count") == 0
+                and event.get("owned_graph_count") == 0
+                and event.get("fd_delta") == 0
+                and event.get("thread_delta") == 0
+                for index, event in enumerate(events)
+            )
+        )
+        return bool(valid), {"cycles": payload.get("completed_cycles")}
+    valid = trial_receipt(case, payload, frozen)
+    return bool(valid), {
+        "frames": payload.get("frames"),
+        "metric": payload.get("metric"),
+        "cleanup_ms": payload.get("cleanup_ms"),
+    }
+
+
+NATIVE_TESTS = (
+    "isolated_native_stream_is_owned_and_cancelled",
+    "killed_runner_cannot_leave_scope_or_early_idle",
+    "isolated_native_exact_stream_yields_nonadmissible_result_after_cleanup",
+    "session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal",
+    "session::scope_tests::no_frame_runner_reaps_detached_scope_member",
+)
+DIRECT_SCOPE_TESTS = frozenset(NATIVE_TESTS[-2:])
+NATIVE_GATE = (
+    "import os,sys\n"
+    "fd=int(sys.argv[1])\n"
+    "permit=os.read(fd,1)\n"
+    "os.close(fd)\n"
+    "if permit!=b'G': os._exit(75)\n"
+    "os.execv(sys.argv[2],sys.argv[2:])\n"
+)
+
+
+def native_test_passed(name: str, returncode: int, output: str) -> bool:
+    names = re.findall(r"^test ([^\s]+) \.\.\. ok$", output, re.MULTILINE)
+    summary = re.findall(
+        r"^test result: ok\. 1 passed; 0 failed; 0 ignored; "
+        r"0 measured; [0-9]+ filtered out",
+        output,
+        re.MULTILINE,
+    )
+    return returncode == 0 and names == [name] and len(summary) == 1
+
+
+def kill_exact_scope(scope: Path, bound: int | None) -> tuple[int | None, bool]:
+    flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        current = os.open(scope, flags)
+    except FileNotFoundError:
+        return bound, True
+    except OSError:
+        return bound, False
+    try:
+        if bound is None:
+            bound = current
+            current = -1
+        elif (os.fstat(bound).st_dev, os.fstat(bound).st_ino) != (
+            os.fstat(current).st_dev,
+            os.fstat(current).st_ino,
+        ):
+            return bound, False
+        try:
+            control = os.open(
+                "cgroup.kill",
+                os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=bound,
+            )
+            try:
+                os.write(control, b"1")
+            finally:
+                os.close(control)
+        except OSError:
+            return bound, False
+        return bound, False
+    finally:
+        if current >= 0:
+            os.close(current)
+
+
+def read_native_lifecycle(fd: int, payload: bytearray) -> bool:
+    while True:
+        if len(payload) >= 4096:
+            return False
+        try:
+            chunk = os.read(fd, 4097 - len(payload))
+        except BlockingIOError:
+            return False
+        if not chunk:
+            return True
+        if len(payload) + len(chunk) > 4096:
+            payload[:] = b"!" * 4096
+            return False
+        payload.extend(chunk)
+
+
+def bind_stage_launcher(
+    payload: bytes,
+    expected_unit: str,
+    outer_scope: Path,
+) -> tuple[int, int] | None:
+    first = payload.split(b"\n", 1)[0]
+    if not first or b"\n" not in payload:
+        return None
+    pidfd = None
+    try:
+        event = json.loads(first)
+        if event.get("event") != "P":
+            return None
+        parse_native_lifecycle(first + b"\n", expected_unit)
+        pid = event["pid"]
+        pidfd = os.pidfd_open(pid)
+        expected = "0::" + str(outer_scope).removeprefix("/sys/fs/cgroup")
+        membership = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii").strip()
+        if membership != expected:
+            os.close(pidfd)
+            return None
+        return pid, pidfd
+    except (OSError, UnicodeDecodeError, ValueError, KeyError, AttributeError):
+        if pidfd is not None:
+            os.close(pidfd)
+        return None
+
+
+def bounded_native_output(label: str):
+    fd = os.memfd_create(
+        "translator-aec-" + label,
+        os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+    )
+    try:
+        os.ftruncate(fd, 1 << 20)
+        fcntl.fcntl(
+            fd,
+            fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL,
+        )
+        return os.fdopen(fd, "w+b", buffering=0)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def supervise_outer_scope_acquisition(
+    runner: dict[str, object],
+    proc: subprocess.Popen[bytes],
+    pidfd: int,
+    outer_scope: Path,
+    inner_scope: Path,
+    outer_unit: str,
+    gate_write: int,
+    name: str,
+    client_lost=lambda: False,
+    custody: dict[str, object] | None = None,
+) -> tuple[bool, int | None, str | None]:
+    """Retain process and exact scope custody while the manager request is pending."""
+    outcome: dict[str, object] = {}
+    done = threading.Event()
+
+    def request() -> None:
+        try:
+            outcome["scope"] = runner["acquire_scope"](
+                proc.pid,
+                outer_unit,
+                proc,
+                lambda: None,
+            )
+        except BaseException as error:
+            outcome["error"] = error
+        finally:
+            done.set()
+
+    if custody is not None:
+        custody["request_done"] = done
+        custody["request_outcome"] = outcome
+    worker = threading.Thread(
+        target=request, name="aec-outer-scope-owner", daemon=False
+    )
+    worker.start()
+    started = time.monotonic()
+    bound = None
+    cancelled = False
+    reported_pending = False
+    reason = "outer_scope_acquisition"
+
+    while True:
+        elapsed = time.monotonic() - started
+        if client_lost() and not cancelled:
+            reason = "stage_owner_lost"
+            os.close(gate_write)
+            cancelled = True
+        if done.is_set():
+            worker.join()
+            error = outcome.get("error")
+            if (
+                not cancelled
+                and error is None
+                and outcome.get("scope") == outer_scope
+                and elapsed < 4
+            ):
+                try:
+                    bound = os.open(
+                        outer_scope,
+                        os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    )
+                except OSError:
+                    reason = "outer_scope_binding"
+                else:
+                    if proc.poll() is None:
+                        return True, bound, None
+                    reason = "outer_scope_child_exited"
+            elif reason != "stage_owner_lost" and isinstance(
+                error, runner["ScopeRejected"]
+            ):
+                reason = "outer_scope_rejected"
+            elif reason != "stage_owner_lost" and error is None:
+                reason = "outer_scope_timeout"
+        if not cancelled and (done.is_set() or elapsed >= 4 or proc.poll() is not None):
+            os.close(gate_write)
+            cancelled = True
+        if cancelled:
+            if proc.poll() is None:
+                try:
+                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            bound, outer_absent = kill_exact_scope(outer_scope, bound)
+            inner_absent = not inner_scope.exists()
+            if proc.poll() is not None:
+                proc.wait()
+            terminal = done.is_set() and (
+                outcome.get("scope") == outer_scope
+                or isinstance(outcome.get("error"), runner["ScopeRejected"])
+            )
+            if terminal and outer_absent and inner_absent and proc.poll() is not None:
+                worker.join()
+                return False, bound, reason
+        if elapsed >= 8 and not reported_pending:
+            print(
+                "AEC_STAGE_CUSTODY="
+                + json.dumps(
+                    {
+                        "case": name,
+                        "status": "CleanupPending",
+                        "reason": reason,
+                        "outer_scope": outer_unit,
+                        "outer_absent": outer_absent if cancelled else False,
+                        "inner_absent": inner_absent if cancelled else False,
+                        "request_terminal": done.is_set(),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            reported_pending = True
+        time.sleep(0.05)
+
+
+def run_supervised_native_test(
+    binary: Path,
+    name: str,
+    runner: dict[str, object],
+    *,
+    inner_unit: str | None = None,
+    outer_unit: str | None = None,
+    client_lost=lambda: False,
+    custody: dict[str, object] | None = None,
+) -> tuple[bool, dict[str, object]]:
+    inner_unit = inner_unit or "translator-aec-" + secrets.token_hex(16)
+    outer_unit = outer_unit or "translator-aec-" + secrets.token_hex(16)
+    inner_scope = runner["owned_scope_path"](inner_unit)
+    outer_scope = runner["owned_scope_path"](outer_unit)
+    if inner_scope.exists() or outer_scope.exists():
+        raise RuntimeError("native scope identity collision")
+    gate_read, gate_write = os.pipe()
+    lifecycle_read, lifecycle_write = os.pipe()
+    os.set_blocking(lifecycle_read, False)
+    env = {
+        **os.environ,
+        "TRANSLATOR_AEC_NATIVE_SCOPE_UNIT": inner_unit,
+        "TRANSLATOR_AEC_STAGE_LIFECYCLE_FD": str(lifecycle_write),
+    }
+    command = native_test_command(binary, name)
+    stdout_file = bounded_native_output("stdout")
+    stderr_file = bounded_native_output("stderr")
+    try:
+        proc = subprocess.Popen(
+            ["/usr/bin/python3", "-I", "-c", NATIVE_GATE, str(gate_read), *command],
+            cwd=ROOT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            pass_fds=(gate_read, lifecycle_write),
+            close_fds=True,
+        )
+    except BaseException:
+        for fd in (gate_read, gate_write, lifecycle_read, lifecycle_write):
+            os.close(fd)
+        stdout_file.close()
+        stderr_file.close()
+        raise
+    os.close(gate_read)
+    os.close(lifecycle_write)
+    if custody is not None:
+        custody["proc"] = proc
+    try:
+        pidfd = os.pidfd_open(proc.pid)
+    except OSError:
+        os.close(gate_write)
+        proc.kill()
+        proc.wait()
+        os.close(lifecycle_read)
+        stdout_file.close()
+        stderr_file.close()
+        raise
+    if custody is not None:
+        custody["pidfd"] = os.dup(pidfd)
+    outer_bound = inner_bound = None
+    launcher_pidfd = launcher_pid = None
+    payload = bytearray()
+    lifecycle_eof = False
+    if custody is not None:
+        custody["lifecycle_fd"] = os.dup(lifecycle_read)
+        custody["lifecycle_payload"] = payload
+        custody["lifecycle_eof"] = False
+    try:
+        admitted, outer_bound, acquisition_reason = supervise_outer_scope_acquisition(
+            runner,
+            proc,
+            pidfd,
+            outer_scope,
+            inner_scope,
+            outer_unit,
+            gate_write,
+            name,
+            client_lost,
+            custody,
+        )
+        if not admitted:
+            return False, {
+                "test": name,
+                "exit": proc.returncode,
+                "outer_scope": outer_unit,
+                "inner_scope": inner_unit,
+                "reason": acquisition_reason,
+                "scope_absent": True,
+                "child_reaped": True,
+            }
+        try:
+            if client_lost():
+                raise OSError("stage owner lost before native gate")
+            if os.write(gate_write, b"G") != 1:
+                raise OSError("native test gate write incomplete")
+        except OSError:
+            os.close(gate_write)
+            while True:
+                outer_bound, outer_absent = kill_exact_scope(
+                    outer_scope,
+                    outer_bound,
+                )
+                if outer_absent:
+                    proc.wait(timeout=8)
+                    return False, {
+                        "test": name,
+                        "exit": proc.returncode,
+                        "outer_scope": outer_unit,
+                        "inner_scope": inner_unit,
+                        "reason": "native_test_gate_failed",
+                        "scope_absent": True,
+                        "child_reaped": True,
+                    }
+                time.sleep(0.05)
+        os.close(gate_write)
+        if custody is not None:
+            custody["native_gate_opened"] = True
+        timed_out = False
+        owner_lost = False
+        test_deadline = time.monotonic() + 220
+        while proc.poll() is None and time.monotonic() < test_deadline:
+            if client_lost():
+                owner_lost = True
+                break
+            if not lifecycle_eof:
+                lifecycle_eof = read_native_lifecycle(lifecycle_read, payload)
+                if custody is not None:
+                    custody["lifecycle_eof"] = lifecycle_eof
+            if launcher_pidfd is None:
+                bound = bind_stage_launcher(bytes(payload), inner_unit, outer_scope)
+                if bound is not None:
+                    launcher_pid, launcher_pidfd = bound
+            time.sleep(0.02)
+        if proc.poll() is None:
+            timed_out = not owner_lost
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        while True:
+            try:
+                proc.wait(timeout=8)
+                break
+            except subprocess.TimeoutExpired:
+                print(
+                    "AEC_STAGE_CUSTODY="
+                    + json.dumps(
+                        {
+                            "case": name,
+                            "status": "CleanupPending",
+                            "reason": "test_process_not_reaped",
+                            "launcher_bound": launcher_pidfd is not None,
+                            "outer_scope": outer_unit,
+                            "inner_scope": inner_unit,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+        stdout_size = os.lseek(stdout_file.fileno(), 0, os.SEEK_CUR)
+        stderr_size = os.lseek(stderr_file.fileno(), 0, os.SEEK_CUR)
+        output_overflow = max(stdout_size, stderr_size) > 64 * 1024
+        output = os.pread(stdout_file.fileno(), min(stdout_size, 64 * 1024), 0)
+        error_output = os.pread(stderr_file.fileno(), min(stderr_size, 64 * 1024), 0)
+        output_text = output.decode("utf-8", errors="replace")
+        error_text = error_output.decode("utf-8", errors="replace")
+        test_lines = re.findall(
+            r"^test [^\n]{1,180} \.\.\. (?:ok|FAILED)$",
+            output_text,
+            re.MULTILINE,
+        )[:3]
+        summary_lines = [
+            line[:240]
+            for line in output_text.splitlines()
+            if line.startswith("test result:")
+        ][:2]
+        error_lines = [
+            re.sub(r"/[^\s]+", "[path]", line)[:240]
+            for line in error_text.splitlines()
+            if line.startswith(("AEC scope NOT_DONE:", "error:", "thread "))
+        ][:3]
+        direct = name in DIRECT_SCOPE_TESTS
+        test_passed = (
+            not owner_lost
+            and not client_lost()
+            and not output_overflow
+            and native_test_passed(name, proc.returncode, output_text)
+            and (direct or launcher_pidfd is not None)
+        )
+        started_cleanup = time.monotonic()
+        reported_pending = False
+        while True:
+            if not lifecycle_eof:
+                lifecycle_eof = read_native_lifecycle(lifecycle_read, payload)
+                if custody is not None:
+                    custody["lifecycle_eof"] = lifecycle_eof
+            try:
+                lifecycle = parse_native_lifecycle(bytes(payload), inner_unit)
+            except ValueError:
+                lifecycle = "INVALID"
+            inner_bound, inner_absent = kill_exact_scope(inner_scope, inner_bound)
+            if native_case_settled(
+                lifecycle,
+                direct,
+                test_passed,
+                lifecycle_eof,
+                inner_absent,
+            ):
+                outer_bound, outer_absent = kill_exact_scope(
+                    outer_scope,
+                    outer_bound,
+                )
+                if outer_absent:
+                    detail = {
+                        "test": name,
+                        "exit": proc.returncode,
+                        "timeout": timed_out,
+                        "lifecycle": lifecycle,
+                        "scope_absent": True,
+                        "child_reaped": True,
+                        "outer_scope": outer_unit,
+                        "inner_scope": inner_unit,
+                        "launcher_pid": launcher_pid,
+                        "launcher_bound": launcher_pidfd is not None,
+                        "output_sha256": hashlib.sha256(output).hexdigest(),
+                        "error_sha256": hashlib.sha256(error_output).hexdigest(),
+                        "output_truncated": output_overflow,
+                        "test_lines": test_lines,
+                        "test_summary": summary_lines,
+                        "failure_excerpt": error_lines,
+                    }
+                    if custody is not None:
+                        custody["case_settled"] = True
+                    return (
+                        native_case_accepted(lifecycle, direct, test_passed)
+                        and not timed_out
+                        and not client_lost(),
+                        detail,
+                    )
+            if not reported_pending and time.monotonic() - started_cleanup >= 8:
+                print(
+                    "AEC_STAGE_CUSTODY="
+                    + json.dumps(
+                        {
+                            "case": name,
+                            "status": "CleanupPending",
+                            "lifecycle": lifecycle,
+                            "inner_absent": inner_absent,
+                            "outer_absent": False,
+                            "outer_scope": outer_unit,
+                            "inner_scope": inner_unit,
+                            "launcher_pid": launcher_pid,
+                            "launcher_bound": launcher_pidfd is not None,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                reported_pending = True
+            time.sleep(0.05)
+    finally:
+        os.close(pidfd)
+        if launcher_pidfd is not None:
+            os.close(launcher_pidfd)
+        os.close(lifecycle_read)
+        stdout_file.close()
+        stderr_file.close()
+        if inner_bound is not None:
+            os.close(inner_bound)
+        if outer_bound is not None:
+            os.close(outer_bound)
+
+
+def write_native_guardian_receipt(
+    directory: Path, nonce: str, receipt: dict[str, object]
+) -> None:
+    """Publish one private terminal result after exact cleanup has been observed."""
+    payload = (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8")
+    temporary = directory / (nonce + ".pending")
+    final = directory / (nonce + ".json")
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+    )
+    try:
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("native receipt write made no progress")
+            remaining = remaining[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(temporary, final)
+    dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+
+
+def recover_native_guardian_failure(
+    runner: dict[str, object],
+    name: str,
+    nonce: str,
+    receipt_dir: Path,
+    outer_unit: str,
+    inner_unit: str,
+    custody: dict[str, object],
+) -> None:
+    """Keep exact process and scope custody until a provable terminal failure."""
+    outer_scope = runner["owned_scope_path"](outer_unit)
+    inner_scope = runner["owned_scope_path"](inner_unit)
+    proc = custody.get("proc")
+    pidfd = custody.get("pidfd")
+    request_done = custody.get("request_done")
+    request_outcome = custody.get("request_outcome", {})
+    lifecycle_fd = custody.get("lifecycle_fd")
+    lifecycle_payload = custody.get("lifecycle_payload")
+    outer_bound = inner_bound = None
+    reported = False
+    while True:
+        if proc is not None and proc.poll() is None:
+            try:
+                if pidfd is not None:
+                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
+        outer_bound, outer_absent = kill_exact_scope(outer_scope, outer_bound)
+        inner_bound, inner_absent = kill_exact_scope(inner_scope, inner_bound)
+        child_reaped = proc is None or proc.poll() is not None
+        if child_reaped and proc is not None:
+            proc.wait()
+        request_terminal = request_done is None or (
+            request_done.is_set()
+            and (
+                request_outcome.get("scope") == outer_scope
+                or isinstance(request_outcome.get("error"), runner["ScopeRejected"])
+            )
+        )
+        lifecycle = "NO_REQUEST"
+        lifecycle_eof = bool(custody.get("lifecycle_eof"))
+        if custody.get("native_gate_opened") and lifecycle_fd is not None:
+            if not lifecycle_eof:
+                lifecycle_eof = read_native_lifecycle(
+                    lifecycle_fd,
+                    lifecycle_payload,
+                )
+                custody["lifecycle_eof"] = lifecycle_eof
+            try:
+                lifecycle = parse_native_lifecycle(
+                    bytes(lifecycle_payload),
+                    inner_unit,
+                )
+            except ValueError:
+                lifecycle = "INVALID"
+        inner_terminal = (
+            not custody.get("native_gate_opened")
+            or custody.get("case_settled") is True
+            or (lifecycle_eof and lifecycle in ("A", "N", "NO_REQUEST"))
+        )
+        if (
+            child_reaped
+            and outer_absent
+            and inner_absent
+            and request_terminal
+            and inner_terminal
+        ):
+            write_native_guardian_receipt(
+                receipt_dir,
+                nonce,
+                {
+                    "nonce": nonce,
+                    "test": name,
+                    "status": "NOT_DONE",
+                    "pass": False,
+                    "scope_absent": True,
+                    "child_reaped": True,
+                    "detail": {
+                        "test": name,
+                        "reason": "guardian_failure",
+                        "outer_scope": outer_unit,
+                        "inner_scope": inner_unit,
+                    },
+                },
+            )
+            if pidfd is not None:
+                os.close(pidfd)
+            if lifecycle_fd is not None:
+                os.close(lifecycle_fd)
+            for bound in (outer_bound, inner_bound):
+                if bound is not None:
+                    os.close(bound)
+            return
+        if not reported:
+            print(
+                "AEC_STAGE_CUSTODY="
+                + json.dumps(
+                    {
+                        "case": name,
+                        "status": "CleanupPending",
+                        "reason": "guardian_failure",
+                        "outer_scope": outer_unit,
+                        "inner_scope": inner_unit,
+                        "request_terminal": request_terminal,
+                        "inner_terminal": inner_terminal,
+                        "lifecycle": lifecycle,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            reported = True
+        time.sleep(0.05)
+
+
+def run_guarded_native_test(
+    binary: Path,
+    name: str,
+    runner: dict[str, object],
+    nonce: str,
+    receipt_dir: Path,
+) -> tuple[bool, dict[str, object]]:
+    """A one-case session leader survives stage death and owns the native child."""
+    if name not in NATIVE_TESTS or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        raise ValueError("invalid native case identity")
+    if receipt_dir.is_symlink() or receipt_dir.stat().st_mode & 0o777 != 0o700:
+        raise ValueError("native receipt directory must be private")
+    if (receipt_dir / (nonce + ".json")).exists():
+        raise ValueError("native receipt identity already used")
+    inner_unit = "translator-aec-" + secrets.token_hex(16)
+    outer_unit = "translator-aec-" + secrets.token_hex(16)
+    ready_read, ready_write = os.pipe()
+    permit_read, permit_write = os.pipe()
+    stage_pid = os.getpid()
+    guardian_pid = os.fork()
+    if guardian_pid == 0:
+        os.close(ready_read)
+        os.close(permit_write)
+        try:
+            os.setsid()
+            logfd = os.open(
+                receipt_dir / (nonce + ".log"),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+            )
+            os.dup2(logfd, 1)
+            os.dup2(logfd, 2)
+            os.close(logfd)
+            stage_pidfd = os.pidfd_open(stage_pid)
+            custody: dict[str, object] = {}
+            try:
+                os.write(
+                    ready_write,
+                    (
+                        json.dumps(
+                            {
+                                "nonce": nonce,
+                                "pid": os.getpid(),
+                                "outer_scope": outer_unit,
+                                "inner_scope": inner_unit,
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    ).encode("ascii"),
+                )
+                os.close(ready_write)
+                if os.read(permit_read, 1) != b"G":
+                    os._exit(75)
+                os.close(permit_read)
+
+                def stage_lost() -> bool:
+                    return bool(select.select([stage_pidfd], [], [], 0)[0])
+
+                passed, detail = run_supervised_native_test(
+                    binary,
+                    name,
+                    runner,
+                    inner_unit=inner_unit,
+                    outer_unit=outer_unit,
+                    client_lost=stage_lost,
+                    custody=custody,
+                )
+                scopes_absent = (
+                    detail.get("scope_absent") is True
+                    and not runner["owned_scope_path"](inner_unit).exists()
+                    and not runner["owned_scope_path"](outer_unit).exists()
+                )
+                child_reaped = detail.get("child_reaped") is True
+                settled = scopes_absent and child_reaped
+                accepted = passed and settled and not stage_lost()
+                receipt = {
+                    "nonce": nonce,
+                    "test": name,
+                    "status": "PASS" if accepted else "NOT_DONE",
+                    "pass": accepted,
+                    "scope_absent": scopes_absent,
+                    "child_reaped": child_reaped,
+                    "detail": detail,
+                }
+                if settled:
+                    write_native_guardian_receipt(receipt_dir, nonce, receipt)
+                os._exit(0 if settled else 4)
+            except BaseException:
+                recover_native_guardian_failure(
+                    runner,
+                    name,
+                    nonce,
+                    receipt_dir,
+                    outer_unit,
+                    inner_unit,
+                    custody,
+                )
+                os._exit(0)
+            finally:
+                os.close(stage_pidfd)
+        except BaseException:
+            os._exit(5)
+        os._exit(5)
+
+    os.close(ready_write)
+    os.close(permit_read)
+    guardian_pidfd = None
+    guardian_reaped = False
+    try:
+        guardian_pidfd = os.pidfd_open(guardian_pid)
+        if not select.select([ready_read], [], [], 5)[0]:
+            raise RuntimeError("native guardian did not become ready")
+        ready = json.loads(os.read(ready_read, 4096))
+        if (
+            ready.get("nonce") != nonce
+            or ready.get("pid") != guardian_pid
+            or ready.get("outer_scope") != outer_unit
+            or ready.get("inner_scope") != inner_unit
+            or os.getsid(guardian_pid) == os.getsid(0)
+        ):
+            raise RuntimeError("native guardian identity mismatch")
+        if select.select([guardian_pidfd], [], [], 0)[0]:
+            raise RuntimeError("native guardian exited before permit")
+        print(
+            "AEC_STAGE_GUARDIAN="
+            + json.dumps(
+                {
+                    "case": name,
+                    "nonce": nonce,
+                    "guardian_pid": guardian_pid,
+                    "receipt_dir": str(receipt_dir),
+                    "outer_scope": outer_unit,
+                    "inner_scope": inner_unit,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        os.write(permit_write, b"G")
+        os.close(permit_write)
+        permit_write = -1
+        _, status = os.waitpid(guardian_pid, 0)
+        guardian_reaped = True
+        if status != 0:
+            raise RuntimeError("native guardian did not settle")
+        receipt = json.loads(
+            (receipt_dir / (nonce + ".json")).read_text(encoding="utf-8")
+        )
+        if (
+            receipt.get("nonce") != nonce
+            or receipt.get("test") != name
+            or receipt.get("status") not in ("PASS", "NOT_DONE")
+            or receipt.get("scope_absent") is not True
+            or receipt.get("child_reaped") is not True
+            or receipt.get("pass") is not (receipt.get("status") == "PASS")
+            or not isinstance(receipt.get("detail"), dict)
+        ):
+            raise RuntimeError("native guardian terminal receipt invalid")
+        return bool(receipt["pass"]), {
+            **receipt["detail"],
+            "guardian_status": receipt["status"],
+            "receipt_nonce": nonce,
+        }
+    finally:
+        os.close(ready_read)
+        if permit_write >= 0:
+            os.close(permit_write)
+        if not guardian_reaped and permit_write >= 0:
+            os.waitpid(guardian_pid, 0)
+        if guardian_pidfd is not None:
+            os.close(guardian_pidfd)
+
+
+def main() -> int:
+    if sys.argv[1:] != ["--isolated"]:
+        print("AEC stage requires exactly --isolated", file=sys.stderr)
+        return 2
+    clean_env = {"PATH": "/usr/bin:/bin", "CARGO_BUILD_JOBS": "1"}
+    rows: list[dict[str, object]] = []
+    try:
+        preparation = (
+            ["cargo", "build", "-p", "translator-aec-backend", "--bins"],
+            [
+                "cargo",
+                "test",
+                "-p",
+                "translator-daemon",
+                "--test",
+                "aec_backend_session",
+                "--no-run",
+                "--message-format=json",
+            ],
+        )
+        native_binary: Path | None = None
+        for command in preparation:
+            done = subprocess.run(
+                command,
+                cwd=ROOT,
+                env={**os.environ, "CARGO_BUILD_JOBS": "1"},
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            if done.returncode:
+                raise RuntimeError("prebuild failed: " + " ".join(command))
+            if "--no-run" in command:
+                native_binary = native_test_binary_from_build_output(done.stdout)
+                if not native_binary.is_file() or not os.access(native_binary, os.X_OK):
+                    raise RuntimeError("fresh native test executable unavailable")
+        frozen = frozen_inputs()
+        identity = hashlib.sha256(
+            json.dumps(frozen, sort_keys=True).encode("ascii")
+        ).hexdigest()
+        cases = [
+            ("preflight", ["--preflight-only"]),
+            ("owner-contract", None),
+            ("owner-native", None),
+            ("lifecycle", ["--lifecycle-only"]),
+            (
+                "startup-delay-250",
+                [
+                    "--trial-mode",
+                    "prevalid-once",
+                    "--trial-frames",
+                    "100",
+                    "--fixture-delay-ms",
+                    "250",
+                ],
+            ),
+            (
+                "startup-delay-750",
+                [
+                    "--trial-mode",
+                    "prevalid-once",
+                    "--trial-frames",
+                    "100",
+                    "--fixture-delay-ms",
+                    "750",
+                ],
+            ),
+            ("meta-gap", ["--trial-mode", "meta-gap", "--trial-frames", "100"]),
+            ("far-only", ["--trial-mode", "far-only", "--trial-frames", "4500"]),
+            ("near-only", ["--trial-mode", "near-only", "--trial-frames", "4500"]),
+            (
+                "wrong-reference",
+                ["--trial-mode", "wrong-reference", "--trial-frames", "4500"],
+            ),
+            ("speech-far", ["--trial-mode", "speech-far", "--trial-frames", "4500"]),
+            ("speech-near", ["--trial-mode", "speech-near", "--trial-frames", "4500"]),
+            (
+                "speech-wrong-reference",
+                ["--trial-mode", "speech-wrong-reference", "--trial-frames", "4500"],
+            ),
+            (
+                "mutant:passthrough",
+                [
+                    "--trial-mode",
+                    "far-only",
+                    "--trial-frames",
+                    "4500",
+                    "--scorer-mutant",
+                    "passthrough",
+                ],
+            ),
+            (
+                "mutant:zero-clean",
+                [
+                    "--trial-mode",
+                    "near-only",
+                    "--trial-frames",
+                    "4500",
+                    "--scorer-mutant",
+                    "zero-clean",
+                ],
+            ),
+            *[
+                (f"fault:{name}", ["--fault-mode", name, "--trial-frames", "100"])
+                for name in (
+                    "raw-unlink",
+                    "reference-unlink",
+                    "output-unlink",
+                    "helper-crash",
+                    "server-stop",
+                    "corrupt-ipc",
+                    "queue-overflow",
+                    "clock-reset",
+                    "generation-replacement",
+                    "aec-error",
+                )
+            ],
+        ]
+        for case, arguments in cases:
+            if frozen_inputs() != frozen:
+                raise RuntimeError("frozen artifacts changed before " + case)
+            if case == "owner-native":
+                if native_binary is None:
+                    raise RuntimeError("native test executable identity missing")
+                runner = runpy.run_path(
+                    str(RUNNER), run_name="aec_stage_native_custody"
+                )
+                native_results = []
+                receipt_dir = Path(tempfile.mkdtemp(prefix="translator-aec-native-"))
+                for name in NATIVE_TESTS:
+                    passed_native, detail_native = run_guarded_native_test(
+                        native_binary,
+                        name,
+                        runner,
+                        secrets.token_hex(16),
+                        receipt_dir,
+                    )
+                    native_results.append({"pass": passed_native, **detail_native})
+                    if not passed_native:
+                        break
+                unchanged = frozen_inputs() == frozen
+                passed = len(native_results) == len(NATIVE_TESTS) and all(
+                    item["pass"] for item in native_results
+                )
+                row = {
+                    "case": case,
+                    "pass": passed and unchanged,
+                    "exit": 0 if passed else 2,
+                    "artifact_set": identity,
+                    "frozen_unchanged": unchanged,
+                    "native_tests": native_results,
+                }
+                rows.append(row)
+                print("AEC_STAGE_CASE=" + json.dumps(row, sort_keys=True), flush=True)
+                if not row["pass"]:
+                    break
+                continue
+            if arguments is None:
+                command = [
+                    "cargo",
+                    "test",
+                    "-p",
+                    "translator-daemon",
+                    "--test",
+                    "aec_backend_session",
+                ]
+                if case == "owner-native":
+                    command += ["--", "--ignored"]
+                timeout = 220
+                env = {**os.environ, "CARGO_BUILD_JOBS": "1"}
+            else:
+                command = [str(RUNNER), "--isolated", *arguments]
+                timeout = 190 if case != "lifecycle" else 1500
+                env = clean_env
+            done = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            unchanged = frozen_inputs() == frozen
+            if case == "preflight":
+                try:
+                    facts = json.loads(done.stdout)
+                    passed = (
+                        done.returncode == 0
+                        and facts["isolated"] is True
+                        and facts["host_audio_access"] is False
+                        and facts["host_runtime_access"] is False
+                        and facts["network_access"] is False
+                    )
+                    detail = {"isolation": facts}
+                except (ValueError, KeyError, TypeError):
+                    passed, detail = False, {"reason": "invalid preflight"}
+            elif case in ("owner-contract", "owner-native"):
+                passed = owner_receipt(case, done.returncode, done.stdout)
+                detail = {
+                    "owner_tests": "exact names and count" if passed else "not passed"
+                }
+            else:
+                passed, detail = classify(
+                    case, done.returncode, done.stdout, done.stderr, frozen
+                )
+            row = {
+                "case": case,
+                "pass": passed and unchanged,
+                "exit": done.returncode,
+                "artifact_set": identity,
+                "frozen_unchanged": unchanged,
+                **detail,
+            }
+            rows.append(row)
+            print("AEC_STAGE_CASE=" + json.dumps(row, sort_keys=True), flush=True)
+            if not passed or not unchanged:
+                break
+        completed = len(rows) == len(cases) and all(row["pass"] for row in rows)
+        print(
+            "AEC_STAGE_RESULT="
+            + json.dumps(
+                {
+                    "status": "NONPHYSICAL_STAGE_PASS" if completed else "NOT_DONE",
+                    "aec_proof": False,
+                    "artifact_set": identity,
+                    "artifact_hashes": frozen,
+                    "cases": rows,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if completed else 2
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(
+            "AEC_STAGE_RESULT="
+            + json.dumps(
+                {
+                    "status": "NOT_DONE",
+                    "aec_proof": False,
+                    "cases": rows,
+                    "error": type(error).__name__ + ": " + str(error),
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -9,15 +9,13 @@ use std::{
 };
 
 use rustix::{
-    fs::{
-        AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, openat, renameat_with, statat, unlinkat,
-    },
+    fs::{AtFlags, CWD, FileType, RenameFlags, renameat_with, statat, unlinkat},
     io::Errno,
     net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, connect, socket_with},
 };
 use thiserror::Error;
 
-use crate::ChildState;
+use crate::{ChildState, secure_state::open_directory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum StaleSocketError {
@@ -171,14 +169,7 @@ fn verify_optional(
         .file_name()
         .map(OsString::from)
         .ok_or(StaleSocketError::UnsafeInode)?;
-    let parent_fd = openat(
-        CWD,
-        parent_path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| StaleSocketError::InsecureParent)?;
-    let parent = File::from(parent_fd);
+    let parent = open_directory(CWD, parent_path).map_err(|_| StaleSocketError::InsecureParent)?;
     let parent_metadata = parent
         .metadata()
         .map_err(|_| StaleSocketError::InsecureParent)?;

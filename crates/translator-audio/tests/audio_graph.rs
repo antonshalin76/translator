@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use fs4::FileExt;
+use wait_timeout::ChildExt;
 
 use tempfile::tempdir;
 use translator_audio::{
@@ -15,6 +18,745 @@ use translator_audio::{
 };
 
 const GENERATION: &str = "test-generation-0001";
+const MIC_ARGUMENT: &str = "sink_name=translator_mic_out rate=48000 channels=1 channel_map=mono sink_properties=\"device.description=Translator_Mic_Out translator.owner=true translator.generation=test-generation-0001\"";
+const VIRTUAL_ARGUMENT: &str = "master=translator_mic_out.monitor source_name=translator_virtual_mic channels=1 channel_map=mono remix=no source_properties=\"device.description=Translator_Virtual_Mic translator.owner=true translator.generation=test-generation-0001\"";
+const REMOTE_ARGUMENT: &str = "sink_name=translator_remote_in rate=48000 channels=2 channel_map=front-left,front-right sink_properties=\"device.description=Translator_Remote_In translator.owner=true translator.generation=test-generation-0001\"";
+
+type RecordedGraphCalls = Arc<Mutex<Vec<(Vec<String>, Instant)>>>;
+
+#[derive(Clone)]
+struct DeadlineGraphRunner {
+    calls: RecordedGraphCalls,
+    delay_first: bool,
+}
+
+impl CommandRunner for DeadlineGraphRunner {
+    fn run_until(
+        &self,
+        _: &str,
+        args: &[String],
+        deadline: Instant,
+    ) -> Result<CommandResult, CommandRunError> {
+        let count = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((args.to_vec(), deadline));
+            calls.len()
+        };
+        if count == 1 && self.delay_first {
+            thread::sleep(Duration::from_millis(30));
+        }
+        assert!(args[0] != "load-module" && args[0] != "unload-module");
+        Ok(CommandResult::success(b"[]".to_vec()))
+    }
+}
+
+#[test]
+fn expired_graph_admission_never_initializes_ownership() {
+    let temp = tempdir().unwrap();
+    let parent = temp.path().join("absent");
+    let runner = DeadlineGraphRunner {
+        calls: Arc::default(),
+        delay_first: false,
+    };
+    let mut graph = test_graph(runner.clone(), parent.join("modules.json"));
+    let error = graph.ensure_endpoints_until(Instant::now()).unwrap_err();
+    assert_eq!(error.code(), AudioGraphErrorCode::DeadlineExpired);
+    assert!(!parent.exists());
+    assert!(runner.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn graph_inspection_transports_one_deadline_and_stops_after_expiry() {
+    for delayed in [false, true] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".modules.json.lock"), b"").unwrap();
+        let runner = DeadlineGraphRunner {
+            calls: Arc::default(),
+            delay_first: delayed,
+        };
+        let graph = test_graph(runner.clone(), temp.path().join("modules.json"));
+        let deadline = Instant::now()
+            + if delayed {
+                Duration::from_millis(15)
+            } else {
+                Duration::from_secs(1)
+            };
+        let result = graph.inspect_until(deadline);
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls.iter().all(|(_, observed)| *observed == deadline));
+        if delayed {
+            assert_eq!(
+                result.unwrap_err().code(),
+                AudioGraphErrorCode::DeadlineExpired
+            );
+            assert_eq!(calls.len(), 1);
+        } else {
+            assert_ne!(result.unwrap().health, GraphHealth::Ready);
+            assert_eq!(calls.len(), 2);
+        }
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn expired_graph_cleanup_preserves_ownership_bytes() {
+    let temp = tempdir().unwrap();
+    let journal = temp.path().join("modules.json");
+    write_journal(&journal, [101, 102, 103]);
+    let before = fs::read(&journal).unwrap();
+    let runner = DeadlineGraphRunner {
+        calls: Arc::default(),
+        delay_first: false,
+    };
+    let mut graph = test_graph(runner.clone(), journal.clone());
+    let error = graph.cleanup_owned_until(Instant::now()).unwrap_err();
+    assert_eq!(error.code(), AudioGraphErrorCode::DeadlineExpired);
+    assert_eq!(fs::read(&journal).unwrap(), before);
+    assert!(runner.calls.lock().unwrap().is_empty());
+}
+
+#[derive(Clone)]
+struct LostLoadRunner {
+    loaded_args: Arc<Mutex<Option<Vec<String>>>>,
+    calls: RecordedGraphCalls,
+    return_late_id: bool,
+}
+
+#[derive(Clone)]
+struct GraphInventoryRunner {
+    inventory: Arc<Mutex<String>>,
+    calls: RecordedGraphCalls,
+}
+
+impl CommandRunner for GraphInventoryRunner {
+    fn run_until(
+        &self,
+        program: &str,
+        arguments: &[String],
+        deadline: Instant,
+    ) -> Result<CommandResult, CommandRunError> {
+        assert_eq!(program, "pactl");
+        self.calls
+            .lock()
+            .unwrap()
+            .push((arguments.to_vec(), deadline));
+        match arguments
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["--format=json", "list", "sinks" | "sources"] => success("[]"),
+            ["list", "short", "modules"] => success(&self.inventory.lock().unwrap()),
+            ["unload-module", _] => success(""),
+            _ => panic!("unexpected graph command"),
+        }
+    }
+}
+
+#[test]
+fn duplicate_module_ids_refuse_graph_cleanup_and_preserve_journal_for_recovery() {
+    let temp = tempdir().unwrap();
+    let journal = temp.path().join("translator/modules.json");
+    write_journal(&journal, [101, 102, 103]);
+    let before = fs::read(&journal).unwrap();
+    let healthy = format!(
+        "101\tmodule-null-sink\t{MIC_ARGUMENT}\t\n102\tmodule-remap-source\t{VIRTUAL_ARGUMENT}\t\n103\tmodule-null-sink\t{REMOTE_ARGUMENT}\t\n99\tmodule-null-sink\tsink_name=foreign\t\n"
+    );
+    let runner = GraphInventoryRunner {
+        inventory: Arc::new(Mutex::new(format!(
+            "103\tmodule-null-sink\tsink_name=foreign\t\n{healthy}"
+        ))),
+        calls: Arc::default(),
+    };
+    let mut graph = test_graph(runner.clone(), journal.clone());
+    let failed_deadline = Instant::now() + Duration::from_secs(2);
+    let rejected = graph.cleanup_owned_until(failed_deadline);
+    let failed_calls = std::mem::take(&mut *runner.calls.lock().unwrap());
+    let after_failed = fs::read(&journal).ok();
+    *runner.inventory.lock().unwrap() = healthy;
+    let recovered = graph.cleanup_owned();
+    let recovery_calls = std::mem::take(&mut *runner.calls.lock().unwrap());
+    let again = graph.cleanup_owned();
+    let repeated_calls = std::mem::take(&mut *runner.calls.lock().unwrap());
+    assert!(
+        rejected.is_err(),
+        "duplicate ID authorized effects: {failed_calls:?}"
+    );
+    assert_eq!(
+        rejected.unwrap_err().code(),
+        AudioGraphErrorCode::CleanupFailed
+    );
+    assert_eq!(after_failed.as_deref(), Some(before.as_slice()));
+    assert_eq!(
+        failed_calls,
+        [
+            (args(&["--format=json", "list", "sinks"]), failed_deadline),
+            (args(&["--format=json", "list", "sources"]), failed_deadline),
+            (args(&["list", "short", "modules"]), failed_deadline),
+        ]
+    );
+    assert_eq!(recovered.unwrap(), [103, 102, 101]);
+    assert_eq!(
+        recovery_calls
+            .iter()
+            .filter(|(args, _)| args[0] == "unload-module")
+            .map(|(args, _)| args.clone())
+            .collect::<Vec<_>>(),
+        [
+            args(&["unload-module", "103"]),
+            args(&["unload-module", "102"]),
+            args(&["unload-module", "101"]),
+        ]
+    );
+    assert!(again.unwrap().is_empty());
+    assert!(repeated_calls.is_empty());
+    assert!(!journal.exists());
+}
+
+#[test]
+fn ambiguous_generation_records_preserve_empty_intent_before_healthy_retry() {
+    let cases = [
+        (
+            "wrong_master",
+            "module-remap-source",
+            VIRTUAL_ARGUMENT.replace("master=translator_mic_out.monitor", "master=wrong.monitor"),
+        ),
+        (
+            "wrong_name",
+            "module-null-sink",
+            MIC_ARGUMENT.replace("sink_name=translator_mic_out", "sink_name=foreign"),
+        ),
+        (
+            "wrong_channels",
+            "module-null-sink",
+            MIC_ARGUMENT.replace("channels=1", "channels=2"),
+        ),
+        (
+            "wrong_module",
+            "module-remap-source",
+            MIC_ARGUMENT.to_owned(),
+        ),
+        (
+            "malformed_quote",
+            "module-null-sink",
+            MIC_ARGUMENT.trim_end_matches('"').to_owned(),
+        ),
+        (
+            "duplicate_owner_last_false",
+            "module-null-sink",
+            MIC_ARGUMENT.replace(
+                "translator.owner=true",
+                "translator.owner=true translator.owner=false",
+            ),
+        ),
+        (
+            "duplicate_owner_last_true",
+            "module-null-sink",
+            MIC_ARGUMENT.replace(
+                "translator.owner=true",
+                "translator.owner=false translator.owner=true",
+            ),
+        ),
+        (
+            "duplicate_generation_last_foreign",
+            "module-null-sink",
+            MIC_ARGUMENT.replace(
+                GENERATION,
+                &format!("{GENERATION} translator.generation=foreign"),
+            ),
+        ),
+        (
+            "duplicate_generation_last_own",
+            "module-null-sink",
+            MIC_ARGUMENT.replace(
+                "translator.generation=",
+                "translator.generation=foreign translator.generation=",
+            ),
+        ),
+        (
+            "top_level_markers",
+            "module-null-sink",
+            MIC_ARGUMENT.replace('"', ""),
+        ),
+        (
+            "relocated_markers",
+            "module-null-sink",
+            format!(
+                "sink_name=foreign sink_properties=\"device.description='translator.owner=true translator.generation={GENERATION}'\""
+            ),
+        ),
+        (
+            "reordered",
+            "module-null-sink",
+            MIC_ARGUMENT.replace(
+                "sink_name=translator_mic_out rate=48000",
+                "rate=48000 sink_name=translator_mic_out",
+            ),
+        ),
+        (
+            "alternative_quotes",
+            "module-null-sink",
+            MIC_ARGUMENT.replace('"', "'"),
+        ),
+        (
+            "foreign_description",
+            "module-null-sink",
+            format!("sink_name=foreign sink_properties=\"device.description={GENERATION}\""),
+        ),
+        (
+            "missing_owner",
+            "module-null-sink",
+            MIC_ARGUMENT.replace("translator.owner=true ", ""),
+        ),
+        (
+            "wrong_property_container",
+            "module-null-sink",
+            MIC_ARGUMENT.replace("sink_properties=", "source_properties="),
+        ),
+        (
+            "owner_false",
+            "module-null-sink",
+            MIC_ARGUMENT.replace("translator.owner=true", "translator.owner=false"),
+        ),
+        (
+            "duplicate_top_level",
+            "module-null-sink",
+            MIC_ARGUMENT.replace("channels=1", "channels=1 channels=1"),
+        ),
+        (
+            "generation_prefix_collision",
+            "module-null-sink",
+            MIC_ARGUMENT.replace(GENERATION, &format!("{GENERATION}-foreign")),
+        ),
+        (
+            "trailing_text",
+            "module-null-sink",
+            format!("{MIC_ARGUMENT} ignored"),
+        ),
+    ];
+    let mut violations = Vec::new();
+    for (label, module, argument) in cases {
+        for mixed in [false, true] {
+            let temp = tempdir().unwrap();
+            let journal = temp.path().join("translator/modules.json");
+            write_intent(&journal);
+            let before = fs::read(&journal).unwrap();
+            let canonical = if mixed {
+                format!("71\tmodule-null-sink\t{MIC_ARGUMENT}\t\n")
+            } else {
+                String::new()
+            };
+            let runner = GraphInventoryRunner {
+                inventory: Arc::new(Mutex::new(format!(
+                    "{canonical}70\t{module}\t{argument}\t\n99\tmodule-null-sink\tsink_name=foreign\t\n"
+                ))),
+                calls: Arc::default(),
+            };
+            let mut graph = test_graph(runner.clone(), journal.clone());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let rejected = graph.cleanup_owned_until(deadline);
+            let failed_calls = std::mem::take(&mut *runner.calls.lock().unwrap());
+            let after_failed = fs::read(&journal).ok();
+            *runner.inventory.lock().unwrap() = format!(
+                "70\tmodule-null-sink\t{MIC_ARGUMENT}\t\n99\tmodule-null-sink\tsink_name=foreign\t\n"
+            );
+            let recovered = graph.cleanup_owned();
+            let recovery_calls = std::mem::take(&mut *runner.calls.lock().unwrap());
+            let again = graph.cleanup_owned();
+            let repeated_calls = std::mem::take(&mut *runner.calls.lock().unwrap());
+            for (condition, invariant) in [
+                (
+                    matches!(rejected, Err(error) if error.code() == AudioGraphErrorCode::CleanupFailed),
+                    "typed_refusal",
+                ),
+                (
+                    after_failed.as_deref() == Some(before.as_slice()),
+                    "unchanged_journal",
+                ),
+                (
+                    failed_calls
+                        == [
+                            (args(&["--format=json", "list", "sinks"]), deadline),
+                            (args(&["--format=json", "list", "sources"]), deadline),
+                            (args(&["list", "short", "modules"]), deadline),
+                        ],
+                    "exact_read_only_prefix",
+                ),
+                (
+                    matches!(recovered, Ok(ids) if ids == [70]),
+                    "same_owner_recovery",
+                ),
+                (
+                    recovery_calls
+                        .iter()
+                        .filter(|(args, _)| args[0] == "unload-module")
+                        .map(|(args, _)| args.clone())
+                        .collect::<Vec<_>>()
+                        == [args(&["unload-module", "70"])],
+                    "exact_recovery_unload",
+                ),
+                (
+                    matches!(again, Ok(ids) if ids.is_empty())
+                        && repeated_calls.is_empty()
+                        && !journal.exists(),
+                    "idempotent_completion",
+                ),
+            ] {
+                if !condition {
+                    violations.push(format!("{label}/mixed={mixed}/{invariant}"));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "40 entered cases violated: {violations:?}"
+    );
+}
+
+#[test]
+fn duplicate_canonical_orphans_never_authorize_cleanup() {
+    let temp = tempdir().unwrap();
+    let journal = temp.path().join("translator/modules.json");
+    write_intent(&journal);
+    let before = fs::read(&journal).unwrap();
+    let runner = GraphInventoryRunner {
+        inventory: Arc::new(Mutex::new(format!(
+            "70\tmodule-null-sink\t{MIC_ARGUMENT}\t\n71\tmodule-null-sink\t{MIC_ARGUMENT}\t\n"
+        ))),
+        calls: Arc::default(),
+    };
+    let mut graph = test_graph(runner.clone(), journal.clone());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let result = graph.cleanup_owned_until(deadline);
+    assert!(matches!(result, Err(error) if error.code() == AudioGraphErrorCode::CleanupFailed));
+    assert_eq!(fs::read(&journal).unwrap(), before);
+    assert_eq!(
+        *runner.calls.lock().unwrap(),
+        [
+            (args(&["--format=json", "list", "sinks"]), deadline),
+            (args(&["--format=json", "list", "sources"]), deadline),
+            (args(&["list", "short", "modules"]), deadline),
+        ]
+    );
+}
+
+#[test]
+fn canonical_orphan_cleanup_preserves_foreign_generation_and_ids() {
+    let temp = tempdir().unwrap();
+    let journal = temp.path().join("translator/modules.json");
+    write_intent(&journal);
+    let runner = GraphInventoryRunner {
+        inventory: Arc::new(Mutex::new(format!(
+            "70\tmodule-null-sink\t{MIC_ARGUMENT}\t\n99\tmodule-null-sink\t{}\t\n",
+            MIC_ARGUMENT.replace(GENERATION, "foreign-generation")
+        ))),
+        calls: Arc::default(),
+    };
+    let mut graph = test_graph(runner.clone(), journal.clone());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let result = graph.cleanup_owned_until(deadline);
+    let calls = std::mem::take(&mut *runner.calls.lock().unwrap());
+    assert_eq!(result.unwrap(), [70]);
+    assert_eq!(
+        calls,
+        [
+            (args(&["--format=json", "list", "sinks"]), deadline),
+            (args(&["--format=json", "list", "sources"]), deadline),
+            (args(&["list", "short", "modules"]), deadline),
+            (args(&["list", "short", "modules"]), deadline),
+            (args(&["unload-module", "70"]), deadline),
+        ]
+    );
+    assert!(!journal.exists());
+    assert!(graph.cleanup_owned().unwrap().is_empty());
+    assert!(runner.calls.lock().unwrap().is_empty());
+}
+
+impl CommandRunner for LostLoadRunner {
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        deadline: Instant,
+    ) -> Result<CommandResult, CommandRunError> {
+        assert_eq!(program, "pactl");
+        self.calls.lock().unwrap().push((args.to_vec(), deadline));
+        let args_view: Vec<_> = args.iter().map(String::as_str).collect();
+        let result = match args_view.as_slice() {
+            ["--format=json", "list", "sinks"] => {
+                if self.loaded_args.lock().unwrap().is_some() {
+                    "[{\"index\":11,\"name\":\"translator_mic_out\",\"owner_module\":70}]"
+                        .to_owned()
+                } else {
+                    "[]".to_owned()
+                }
+            }
+            ["--format=json", "list", "sources"] => "[]".to_owned(),
+            ["list", "short", "modules"] => {
+                let args = self.loaded_args.lock().unwrap();
+                let mut modules =
+                    "99\tmodule-null-sink\tsink_name=foreign translator.generation=foreign\t\n"
+                        .to_owned();
+                if let Some(args) = args.as_ref() {
+                    modules.push_str(&format!("70\t{}\t{}\t\n", args[1], args[2..].join(" ")));
+                }
+                modules
+            }
+            ["load-module", ..] => {
+                assert!(
+                    self.loaded_args.lock().unwrap().is_none(),
+                    "second load crossed expired admission"
+                );
+                *self.loaded_args.lock().unwrap() = Some(args.to_vec());
+                thread::sleep(
+                    deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(10),
+                );
+                if !self.return_late_id {
+                    return Err(CommandRunError::DeadlineExpired);
+                }
+                "70\n".to_owned()
+            }
+            ["unload-module", "70"] => {
+                *self.loaded_args.lock().unwrap() = None;
+                String::new()
+            }
+            _ => panic!("unexpected graph effect/read: {args:?}"),
+        };
+        Ok(CommandResult::success(result.into_bytes()))
+    }
+}
+
+#[test]
+fn expired_load_keeps_generation_intent_for_fresh_exact_cleanup() {
+    for return_late_id in [false, true] {
+        let temp = tempdir().unwrap();
+        let journal = temp.path().join("modules.json");
+        let runner = LostLoadRunner {
+            loaded_args: Arc::default(),
+            calls: Arc::default(),
+            return_late_id,
+        };
+        let mut graph = test_graph(runner.clone(), journal.clone());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let result = graph.ensure_endpoints_until(deadline);
+        let failed_calls = runner.calls.lock().unwrap().clone();
+        let intent = fs::read(&journal).ok();
+        let failed_ids = intent.as_ref().map(|_| journal_ids(&journal));
+        let cleanup_deadline = Instant::now() + Duration::from_secs(8);
+        let cleanup = graph.cleanup_owned_until(cleanup_deadline);
+
+        assert_eq!(
+            result.unwrap_err().code(),
+            AudioGraphErrorCode::DeadlineExpired
+        );
+        assert_eq!(
+            failed_calls
+                .iter()
+                .filter(|(args, _)| args[0] == "load-module")
+                .count(),
+            1
+        );
+        assert_eq!(
+            failed_calls
+                .iter()
+                .position(|(args, _)| args[0] == "load-module")
+                .unwrap()
+                + 1,
+            failed_calls.len(),
+            "expired load was followed by another command"
+        );
+        assert!(
+            !failed_calls
+                .iter()
+                .any(|(args, _)| args[0] == "unload-module")
+        );
+        assert!(
+            failed_calls
+                .iter()
+                .all(|(_, observed)| *observed == deadline)
+        );
+        let saved: serde_json::Value = serde_json::from_slice(&intent.unwrap()).unwrap();
+        assert_eq!(saved["generation"], GENERATION);
+        assert_eq!(
+            failed_ids.unwrap(),
+            if return_late_id { vec![70] } else { vec![] }
+        );
+        assert_eq!(cleanup.unwrap(), vec![70]);
+        assert!(!journal.exists());
+        let calls = runner.calls.lock().unwrap();
+        assert!(
+            calls[failed_calls.len()..]
+                .iter()
+                .all(|(_, observed)| *observed == cleanup_deadline)
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(args, _)| args[0] == "unload-module")
+                .count(),
+            1
+        );
+    }
+}
+
+#[derive(Clone, Default)]
+struct InspectionRunner(Arc<Mutex<Vec<Vec<String>>>>);
+
+impl CommandRunner for InspectionRunner {
+    fn run_until(
+        &self,
+        _program: &str,
+        args: &[String],
+        _deadline: std::time::Instant,
+    ) -> Result<CommandResult, CommandRunError> {
+        self.0.lock().unwrap().push(args.to_vec());
+        Ok(CommandResult::success(b"[]".to_vec()))
+    }
+}
+
+#[test]
+fn readonly_inspection_does_not_create_missing_parent() {
+    let temp = tempdir().unwrap();
+    let parent = temp.path().join("missing");
+    let runner = InspectionRunner::default();
+    let result = test_graph(runner.clone(), parent.join("modules.json")).inspect();
+
+    assert!(!parent.exists(), "inspection created ownership directory");
+    assert!(result.is_err(), "missing ownership must be unavailable");
+    assert!(runner.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn readonly_inspection_does_not_create_lock_or_change_parent_mode() {
+    let temp = tempdir().unwrap();
+    let parent = temp.path().join("existing");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o750)).unwrap();
+    let runner = InspectionRunner::default();
+    let result = test_graph(runner.clone(), parent.join("modules.json")).inspect();
+
+    assert_eq!(
+        fs::read_dir(&parent).unwrap().count(),
+        0,
+        "inspection created a lock"
+    );
+    assert_eq!(
+        fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+    assert!(result.is_err());
+    assert!(runner.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn readonly_inspection_preserves_existing_lock_and_directory_modes() {
+    let temp = tempdir().unwrap();
+    let parent = temp.path();
+    let lock = parent.join(".modules.json.lock");
+    fs::write(&lock, b"lock-marker").unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o750)).unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o640)).unwrap();
+    let result = test_graph(InspectionRunner::default(), parent.join("modules.json")).inspect();
+
+    assert_eq!(
+        fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+    assert_eq!(
+        fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(fs::read(&lock).unwrap(), b"lock-marker");
+    assert_eq!(fs::read_dir(parent).unwrap().count(), 1);
+    assert_ne!(result.unwrap().health, GraphHealth::Ready);
+}
+
+#[test]
+fn readonly_inspection_rejects_contended_lock_without_waiting() {
+    let temp = tempdir().unwrap();
+    let lock = fs::File::create(temp.path().join(".modules.json.lock")).unwrap();
+    FileExt::lock(&lock).unwrap();
+    let journal = temp.path().join("modules.json");
+    let runner = InspectionRunner::default();
+    let worker_runner = runner.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(test_graph(worker_runner, journal).inspect())
+            .unwrap();
+    });
+    let early = done_rx.recv_timeout(Duration::from_millis(250));
+    FileExt::unlock(&lock).unwrap();
+    worker.join().unwrap();
+
+    assert!(early.is_ok(), "inspection waited for ownership lock");
+    assert!(
+        early.unwrap().is_err(),
+        "contended ownership must be unavailable"
+    );
+    assert!(runner.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn readonly_inspection_fifo_child() {
+    let Some(path) = std::env::var_os("TRANSLATOR_TEST_INSPECT_FIFO") else {
+        return;
+    };
+    let runner = InspectionRunner::default();
+    let result = test_graph(runner.clone(), PathBuf::from(path)).inspect();
+    assert!(result.is_err());
+    assert!(runner.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn readonly_inspection_rejects_fifo_journal_without_a_writer() {
+    assert_readonly_fifo_rejected("modules.json");
+}
+
+#[test]
+fn readonly_inspection_rejects_fifo_lock_without_a_writer() {
+    assert_readonly_fifo_rejected(".modules.json.lock");
+}
+
+fn assert_readonly_fifo_rejected(target: &str) {
+    let temp = tempdir().unwrap();
+    let journal = temp.path().join("modules.json");
+    if target == "modules.json" {
+        fs::write(temp.path().join(".modules.json.lock"), b"").unwrap();
+    }
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        temp.path().join(target),
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "readonly_inspection_fifo_child", "--nocapture"])
+        .env("TRANSLATOR_TEST_INSPECT_FIFO", &journal)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let started = Instant::now();
+    let result = child.wait_timeout(Duration::from_secs(2));
+    if !matches!(result, Ok(Some(_))) {
+        let _ = child.kill();
+    }
+    let reaped = child.wait();
+
+    assert!(reaped.is_ok(), "fixture child was not reaped");
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(
+        matches!(result, Ok(Some(status)) if status.success()),
+        "{target}: FIFO inspection failed or blocked for {:?}",
+        started.elapsed()
+    );
+}
 
 #[derive(Clone)]
 struct FakeRunner {
@@ -32,7 +774,12 @@ struct BlockingRunner {
 }
 
 impl CommandRunner for BlockingRunner {
-    fn run(&self, _program: &str, _args: &[String]) -> Result<CommandResult, CommandRunError> {
+    fn run_until(
+        &self,
+        _program: &str,
+        _args: &[String],
+        _deadline: std::time::Instant,
+    ) -> Result<CommandResult, CommandRunError> {
         self.started.send(()).unwrap();
         self.release.recv().unwrap();
         Err(CommandRunError::NotFound)
@@ -44,7 +791,12 @@ struct ProbeRunner {
 }
 
 impl CommandRunner for ProbeRunner {
-    fn run(&self, _program: &str, _args: &[String]) -> Result<CommandResult, CommandRunError> {
+    fn run_until(
+        &self,
+        _program: &str,
+        _args: &[String],
+        _deadline: std::time::Instant,
+    ) -> Result<CommandResult, CommandRunError> {
         self.called.send(()).unwrap();
         Err(CommandRunError::NotFound)
     }
@@ -66,7 +818,12 @@ impl FakeRunner {
 }
 
 impl CommandRunner for FakeRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<CommandResult, CommandRunError> {
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        _deadline: std::time::Instant,
+    ) -> Result<CommandResult, CommandRunError> {
         assert_eq!(program, "pactl");
         let expected = self
             .expected
@@ -99,7 +856,12 @@ impl CrashSafeRunner {
 }
 
 impl CommandRunner for CrashSafeRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<CommandResult, CommandRunError> {
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        _deadline: std::time::Instant,
+    ) -> Result<CommandResult, CommandRunError> {
         assert_eq!(program, "pactl");
         let mut call = self.call.lock().unwrap();
         let result = match *call {
@@ -179,76 +941,19 @@ fn list_sources(json: &str) -> ExpectedCommand {
 fn list_modules(entries: &[(u32, &str, &str)]) -> ExpectedCommand {
     let stdout = entries
         .iter()
-        .map(|(id, module, argument)| {
-            let argument = complete_module_contract(argument);
-            format!("{id}\t{module}\t{argument} translator.generation={GENERATION}\t0")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|(id, module, argument)| format!("{id}\t{module}\t{argument}\t\n"))
+        .collect::<String>();
     ExpectedCommand {
         args: args(&["list", "short", "modules"]),
         result: success(&stdout),
     }
 }
 
-fn complete_module_contract(argument: &str) -> String {
-    let mut result = argument.to_owned();
-    let has_token = |expected: &str| argument.split_whitespace().any(|token| token == expected);
-    let required: &[&str] = if has_token("sink_name=translator_mic_out") {
-        &[
-            "rate=48000",
-            "channels=1",
-            "channel_map=mono",
-            "sink_properties=device.description=Translator_Mic_Out",
-        ]
-    } else if has_token("source_name=translator_virtual_mic") {
-        &[
-            "master=translator_mic_out.monitor",
-            "channels=1",
-            "channel_map=mono",
-            "remix=no",
-            "source_properties=device.description=Translator_Virtual_Mic",
-        ]
-    } else if has_token("sink_name=translator_remote_in") {
-        &[
-            "rate=48000",
-            "channels=2",
-            "channel_map=front-left,front-right",
-            "sink_properties=device.description=Translator_Remote_In",
-        ]
-    } else {
-        &[]
-    };
-    for required_argument in required {
-        let key = required_argument.split_once('=').unwrap().0;
-        if !argument
-            .split_whitespace()
-            .any(|token| token.starts_with(&format!("{key}=")))
-        {
-            result.push(' ');
-            result.push_str(required_argument);
-        }
-    }
-    result
-}
-
 fn owned_modules(ids: [u32; 3]) -> ExpectedCommand {
     list_modules(&[
-        (
-            ids[0],
-            "module-null-sink",
-            "sink_name=translator_mic_out translator.owner=true",
-        ),
-        (
-            ids[1],
-            "module-remap-source",
-            "source_name=translator_virtual_mic translator.owner=true",
-        ),
-        (
-            ids[2],
-            "module-null-sink",
-            "sink_name=translator_remote_in translator.owner=true",
-        ),
+        (ids[0], "module-null-sink", MIC_ARGUMENT),
+        (ids[1], "module-remap-source", VIRTUAL_ARGUMENT),
+        (ids[2], "module-null-sink", REMOTE_ARGUMENT),
     ])
 }
 
@@ -262,7 +967,7 @@ fn load_mic_out(module_id: u32) -> ExpectedCommand {
         "channel_map=mono",
     ]);
     command_args.push(format!(
-        "sink_properties=device.description=Translator_Mic_Out translator.owner=true translator.generation={GENERATION}"
+        "sink_properties=\"device.description=Translator_Mic_Out translator.owner=true translator.generation={GENERATION}\""
     ));
     ExpectedCommand {
         args: command_args,
@@ -281,7 +986,7 @@ fn load_virtual_mic(result: Result<CommandResult, CommandRunError>) -> ExpectedC
         "remix=no",
     ]);
     command_args.push(format!(
-        "source_properties=device.description=Translator_Virtual_Mic translator.owner=true translator.generation={GENERATION}"
+        "source_properties=\"device.description=Translator_Virtual_Mic translator.owner=true translator.generation={GENERATION}\""
     ));
     ExpectedCommand {
         args: command_args,
@@ -299,7 +1004,7 @@ fn load_remote_in(module_id: u32) -> ExpectedCommand {
         "channel_map=front-left,front-right",
     ]);
     command_args.push(format!(
-        "sink_properties=device.description=Translator_Remote_In translator.owner=true translator.generation={GENERATION}"
+        "sink_properties=\"device.description=Translator_Remote_In translator.owner=true translator.generation={GENERATION}\""
     ));
     ExpectedCommand {
         args: command_args,
@@ -545,20 +1250,12 @@ fn crash_orphan_is_adopted_from_generation_intent_and_reconciled() {
     let temp = tempdir().unwrap();
     let journal = temp.path().join("translator/modules.json");
     write_intent(&journal);
-    let orphan = list_modules(&[(
-        101,
-        "module-null-sink",
-        "sink_name=translator_mic_out translator.owner=true",
-    )]);
+    let orphan = list_modules(&[(101, "module-null-sink", MIC_ARGUMENT)]);
     let runner = FakeRunner::new(vec![
         list_sinks("[]"),
         list_sources("[]"),
         orphan,
-        list_modules(&[(
-            101,
-            "module-null-sink",
-            "sink_name=translator_mic_out translator.owner=true",
-        )]),
+        list_modules(&[(101, "module-null-sink", MIC_ARGUMENT)]),
         unload(101),
         list_sinks("[]"),
         list_sources("[]"),
@@ -757,18 +1454,10 @@ fn owner_mismatch_never_unloads_foreign_module() {
             (
                 999,
                 "module-null-sink",
-                "sink_name=translator_mic_out translator.owner=false",
+                &MIC_ARGUMENT.replace("translator.owner=true", "translator.owner=false"),
             ),
-            (
-                102,
-                "module-remap-source",
-                "source_name=translator_virtual_mic translator.owner=true",
-            ),
-            (
-                103,
-                "module-null-sink",
-                "sink_name=translator_remote_in translator.owner=true",
-            ),
+            (102, "module-remap-source", VIRTUAL_ARGUMENT),
+            (103, "module-null-sink", REMOTE_ARGUMENT),
         ]),
     ]);
     let mut graph = test_graph(runner.clone(), journal);
@@ -926,35 +1615,15 @@ fn partial_cleanup_keeps_remaining_ids_for_retry() {
         list_sinks("[]"),
         list_sources("[]"),
         list_modules(&[
-            (
-                101,
-                "module-null-sink",
-                "sink_name=translator_mic_out translator.owner=true",
-            ),
-            (
-                102,
-                "module-remap-source",
-                "source_name=translator_virtual_mic translator.owner=true",
-            ),
+            (101, "module-null-sink", MIC_ARGUMENT),
+            (102, "module-remap-source", VIRTUAL_ARGUMENT),
         ]),
         list_modules(&[
-            (
-                101,
-                "module-null-sink",
-                "sink_name=translator_mic_out translator.owner=true",
-            ),
-            (
-                102,
-                "module-remap-source",
-                "source_name=translator_virtual_mic translator.owner=true",
-            ),
+            (101, "module-null-sink", MIC_ARGUMENT),
+            (102, "module-remap-source", VIRTUAL_ARGUMENT),
         ]),
         unload(102),
-        list_modules(&[(
-            101,
-            "module-null-sink",
-            "sink_name=translator_mic_out translator.owner=true",
-        )]),
+        list_modules(&[(101, "module-null-sink", MIC_ARGUMENT)]),
         unload(101),
     ]);
     let mut graph = test_graph(runner.clone(), journal.clone());
@@ -995,13 +1664,9 @@ fn cleanup_refuses_reused_journal_module_ids() {
             (
                 101,
                 "module-null-sink",
-                "sink_name=foreign_sink translator.owner=true",
+                &MIC_ARGUMENT.replace("translator_mic_out", "foreign_sink"),
             ),
-            (
-                102,
-                "module-remap-source",
-                "source_name=translator_virtual_mic translator.owner=true",
-            ),
+            (102, "module-remap-source", VIRTUAL_ARGUMENT),
         ]),
     ]);
     let mut graph = test_graph(runner.clone(), journal.clone());
@@ -1024,35 +1689,15 @@ fn cleanup_treats_missing_module_id_as_already_removed() {
         list_sinks("[]"),
         list_sources("[]"),
         list_modules(&[
-            (
-                101,
-                "module-null-sink",
-                "sink_name=translator_mic_out translator.owner=true",
-            ),
-            (
-                102,
-                "module-remap-source",
-                "source_name=translator_virtual_mic translator.owner=true",
-            ),
+            (101, "module-null-sink", MIC_ARGUMENT),
+            (102, "module-remap-source", VIRTUAL_ARGUMENT),
         ]),
         list_modules(&[
-            (
-                101,
-                "module-null-sink",
-                "sink_name=translator_mic_out translator.owner=true",
-            ),
-            (
-                102,
-                "module-remap-source",
-                "source_name=translator_virtual_mic translator.owner=true",
-            ),
+            (101, "module-null-sink", MIC_ARGUMENT),
+            (102, "module-remap-source", VIRTUAL_ARGUMENT),
         ]),
         unload(102),
-        list_modules(&[(
-            101,
-            "module-null-sink",
-            "sink_name=translator_mic_out translator.owner=true",
-        )]),
+        list_modules(&[(101, "module-null-sink", MIC_ARGUMENT)]),
         unload(101),
     ]);
     let mut graph = test_graph(runner.clone(), journal.clone());
@@ -1072,39 +1717,19 @@ fn cleanup_accepts_missing_middle_module_id() {
     let journal = temp.path().join("translator/modules.json");
     write_journal(&journal, [101, 102, 103]);
     let remaining = list_modules(&[
-        (
-            101,
-            "module-null-sink",
-            "sink_name=translator_mic_out translator.owner=true",
-        ),
-        (
-            103,
-            "module-null-sink",
-            "sink_name=translator_remote_in translator.owner=true",
-        ),
+        (101, "module-null-sink", MIC_ARGUMENT),
+        (103, "module-null-sink", REMOTE_ARGUMENT),
     ]);
     let runner = FakeRunner::new(vec![
         list_sinks("[]"),
         list_sources("[]"),
         remaining,
         list_modules(&[
-            (
-                101,
-                "module-null-sink",
-                "sink_name=translator_mic_out translator.owner=true",
-            ),
-            (
-                103,
-                "module-null-sink",
-                "sink_name=translator_remote_in translator.owner=true",
-            ),
+            (101, "module-null-sink", MIC_ARGUMENT),
+            (103, "module-null-sink", REMOTE_ARGUMENT),
         ]),
         unload(103),
-        list_modules(&[(
-            101,
-            "module-null-sink",
-            "sink_name=translator_mic_out translator.owner=true",
-        )]),
+        list_modules(&[(101, "module-null-sink", MIC_ARGUMENT)]),
         unload(101),
     ]);
     let mut graph = test_graph(runner.clone(), journal.clone());
@@ -1129,7 +1754,10 @@ fn cleanup_rejects_virtual_mic_with_wrong_master() {
         list_modules(&[(
             102,
             "module-remap-source",
-            "master=translator_remote_in.monitor source_name=translator_virtual_mic channels=1 channel_map=mono remix=no translator.owner=true",
+            &VIRTUAL_ARGUMENT.replace(
+                "master=translator_mic_out.monitor",
+                "master=translator_remote_in.monitor",
+            ),
         )]),
     ]);
     let mut graph = test_graph(runner.clone(), journal.clone());
@@ -1144,12 +1772,13 @@ fn cleanup_rejects_virtual_mic_with_wrong_master() {
 }
 
 #[test]
-fn graph_operations_are_serialized_by_the_journal_lock() {
+fn contended_graph_mutation_rejects_without_entering_commands() {
     let temp = tempdir().unwrap();
     let journal = temp.path().join("translator/modules.json");
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (probe_tx, probe_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
 
     let first_journal = journal.clone();
     let first = thread::spawn(move || {
@@ -1168,21 +1797,23 @@ fn graph_operations_are_serialized_by_the_journal_lock() {
 
     let second = thread::spawn(move || {
         let mut graph = test_graph(ProbeRunner { called: probe_tx }, journal);
-        graph.ensure_endpoints()
+        result_tx.send(graph.ensure_endpoints()).unwrap();
     });
-    let early_probe = probe_rx.recv_timeout(Duration::from_millis(150));
+    let early_result = result_rx.recv_timeout(Duration::from_millis(150));
     release_tx.send(()).unwrap();
     let _ = first.join().unwrap();
-    if early_probe.is_err() {
-        probe_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("second operation must continue after lock release");
-    }
-    let _ = second.join().unwrap();
+    second.join().unwrap();
 
+    assert_eq!(
+        early_result
+            .expect("contended mutation must not wait")
+            .unwrap_err()
+            .code(),
+        AudioGraphErrorCode::OwnershipJournalBusy
+    );
     assert!(
-        early_probe.is_err(),
-        "second graph operation entered pactl before the first released ownership"
+        probe_rx.try_recv().is_err(),
+        "contended mutation entered pactl"
     );
 }
 
@@ -1224,18 +1855,13 @@ fn cleanup_rejects_endpoint_argument_prefix_collision() {
             (
                 101,
                 "module-null-sink",
-                "sink_name=translator_mic_out_backup translator.owner=true",
+                &MIC_ARGUMENT.replace(
+                    "sink_name=translator_mic_out",
+                    "sink_name=translator_mic_out_backup",
+                ),
             ),
-            (
-                102,
-                "module-remap-source",
-                "source_name=translator_virtual_mic translator.owner=true",
-            ),
-            (
-                103,
-                "module-null-sink",
-                "sink_name=translator_remote_in translator.owner=true",
-            ),
+            (102, "module-remap-source", VIRTUAL_ARGUMENT),
+            (103, "module-null-sink", REMOTE_ARGUMENT),
         ]),
     ]);
     let mut graph = test_graph(runner.clone(), journal.clone());
@@ -1263,15 +1889,14 @@ fn rollback_rechecks_module_identity_before_unload() {
             result: failure("", "load-marker"),
         },
         list_modules(&[
-            (
-                101,
-                "module-null-sink",
-                "sink_name=translator_mic_out translator.owner=true",
-            ),
+            (101, "module-null-sink", MIC_ARGUMENT),
             (
                 102,
                 "module-remap-source",
-                "source_name=foreign_reused_id translator.owner=true",
+                &VIRTUAL_ARGUMENT.replace(
+                    "source_name=translator_virtual_mic",
+                    "source_name=foreign_reused_id",
+                ),
             ),
         ]),
     ]);

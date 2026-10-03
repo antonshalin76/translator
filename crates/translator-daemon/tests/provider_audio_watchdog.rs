@@ -15,6 +15,119 @@ use uuid::Uuid;
 
 const NS_PER_MS: u64 = 1_000_000;
 
+#[test]
+fn next_phase_deadline_tracks_current_phase_without_polling_or_resetting_it() {
+    let session_id = Uuid::new_v4();
+    let stream_id = Uuid::new_v4();
+    let utterance_id = Uuid::new_v4();
+    let mut watchdog = ProviderAudioWatchdog::new(session_id);
+    assert_eq!(watchdog.next_phase_deadline_ns(), None);
+    watchdog
+        .start_utterance(stream_id, utterance_id, 100 * NS_PER_MS)
+        .unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(12_100 * NS_PER_MS));
+    watchdog
+        .record_end_of_utterance(stream_id, utterance_id, 1_000 * NS_PER_MS)
+        .unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(7_000 * NS_PER_MS));
+    watchdog
+        .record_audio_delta(stream_id, utterance_id, 2_000 * NS_PER_MS)
+        .unwrap();
+    let streaming_deadline = 2_250 * NS_PER_MS;
+    let mut unread = watchdog.clone();
+    for _ in 0..3 {
+        assert_eq!(watchdog.next_phase_deadline_ns(), Some(streaming_deadline));
+    }
+    assert_eq!(
+        watchdog.poll(streaming_deadline),
+        unread.poll(streaming_deadline)
+    );
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(streaming_deadline));
+    assert_eq!(
+        watchdog.poll(streaming_deadline + 1),
+        vec![cancel_action(session_id, stream_id, utterance_id)]
+    );
+    assert_eq!(
+        unread.poll(streaming_deadline + 1),
+        vec![cancel_action(session_id, stream_id, utterance_id)]
+    );
+    let cancel_deadline = streaming_deadline + 1 + CANCEL_FINAL_TIMEOUT.as_nanos() as u64;
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(cancel_deadline));
+    assert!(watchdog.poll(cancel_deadline).is_empty());
+    assert_eq!(
+        watchdog.poll(cancel_deadline + 1),
+        vec![WatchdogAction::CloseProviderSession { session_id }]
+    );
+    let close_deadline = cancel_deadline + 1 + CLOSE_ACK_TIMEOUT.as_nanos() as u64;
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(close_deadline));
+    assert!(watchdog.poll(close_deadline - 1).is_empty());
+    assert_eq!(
+        watchdog.poll(close_deadline),
+        vec![WatchdogAction::RestartSidecar { session_id }]
+    );
+    assert_eq!(watchdog.next_phase_deadline_ns(), None);
+    watchdog.disarm_session();
+    assert_eq!(watchdog.next_phase_deadline_ns(), None);
+}
+
+#[test]
+fn next_phase_deadline_selects_minimum_and_drops_disarmed_or_finished_utterances() {
+    let stream_id = Uuid::new_v4();
+    let earlier = Uuid::new_v4();
+    let later = Uuid::new_v4();
+    let mut watchdog = ProviderAudioWatchdog::new(Uuid::new_v4());
+    watchdog
+        .start_utterance(stream_id, later, 5 * NS_PER_MS)
+        .unwrap();
+    watchdog.start_utterance(stream_id, earlier, 0).unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(12_000 * NS_PER_MS));
+    watchdog.disarm_utterance(stream_id, earlier).unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(12_005 * NS_PER_MS));
+    watchdog
+        .record_end_of_utterance(stream_id, later, 10 * NS_PER_MS)
+        .unwrap();
+    watchdog.record_completed_final(stream_id, later).unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), None);
+    watchdog
+        .start_utterance(stream_id, Uuid::new_v4(), u64::MAX)
+        .unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(u64::MAX));
+    watchdog.disarm_session();
+    assert_eq!(watchdog.next_phase_deadline_ns(), None);
+}
+
+#[test]
+fn coordinator_forwards_current_phase_deadline_and_clears_it_on_session_closed() {
+    let session_id = Uuid::new_v4();
+    let stream_id = Uuid::new_v4();
+    let utterance_id = Uuid::new_v4();
+    let mut coordinator = ProviderStreamCoordinator::new(provider_contract(session_id, stream_id));
+    assert_eq!(coordinator.next_phase_deadline_ns(), None);
+    coordinator.validate_event(&opened(session_id), 0).unwrap();
+    coordinator
+        .start_utterance(stream_id, utterance_id, 0)
+        .unwrap();
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        Some(12_000 * NS_PER_MS)
+    );
+    coordinator
+        .record_end_of_utterance(stream_id, utterance_id, NS_PER_MS)
+        .unwrap();
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        Some(6_001 * NS_PER_MS)
+    );
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        coordinator.watchdog().next_phase_deadline_ns()
+    );
+    coordinator
+        .validate_event(&session_closed(session_id, 2), 2 * NS_PER_MS)
+        .unwrap();
+    assert_eq!(coordinator.next_phase_deadline_ns(), None);
+}
+
 fn cancel_action(session_id: Uuid, stream_id: Uuid, utterance_id: Uuid) -> WatchdogAction {
     WatchdogAction::CancelUtterance {
         session_id,

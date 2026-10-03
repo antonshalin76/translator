@@ -1,0 +1,38 @@
+#!/usr/bin/python3 -I
+"""Run the publication policy behind an isolated, privileged Bash boundary."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+
+def _sanitized_environment() -> dict[str, str]:
+    blocked = {"CDPATH", "ENV", "GLOBIGNORE", "PS4", "SHELLOPTS"}
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in blocked and not name.startswith("BASH_")
+    }
+
+
+def main() -> None:
+    implementation = Path(__file__).resolve().with_suffix(".bash")
+    if not implementation.is_file() or implementation.is_symlink():
+        raise SystemExit(
+            "publication check: trusted Bash implementation is unavailable"
+        )
+    argv = [
+        "/usr/bin/bash",
+        "--noprofile",
+        "--norc",
+        "-p",
+        str(implementation),
+        *sys.argv[1:],
+    ]
+    os.execve(argv[0], argv, _sanitized_environment())
+
+
+if __name__ == "__main__":
+    main()

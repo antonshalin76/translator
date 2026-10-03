@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Iterable
-from contextlib import contextmanager
 import datetime as dt
-import gc
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
-from typing import Any
+from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from jiwer import wer
 
+from translator_sidecar.benchmark import process_run
 from translator_sidecar.benchmark.model_matrix import (
     candidate_by_id,
     candidate_report,
@@ -27,10 +27,10 @@ from translator_sidecar.benchmark.model_matrix import (
     default_tts_candidate_ids,
     registry_report,
 )
+from translator_sidecar.cleanup import finish_cleanup
 from translator_sidecar.local.runtime import build_local_provider
 from translator_sidecar.provider_contract import (
     AudioDirection,
-    CloseProviderSession,
     CloseRequestReason,
     Language,
     OpenProviderSession,
@@ -49,7 +49,6 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
-
 
 _ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_OUTPUT = _ROOT / "docs" / "benchmarks" / "podcast-quality-debug.json"
@@ -91,7 +90,7 @@ class _Collector:
 
 
 def _utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
@@ -99,8 +98,7 @@ def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
         command,
         cwd=cwd,
         check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     if completed.returncode != 0:
@@ -303,25 +301,6 @@ def _safe_wer(reference: str, hypothesis: str) -> float | None:
         return None
 
 
-def _release_provider_models(provider: Any) -> None:
-    asr = getattr(provider, "_asr", None)
-    release = getattr(asr, "release", None)
-    if callable(release):
-        try:
-            release()
-        except Exception:
-            pass
-    translator = getattr(provider, "_translator", None)
-    backend = getattr(translator, "_translator", None)
-    unload_model = getattr(backend, "unload_model", None)
-    if callable(unload_model):
-        try:
-            unload_model()
-        except Exception:
-            pass
-    gc.collect()
-
-
 async def _transcribe_tts_output(
     provider: Any,
     pcm: bytes,
@@ -364,29 +343,31 @@ async def _run_segment(
     started_ns = time.monotonic_ns()
     stream_id = uuid4()
     utterance_id = uuid4()
-    await provider.open_session(request, collector.publish)
-    frames = _frames(pcm)
-    for sequence, frame in enumerate(frames):
-        await provider.submit_frame(
-            ProviderInputFrame(
-                session_id=request.session_id,
-                direction_id=request.direction_id,
-                stream_id=stream_id,
-                utterance_id=utterance_id,
-                sequence=sequence,
-                capture_monotonic_ns=started_ns,
-                sample_rate_hz=_SAMPLE_RATE_HZ,
-                channels=1,
-                sample_format=SampleFormat.S16LE,
-                frame_duration_ms=_FRAME_DURATION_MS,
-                source_language=request.source_language,
-                target_language=request.target_language,
-                mode=mode,
-                pcm=frame,
-                end_of_utterance=sequence == len(frames) - 1,
-            )
-        )
+    reservation = provider.reserve_session(request, collector.publish)
+    operation_error = None
     try:
+        await reservation.open()
+        frames = _frames(pcm)
+        for sequence, frame in enumerate(frames):
+            await provider.submit_frame(
+                ProviderInputFrame(
+                    session_id=request.session_id,
+                    direction_id=request.direction_id,
+                    stream_id=stream_id,
+                    utterance_id=utterance_id,
+                    sequence=sequence,
+                    capture_monotonic_ns=started_ns,
+                    sample_rate_hz=_SAMPLE_RATE_HZ,
+                    channels=1,
+                    sample_format=SampleFormat.S16LE,
+                    frame_duration_ms=_FRAME_DURATION_MS,
+                    source_language=request.source_language,
+                    target_language=request.target_language,
+                    mode=mode,
+                    pcm=frame,
+                    end_of_utterance=sequence == len(frames) - 1,
+                )
+            )
         await provider.wait_idle()
         transcript = _last_event(collector.events, ProviderTranscriptDelta)
         translation = _last_event(collector.events, ProviderTranslationDelta)
@@ -412,9 +393,7 @@ async def _run_segment(
             "frame_count": len(frames),
             "outcome": final.outcome.value if final is not None else None,
             "safe_error_code": error.code.value if error is not None else None,
-            "transcript_chars": (
-                len(transcript.text) if transcript is not None else 0
-            ),
+            "transcript_chars": (len(transcript.text) if transcript is not None else 0),
             "transcript_words": (
                 len(transcript.text.split()) if transcript is not None else 0
             ),
@@ -428,9 +407,7 @@ async def _run_segment(
                 )
             ),
             "audio_output_frames": len(output_pcm) // _FRAME_BYTES,
-            "tts_asr_transcript_chars": (
-                len(synthesized_transcript or "")
-            ),
+            "tts_asr_transcript_chars": (len(synthesized_transcript or "")),
             "tts_asr_wer": synthesized_wer,
             "output_to_source_duration_ratio": (
                 (len(output_pcm) // _FRAME_BYTES * _FRAME_DURATION_MS)
@@ -441,14 +418,20 @@ async def _run_segment(
             ),
             "wall_total_ms": (time.monotonic_ns() - started_ns) // 1_000_000,
         }
+    except BaseException as error:
+        operation_error = error
+        raise
     finally:
-        await provider.close_session(
-            CloseProviderSession(
-                session_id=request.session_id,
-                reason=CloseRequestReason.USER_STOP,
+        try:
+            receipt = await finish_cleanup(
+                reservation.drain(CloseRequestReason.USER_STOP)
             )
-        )
-        await provider.wait_publications(request.session_id)
+            if receipt.delivery_error is not None:
+                raise RuntimeError(receipt.delivery_error.value)
+        except BaseException as cleanup_error:
+            if operation_error is not None:
+                raise operation_error from cleanup_error
+            raise
 
 
 @contextmanager
@@ -507,10 +490,7 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "tts_asr_wer_p50": _percentile(tts_wer, 0.50),
         "tts_asr_wer_p95": _percentile(tts_wer, 0.95),
         "median_output_to_source_duration_ratio": _percentile(
-            [
-                result["output_to_source_duration_ratio"]
-                for result in results
-            ],
+            [result["output_to_source_duration_ratio"] for result in results],
             0.50,
         ),
     }
@@ -522,6 +502,7 @@ async def _run_model(
     *,
     mode: TranslationMode,
     voice_gender: VoiceGender,
+    fatal_cleanup: Callable[[BaseException], NoReturn],
 ) -> dict[str, Any]:
     try:
         candidate = candidate_by_id(model_id, role="asr")
@@ -572,8 +553,10 @@ async def _run_model(
                     )
                 )
     finally:
-        await provider.shutdown()
-        _release_provider_models(provider)
+        try:
+            await provider.shutdown()
+        except BaseException as error:
+            fatal_cleanup(error)
     return {
         "model_id": model_id,
         "asr_model_id": model_id,
@@ -590,18 +573,14 @@ async def _run_model(
 def _parse_model_ids(values: list[str]) -> list[str]:
     model_ids: list[str] = []
     for value in values:
-        model_ids.extend(
-            item.strip() for item in value.split(",") if item.strip()
-        )
+        model_ids.extend(item.strip() for item in value.split(",") if item.strip())
     return model_ids or default_asr_candidate_ids()
 
 
 def _parse_tts_model_ids(values: list[str]) -> list[str]:
     model_ids: list[str] = []
     for value in values:
-        model_ids.extend(
-            item.strip() for item in value.split(",") if item.strip()
-        )
+        model_ids.extend(item.strip() for item in value.split(",") if item.strip())
     return model_ids or default_tts_candidate_ids()
 
 
@@ -650,59 +629,37 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", type=Path, default=_DEFAULT_OUTPUT)
     parser.add_argument("--work-dir", type=Path, default=_DEFAULT_WORK_DIR)
+    parser.add_argument("--model-run-seconds", type=float, default=3600)
+    parser.add_argument("--terminate-grace-seconds", type=float, default=5)
     return parser
 
 
-async def run(args: argparse.Namespace) -> dict[str, Any]:
-    run_dir = args.work_dir / dt.datetime.now(dt.timezone.utc).strftime(
-        "%Y%m%dT%H%M%SZ"
-    )
+def _prepare_request(args: argparse.Namespace) -> dict[str, Any]:
+    run_dir = (
+        args.work_dir / dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    ).resolve()
     run_dir.mkdir(parents=True, exist_ok=False)
-    ru_pcm, ru_source = _load_audio_pcm(
+    _, ru_source = _load_audio_pcm(
         youtube_source=args.ru_youtube,
         audio_path=args.ru_audio,
         start_seconds=args.start_seconds,
         duration_seconds=args.duration_seconds,
         work_dir=run_dir / "ru",
     )
-    en_pcm, en_source = _load_audio_pcm(
+    _, en_source = _load_audio_pcm(
         youtube_source=args.en_youtube,
         audio_path=args.en_audio,
         start_seconds=args.start_seconds,
         duration_seconds=args.duration_seconds,
         work_dir=run_dir / "en",
     )
-    segment_sets = {
-        "ru_to_en": _segments(
-            ru_pcm,
-            segment_ms=args.segment_ms,
-            max_segments=args.max_segments,
-        ),
-        "en_to_ru": _segments(
-            en_pcm,
-            segment_ms=args.segment_ms,
-            max_segments=args.max_segments,
-        ),
-    }
-    if any(not segments for segments in segment_sets.values()):
-        raise PodcastQualityError("one of the podcast inputs produced no segments")
-    mode = TranslationMode(args.mode)
-    voice_gender = VoiceGender(args.voice_gender)
     asr_model_ids = _parse_model_ids(args.asr_model)
     tts_model_ids = _parse_tts_model_ids(args.tts_model)
-    model_reports = []
-    for model_id in asr_model_ids:
-        model_reports.append(
-            await _run_model(
-                model_id,
-                segment_sets,
-                mode=mode,
-                voice_gender=voice_gender,
-            )
-        )
-    report = {
-        "schema_version": "translator.podcast-quality-debug.v1",
-        "generated_at": _utc_now(),
+    return {
+        "pcm_paths": {
+            "ru_to_en": str(run_dir / "ru" / "source.s16le"),
+            "en_to_ru": str(run_dir / "en" / "source.s16le"),
+        },
         "inputs": {
             "ru_to_en": ru_source,
             "en_to_ru": en_source,
@@ -711,26 +668,63 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "work_dir": str(run_dir),
             "selected_tts_models": tts_model_ids,
         },
+        "asr_model_ids": asr_model_ids,
+        "tts_model_ids": tts_model_ids,
+        "mode": TranslationMode(args.mode).value,
+        "voice_gender": VoiceGender(args.voice_gender).value,
+    }
+
+
+async def run(
+    args: argparse.Namespace,
+    *,
+    limits: process_run.RunLimits = process_run.DEFAULT_LIMITS,
+) -> dict[str, Any]:
+    return await process_run.run_benchmark_async(
+        "podcast", _prepare_request(args), args.output, limits=limits
+    )
+
+
+async def _run_owned(
+    request: dict[str, Any], *, fatal_cleanup: Callable[[BaseException], NoReturn]
+) -> dict[str, Any]:
+    inputs = request["inputs"]
+    segment_sets = {
+        direction: _segments(
+            Path(request["pcm_paths"][direction]).read_bytes(),
+            segment_ms=inputs["segment_ms"],
+            max_segments=inputs["max_segments"],
+        )
+        for direction in _DIRECTIONS
+    }
+    if any(not segments for segments in segment_sets.values()):
+        raise PodcastQualityError("one of the podcast inputs produced no segments")
+    mode = TranslationMode(request["mode"])
+    voice_gender = VoiceGender(request["voice_gender"])
+    asr_model_ids = request["asr_model_ids"]
+    model_reports = []
+    for model_id in asr_model_ids:
+        model_reports.append(
+            await _run_model(
+                model_id,
+                segment_sets,
+                mode=mode,
+                voice_gender=voice_gender,
+                fatal_cleanup=fatal_cleanup,
+            )
+        )
+    return {
+        "schema_version": "translator.podcast-quality-debug.v1",
+        "generated_at": _utc_now(),
+        "inputs": inputs,
         "candidate_matrix": {
-            "asr": candidate_report(
-                asr_model_ids,
-                role="asr",
-                include_unknown=True,
-            ),
+            "asr": candidate_report(asr_model_ids, role="asr", include_unknown=True),
             "tts": candidate_report(
-                tts_model_ids,
-                role="tts",
-                include_unknown=True,
+                request["tts_model_ids"], role="tts", include_unknown=True
             ),
         },
         "models": model_reports,
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -739,10 +733,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_candidates:
         print(json.dumps(registry_report(), ensure_ascii=False, indent=2))
         return 0
-    args.work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        report = asyncio.run(run(args))
-    except PodcastQualityError as error:
+        limits = process_run.RunLimits(
+            model_run_seconds=args.model_run_seconds,
+            terminate_grace_seconds=args.terminate_grace_seconds,
+        )
+        report = process_run.run_benchmark(
+            "podcast", _prepare_request(args), args.output, limits=limits
+        )
+    except (PodcastQualityError, process_run.BenchmarkRunError) as error:
         print(f"podcast quality diagnostics failed: {error}", file=sys.stderr)
         return 2
     print(json.dumps(report["models"], ensure_ascii=False, indent=2))

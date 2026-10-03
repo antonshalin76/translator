@@ -21,7 +21,12 @@ impl FakeRunner {
 }
 
 impl CommandRunner for FakeRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<CommandResult, CommandRunError> {
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        _deadline: std::time::Instant,
+    ) -> Result<CommandResult, CommandRunError> {
         assert_eq!(program, "pactl");
         assert_eq!(args, ["--format=json", "list", "sink-inputs"]);
         Ok(self.results.lock().unwrap().pop_front().unwrap())

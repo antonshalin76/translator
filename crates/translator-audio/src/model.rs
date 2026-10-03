@@ -100,6 +100,8 @@ pub enum AudioGraphErrorCode {
     DuplicateEndpoint,
     OwnershipJournalInvalid,
     OwnershipJournalIo,
+    OwnershipJournalBusy,
+    DeadlineExpired,
     CleanupFailed,
     RollbackFailed,
     EndpointVerificationFailed,
@@ -134,6 +136,8 @@ impl AudioGraphError {
             AudioGraphErrorCode::OwnershipJournalIo => {
                 ("Audio ownership journal is unavailable", true)
             }
+            AudioGraphErrorCode::OwnershipJournalBusy => ("Audio ownership journal is busy", true),
+            AudioGraphErrorCode::DeadlineExpired => ("Audio operation deadline expired", true),
             AudioGraphErrorCode::CleanupFailed => ("Virtual audio endpoint cleanup failed", true),
             AudioGraphErrorCode::RollbackFailed => ("Virtual audio endpoint rollback failed", true),
             AudioGraphErrorCode::EndpointVerificationFailed => {
@@ -171,7 +175,26 @@ impl fmt::Display for AudioGraphError {
 impl std::error::Error for AudioGraphError {}
 
 pub trait AudioGraph {
-    fn ensure_endpoints(&mut self) -> Result<AudioGraphState, AudioGraphError>;
-    fn inspect(&self) -> Result<AudioGraphState, AudioGraphError>;
-    fn cleanup_owned(&mut self) -> Result<Vec<u32>, AudioGraphError>;
+    fn ensure_endpoints_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<AudioGraphState, AudioGraphError>;
+    fn inspect_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<AudioGraphState, AudioGraphError>;
+    fn cleanup_owned_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<Vec<u32>, AudioGraphError>;
+
+    fn ensure_endpoints(&mut self) -> Result<AudioGraphState, AudioGraphError> {
+        self.ensure_endpoints_until(std::time::Instant::now() + std::time::Duration::from_secs(8))
+    }
+    fn inspect(&self) -> Result<AudioGraphState, AudioGraphError> {
+        self.inspect_until(std::time::Instant::now() + std::time::Duration::from_secs(2))
+    }
+    fn cleanup_owned(&mut self) -> Result<Vec<u32>, AudioGraphError> {
+        self.cleanup_owned_until(std::time::Instant::now() + std::time::Duration::from_secs(8))
+    }
 }

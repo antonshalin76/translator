@@ -233,6 +233,24 @@ impl ProviderAudioWatchdog {
         self.utterances.len()
     }
 
+    /// Returns the earliest stored deadline for the current phase, without polling.
+    pub fn next_phase_deadline_ns(&self) -> Option<u64> {
+        match self.session_phase {
+            SessionPhase::ClosePending { deadline_ns } => Some(deadline_ns),
+            SessionPhase::Active => self
+                .utterances
+                .values()
+                .map(|watched| match watched.phase {
+                    UtterancePhase::CollectingInput { deadline_ns }
+                    | UtterancePhase::AwaitingFirstAudio { deadline_ns }
+                    | UtterancePhase::StreamingAudio { deadline_ns }
+                    | UtterancePhase::CancelPending { deadline_ns } => deadline_ns,
+                })
+                .min(),
+            SessionPhase::RestartIssued | SessionPhase::Terminal => None,
+        }
+    }
+
     fn check_audio_delta(
         &self,
         stream_id: Uuid,
@@ -684,6 +702,10 @@ impl ProviderStreamCoordinator {
 
     pub fn watchdog(&self) -> &ProviderAudioWatchdog {
         &self.watchdog
+    }
+
+    pub fn next_phase_deadline_ns(&self) -> Option<u64> {
+        self.watchdog.next_phase_deadline_ns()
     }
 }
 

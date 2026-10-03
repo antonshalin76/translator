@@ -1,11 +1,44 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from translator_sidecar.benchmark import asr_quality
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.provider_contract import Language, TranslationMode
+
+
+def test_local_asr_probe_passes_lazy_verified_sources_and_terminally_closes(
+    tmp_path, monkeypatch
+):
+    observed = {}
+    manifest = SimpleNamespace(
+        models={
+            model_id: SimpleNamespace(cache_path=tmp_path, files=[])
+            for model_id in ("faster-whisper-large-v3", "faster-whisper-small")
+        }
+    )
+
+    class Manager:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(asr_quality, "load_manifest", lambda *_args: manifest)
+    monkeypatch.setattr(asr_quality, "AsrModelManager", Manager)
+    probe = asr_quality.FasterWhisperAsrProbe(
+        model_id="faster-whisper-large-v3", device="cuda"
+    )
+    assert observed["model_paths"] == {
+        "large-v3": VerifiedModelSource(manifest, "faster-whisper-large-v3"),
+        "small": VerifiedModelSource(manifest, "faster-whisper-small"),
+    }
+    probe.release()
+    assert observed["closed"] is True
 
 
 class FakeInputIds:

@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import gc
 import os
+from collections.abc import Callable
+from contextlib import ExitStack
+from ctypes import CDLL, POINTER, byref, c_int
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from translator_sidecar.local.asr import (
     AsrModelManager,
     AsrUnavailable,
 )
 from translator_sidecar.local.cuda_runtime import configure_cuda_runtime
+from translator_sidecar.local.hy_mt import HyMtTranslator
 from translator_sidecar.local.inference_scheduler import InferenceScheduler
 from translator_sidecar.local.local_provider import LocalProvider
+from translator_sidecar.local.model_lease import VerifiedModelSource
 from translator_sidecar.local.model_manifest import (
-    ModelManifest,
     load_manifest,
 )
 from translator_sidecar.local.mt import (
+    LocalTranslationCleanupPending,
     LocalTranslationError,
     NllbTranslator,
 )
@@ -35,13 +40,15 @@ from translator_sidecar.provider_contract import (
     VoiceGender,
 )
 
-
 _ASR_MODELS = {
     "faster-whisper-small": "small",
     "faster-whisper-large-v3": "large-v3",
+    "faster-whisper-large-v3-turbo": "large-v3-turbo",
 }
-_DEFAULT_ASR_MODEL_ID = "faster-whisper-small"
+_DEFAULT_ASR_MODEL_ID = "faster-whisper-large-v3-turbo"
+_FALLBACK_ASR_MODEL_ID = "faster-whisper-small"
 _MT_MODEL_ID = "nllb-200-distilled-600m-ct2-int8"
+_HY_MT_MODEL_ID = "hy-mt2-1.8b-gguf-q4-k-m"
 _TTS_MODEL_ID = "piper-medium"
 _MT_SMOKE_CASES = (
     ("Проверка перевода.", Language.RU, Language.EN),
@@ -62,6 +69,10 @@ class _UnavailableAsr:
     resident_model_id = None
 
     @staticmethod
+    def close() -> None:
+        pass
+
+    @staticmethod
     def transcribe(*args: Any, **kwargs: Any) -> str:
         raise AsrUnavailable("local ASR is unavailable")
 
@@ -69,6 +80,10 @@ class _UnavailableAsr:
 class _UnavailableTranslator:
     unavailable = True
     model_state = ModelState.FAILED
+
+    @staticmethod
+    def close() -> None:
+        pass
 
     @staticmethod
     def translate(*args: Any, **kwargs: Any) -> str:
@@ -82,6 +97,10 @@ class _UnavailableTranslator:
 
 class _UnavailableTts:
     unavailable = True
+
+    @staticmethod
+    def close() -> None:
+        pass
 
     @staticmethod
     def model_state(*args: Any, **kwargs: Any) -> ModelState:
@@ -102,46 +121,36 @@ def _cuda_available() -> bool:
         return False
 
 
+def _hy_cuda_available() -> bool:
+    try:
+        driver = CDLL("libcuda.so.1")
+        driver.cuInit.argtypes = [c_int]
+        driver.cuInit.restype = c_int
+        driver.cuDeviceGetCount.argtypes = [POINTER(c_int)]
+        driver.cuDeviceGetCount.restype = c_int
+        count = c_int()
+        return (
+            driver.cuInit(0) == 0
+            and driver.cuDeviceGetCount(byref(count)) == 0
+            and count.value > 0
+        )
+    except (AttributeError, OSError):
+        return False
+
+
 def _default_manifest_path() -> Path:
     return Path(__file__).resolve().parents[3] / "models" / "manifest.json"
 
 
-def _model_directory(manifest: ModelManifest, model_id: str) -> Path:
-    model = manifest.models[model_id]
-    if not model.files:
-        raise ValueError("model has no declared runtime files")
-    for model_file in model.files:
-        manifest.resolve_runtime_file(model_id, model_file.path)
-    return model.cache_path
-
-
-def _primary_model_file(manifest: ModelManifest, model_id: str) -> Path:
-    model = manifest.models[model_id]
-    primary = next(
-        (
-            model_file
-            for model_file in model.files
-            if not model_file.path.endswith(".json")
-        ),
-        None,
-    )
-    if primary is None:
-        raise ValueError("model has no primary runtime file")
-    return model.cache_path / primary.path
-
-
 def _release_translator(translator: NllbTranslator) -> None:
-    backend = getattr(translator, "_translator", None)
-    unload_model = getattr(backend, "unload_model", None)
-    if callable(unload_model):
-        try:
-            unload_model()
-        except Exception:
-            pass
+    try:
+        translator.close()
+    except Exception:
+        raise LocalTranslationCleanupPending(translator) from None
 
 
 def _load_verified_translator(
-    model_path: Path,
+    model_path: VerifiedModelSource,
     *,
     device: str,
 ) -> NllbTranslator:
@@ -170,18 +179,30 @@ def _unavailable_provider(
     *,
     now_ns: Callable[[], int],
     asr_model_id: str,
+    mt_model_id: str = _MT_MODEL_ID,
+    failed_components: dict[str, Any] | None = None,
 ) -> LocalProvider:
+    failed = failed_components or {}
     return LocalProvider(
-        asr=_UnavailableAsr(),
-        translator=_UnavailableTranslator(),
-        tts=_UnavailableTts(),
+        asr=failed.get("asr", _UnavailableAsr()),
+        translator=failed.get("translator", _UnavailableTranslator()),
+        tts=failed.get("tts", _UnavailableTts()),
         scheduler=InferenceScheduler(),
         now_ns=now_ns,
         asr_model_id=asr_model_id,
-        mt_model_id=_MT_MODEL_ID,
+        mt_model_id=mt_model_id,
         tts_model_id=_TTS_MODEL_ID,
         mt_device=ComputeDevice.CPU,
     )
+
+
+def _close_bootstrap_component(
+    name: str, component: Any, failed: dict[str, Any]
+) -> None:
+    try:
+        component.close()
+    except Exception:
+        failed[name] = component
 
 
 def build_unavailable_local_provider(
@@ -192,9 +213,11 @@ def build_unavailable_local_provider(
         "TRANSLATOR_ASR_MODEL_ID",
         _DEFAULT_ASR_MODEL_ID,
     )
+    selected_mt_id = os.environ.get("TRANSLATOR_MT_MODEL_ID", _MT_MODEL_ID)
     return _unavailable_provider(
         now_ns=now_ns,
         asr_model_id=selected_asr_id,
+        mt_model_id=selected_mt_id,
     )
 
 
@@ -209,12 +232,17 @@ def build_local_provider(
         "TRANSLATOR_ASR_MODEL_ID",
         _DEFAULT_ASR_MODEL_ID,
     )
+    selected_mt_id = os.environ.get("TRANSLATOR_MT_MODEL_ID", _MT_MODEL_ID)
     if os.environ.get("TRANSLATOR_LOCAL_RUNTIME_MODE") == "unavailable":
         return build_unavailable_local_provider(now_ns=now_ns)
-    if selected_asr_id not in _ASR_MODELS:
+    if selected_asr_id not in _ASR_MODELS or selected_mt_id not in {
+        _MT_MODEL_ID,
+        _HY_MT_MODEL_ID,
+    }:
         return _unavailable_provider(
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
+            mt_model_id=selected_mt_id,
         )
 
     path = manifest_path or _default_manifest_path()
@@ -223,85 +251,152 @@ def build_local_provider(
         required_model_ids = (
             selected_asr_id,
             *(
-                (_DEFAULT_ASR_MODEL_ID,)
-                if selected_asr_id != _DEFAULT_ASR_MODEL_ID
+                (_FALLBACK_ASR_MODEL_ID,)
+                if selected_asr_id != _FALLBACK_ASR_MODEL_ID
                 else ()
             ),
-            _MT_MODEL_ID,
+            selected_mt_id,
             *_VOICE_MODELS.values(),
         )
-        model_directories = {
-            model_id: _model_directory(manifest, model_id)
+        for model_id in required_model_ids:
+            if not manifest.models[model_id].files:
+                raise ValueError("model has no declared runtime files")
+        model_sources = {
+            model_id: VerifiedModelSource(manifest, model_id)
             for model_id in required_model_ids
         }
         voice_paths = {
-            profile: _primary_model_file(manifest, model_id)
+            profile: model_sources[model_id]
             for profile, model_id in _VOICE_MODELS.items()
         }
     except Exception:
         return _unavailable_provider(
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
+            mt_model_id=selected_mt_id,
         )
 
     asr_device = "cuda" if _cuda_available() else "cpu"
-    mt_device = asr_device
-    try:
-        translator = _load_verified_translator(
-            model_directories[_MT_MODEL_ID],
-            device=mt_device,
-        )
-    except Exception:
+    mt_device = (
+        ("cuda" if _hy_cuda_available() else "cpu")
+        if selected_mt_id == _HY_MT_MODEL_ID
+        else asr_device
+    )
+    if selected_mt_id == _HY_MT_MODEL_ID:
         if mt_device != "cuda":
             return _unavailable_provider(
                 now_ns=now_ns,
                 asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
             )
-        mt_device = "cpu"
         try:
-            translator = _load_verified_translator(
-                model_directories[_MT_MODEL_ID],
-                device=mt_device,
+            translator = HyMtTranslator.load(model_sources[selected_mt_id])
+        except LocalTranslationCleanupPending as error:
+            return _unavailable_provider(
+                now_ns=now_ns,
+                asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
+                failed_components={"translator": error.translator},
             )
         except Exception:
             return _unavailable_provider(
                 now_ns=now_ns,
                 asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
             )
+    else:
+        try:
+            translator = _load_verified_translator(
+                model_sources[_MT_MODEL_ID],
+                device=mt_device,
+            )
+        except LocalTranslationCleanupPending as error:
+            return _unavailable_provider(
+                now_ns=now_ns,
+                asr_model_id=selected_asr_id,
+                mt_model_id=selected_mt_id,
+                failed_components={"translator": error.translator},
+            )
+        except Exception:
+            if mt_device != "cuda":
+                return _unavailable_provider(
+                    now_ns=now_ns,
+                    asr_model_id=selected_asr_id,
+                    mt_model_id=selected_mt_id,
+                )
+            mt_device = "cpu"
+            try:
+                translator = _load_verified_translator(
+                    model_sources[_MT_MODEL_ID],
+                    device=mt_device,
+                )
+            except LocalTranslationCleanupPending as error:
+                return _unavailable_provider(
+                    now_ns=now_ns,
+                    asr_model_id=selected_asr_id,
+                    mt_model_id=selected_mt_id,
+                    failed_components={"translator": error.translator},
+                )
+            except Exception:
+                return _unavailable_provider(
+                    now_ns=now_ns,
+                    asr_model_id=selected_asr_id,
+                    mt_model_id=selected_mt_id,
+                )
 
+    resources = ExitStack()
+    failed: dict[str, Any] = {}
+    resources.callback(_close_bootstrap_component, "translator", translator, failed)
     try:
-        selected_key = _ASR_MODELS[selected_asr_id]
+        requested_key = _ASR_MODELS[selected_asr_id]
+        selected_key = requested_key if asr_device == "cuda" else "small"
+        source_id = (
+            selected_asr_id if selected_key != "small" else _FALLBACK_ASR_MODEL_ID
+        )
         asr_paths = {
-            selected_key: model_directories[selected_asr_id],
+            selected_key: model_sources[source_id],
         }
-        if selected_key == "large-v3":
-            asr_paths["small"] = model_directories[_DEFAULT_ASR_MODEL_ID]
+        if selected_key != "small":
+            asr_paths["small"] = model_sources[_FALLBACK_ASR_MODEL_ID]
         asr = AsrModelManager(
             selected_id=selected_key,
             model_paths=asr_paths,
             device=asr_device,
         )
+        resources.callback(_close_bootstrap_component, "asr", asr, failed)
         prepare_asr = getattr(asr, "prepare", None)
         if prepare_asr is not None:
             prepare_asr()
         registry = PiperVoiceRegistry(voice_paths)
+        try:
+            tts = PiperTts(registry)
+        except BaseException:
+            registry.close()
+            raise
+        resources.callback(_close_bootstrap_component, "tts", tts, failed)
         prepare_tts = getattr(registry, "prepare", None)
         if prepare_tts is not None:
             prepare_tts()
-        tts = PiperTts(registry)
-        return LocalProvider(
+        provider = LocalProvider(
             asr=asr,
             translator=translator,
             tts=tts,
             scheduler=InferenceScheduler(),
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
-            mt_model_id=_MT_MODEL_ID,
+            mt_model_id=selected_mt_id,
             tts_model_id=_TTS_MODEL_ID,
             mt_device=ComputeDevice(mt_device),
         )
+        resources.pop_all()
+        return provider
     except Exception:
+        resources.close()
         return _unavailable_provider(
             now_ns=now_ns,
             asr_model_id=selected_asr_id,
+            mt_model_id=selected_mt_id,
+            failed_components=failed,
         )
+    finally:
+        resources.close()

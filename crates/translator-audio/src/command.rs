@@ -53,39 +53,93 @@ pub enum CommandRunError {
     NotFound,
     SpawnFailed,
     TimedOut,
+    DeadlineExpired,
 }
 
 pub trait CommandRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<CommandResult, CommandRunError>;
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        deadline: Instant,
+    ) -> Result<CommandResult, CommandRunError>;
+
+    fn run(&self, program: &str, args: &[String]) -> Result<CommandResult, CommandRunError> {
+        self.run_until(program, args, Instant::now() + SYSTEM_COMMAND_TIMEOUT)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<CommandResult, CommandRunError> {
+    fn run_until(
+        &self,
+        program: &str,
+        args: &[String],
+        deadline: Instant,
+    ) -> Result<CommandResult, CommandRunError> {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(CommandRunError::DeadlineExpired);
+        }
+        let local_deadline = now + SYSTEM_COMMAND_TIMEOUT;
+        let timeout_error = if deadline <= local_deadline {
+            CommandRunError::DeadlineExpired
+        } else {
+            CommandRunError::TimedOut
+        };
+        let deadline = deadline.min(local_deadline);
         let mut child = Command::new(program)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(map_spawn_error)?;
-        let stdout_reader = read_stream(child.stdout.take().ok_or(CommandRunError::SpawnFailed)?);
-        let stderr_reader = read_stream(child.stderr.take().ok_or(CommandRunError::SpawnFailed)?);
-        let deadline = Instant::now() + SYSTEM_COMMAND_TIMEOUT;
-        let status = match child.wait_timeout(SYSTEM_COMMAND_TIMEOUT) {
-            Ok(Some(status)) => status,
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            terminate_and_reap(&mut child);
+            return Err(CommandRunError::SpawnFailed);
+        };
+        let stdout_reader = match read_stream(stdout) {
+            Ok(reader) => reader,
+            Err(error) => {
+                terminate_and_reap(&mut child);
+                return Err(error);
+            }
+        };
+        let stderr_reader = match read_stream(stderr) {
+            Ok(reader) => reader,
+            Err(error) => {
+                terminate_and_reap(&mut child);
+                let _ = stdout_reader.1.join();
+                return Err(error);
+            }
+        };
+        let status = match child.wait_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Some(status)) => Ok(status),
             Ok(None) => {
                 terminate_and_reap(&mut child);
-                return Err(CommandRunError::TimedOut);
+                Err(timeout_error)
             }
             Err(_) => {
                 terminate_and_reap(&mut child);
-                return Err(CommandRunError::SpawnFailed);
+                Err(CommandRunError::SpawnFailed)
             }
         };
-        let stdout = receive_stream(&stdout_reader, deadline)?;
-        let stderr = receive_stream(&stderr_reader, deadline)?;
+        let output = status.and_then(|status| {
+            let stdout = receive_stream(&stdout_reader.0, deadline, timeout_error)?;
+            let stderr = receive_stream(&stderr_reader.0, deadline, timeout_error)?;
+            Ok((status, stdout, stderr))
+        });
+        let stdout_join = stdout_reader.1.join();
+        let stderr_join = stderr_reader.1.join();
+        if stdout_join.is_err() || stderr_join.is_err() {
+            return Err(CommandRunError::SpawnFailed);
+        }
+        let (status, stdout, stderr) = output?;
+        if Instant::now() >= deadline {
+            return Err(timeout_error);
+        }
         Ok(CommandResult {
             success: status.success(),
             stdout,
@@ -101,29 +155,38 @@ fn map_spawn_error(error: io::Error) -> CommandRunError {
     }
 }
 
-fn read_stream<R>(mut stream: R) -> Receiver<io::Result<Vec<u8>>>
+type StreamReader = (Receiver<io::Result<Vec<u8>>>, thread::JoinHandle<()>);
+
+fn read_stream<R>(mut stream: R) -> Result<StreamReader, CommandRunError>
 where
     R: Read + Send + 'static,
 {
     let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let mut output = Vec::new();
-        let result = stream.read_to_end(&mut output).map(|_| output);
-        let _ = sender.send(result);
-    });
-    receiver
+    let handle = thread::Builder::new()
+        .name("tr-cmd-reader".to_owned())
+        .spawn(move || {
+            let mut output = Vec::new();
+            let result = stream.read_to_end(&mut output).map(|_| output);
+            let _ = sender.send(result);
+        })
+        .map_err(|_| CommandRunError::SpawnFailed)?;
+    Ok((receiver, handle))
 }
 
 fn receive_stream(
     reader: &Receiver<io::Result<Vec<u8>>>,
     deadline: Instant,
+    timeout_error: CommandRunError,
 ) -> Result<Vec<u8>, CommandRunError> {
     let result = match reader.try_recv() {
         Ok(result) => result,
         Err(TryRecvError::Disconnected) => return Err(CommandRunError::SpawnFailed),
         Err(TryRecvError::Empty) => reader
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| CommandRunError::SpawnFailed)?,
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => timeout_error,
+                mpsc::RecvTimeoutError::Disconnected => CommandRunError::SpawnFailed,
+            })?,
     };
     result.map_err(|_| CommandRunError::SpawnFailed)
 }

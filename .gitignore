@@ -47,6 +47,12 @@ coverage/
 /docs/planning/
 /docs/benchmarks/
 /repo-c4.json
+/.papercuts.jsonl
+/docs/stabilization/c2c_*/graph.json
+/docs/stabilization/c2c_*/packet.json
+/docs/stabilization/c2c_*/run.json
+/docs/stabilization/c2c_*/run.json.lock
+/docs/stabilization/c2c_*/source-*.md
 
 # Local editor and operating-system state
 .idea/

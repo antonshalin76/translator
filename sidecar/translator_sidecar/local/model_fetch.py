@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-import math
 from pathlib import Path
-import re
 from typing import Protocol
 from urllib.error import HTTPError
 from urllib.parse import urljoin
@@ -22,7 +22,6 @@ from translator_sidecar.local.model_manifest import (
     ModelFile,
     ModelManifest,
 )
-
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _CONTENT_LENGTH_RE = re.compile(r"^\d+$")
@@ -73,18 +72,18 @@ class _UrllibResponse:
     def status(self) -> int:
         status = getattr(self._response, "status", None)
         if status is None:
-            status = getattr(self._response, "code")
+            status = self._response.code
         return int(status)
 
     @property
     def headers(self) -> ResponseHeaders:
-        return getattr(self._response, "headers")
+        return self._response.headers
 
     def read(self, size: int) -> bytes:
-        return getattr(self._response, "read")(size)
+        return self._response.read(size)
 
     def close(self) -> None:
-        getattr(self._response, "close")()
+        self._response.close()
 
 
 class UrllibTransport:
@@ -155,7 +154,7 @@ class ModelFetcher:
         resolved: dict[tuple[str, str], Path] = {}
         missing: list[tuple[str, ModelFile]] = []
         for model in self.manifest.models.values():
-            if model.acquisition != "download":
+            if model.acquisition != "download" or not model.auto_fetch:
                 continue
             for model_file in model.files:
                 identity = (model.id, model_file.path)
@@ -175,7 +174,7 @@ class ModelFetcher:
         return tuple(
             resolved[(model.id, model_file.path)]
             for model in self.manifest.models.values()
-            if model.acquisition == "download"
+            if model.acquisition == "download" and model.auto_fetch
             for model_file in model.files
         )
 

@@ -11,8 +11,8 @@ from threading import Event
 from typing import Any
 from uuid import UUID
 
+from translator_sidecar.cleanup import finish_cleanup
 from translator_sidecar.provider_contract import AudioDirection
-
 
 _QUEUED_PER_DIRECTION = 2
 _TTS_BRIDGE_MS = 1200
@@ -33,6 +33,14 @@ class SchedulerStale(RuntimeError):
 
 class SchedulerUnavailable(RuntimeError):
     """Native inference failed without exposing private payloads."""
+
+
+class RequestScopedInferenceError(RuntimeError):
+    """A native request failed without invalidating its resident model."""
+
+
+class SchedulerRequestRejected(RuntimeError):
+    """Sanitized request-scoped native failure."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +71,7 @@ class _Job:
 class _NativeOutcome:
     ok: bool
     value: Any = None
+    request_rejected: bool = False
 
 
 class SchedulerContext:
@@ -102,6 +111,8 @@ class SchedulerContext:
         )
         self.ensure_current()
         if not outcome.ok:
+            if outcome.request_rejected:
+                raise SchedulerRequestRejected("native request was rejected")
             raise SchedulerUnavailable("native inference is unavailable")
         return outcome.value
 
@@ -160,6 +171,8 @@ class SchedulerContext:
     ) -> _NativeOutcome:
         try:
             return _NativeOutcome(ok=True, value=operation())
+        except RequestScopedInferenceError:
+            return _NativeOutcome(ok=False, request_rejected=True)
         except Exception:
             return _NativeOutcome(ok=False)
 
@@ -357,24 +370,20 @@ class InferenceScheduler:
         self._cancel_matching(lambda identity: identity.session_id == session_id)
 
     async def shutdown(self) -> None:
-        if self._shutdown_task is None:
-            self._closed = True
-            self._shutdown_task = asyncio.create_task(self._shutdown_impl())
         shutdown_task = self._shutdown_task
-        cancelled: BaseException | None = None
-        while not shutdown_task.done():
+        self._closed = True
+        if shutdown_task is None or (
+            shutdown_task.done()
+            and (shutdown_task.cancelled() or shutdown_task.exception() is not None)
+        ):
+            coroutine = self._shutdown_impl()
             try:
-                await asyncio.shield(shutdown_task)
-            except BaseException as error:
-                if not isinstance(error, asyncio.CancelledError):
-                    raise
-                cancelled = error
-                current = asyncio.current_task()
-                if current is not None:
-                    current.uncancel()
-        shutdown_task.result()
-        if cancelled is not None:
-            raise cancelled
+                shutdown_task = asyncio.create_task(coroutine)
+            except BaseException:
+                coroutine.close()
+                raise
+            self._shutdown_task = shutdown_task
+        await finish_cleanup(shutdown_task)
 
     async def _shutdown_impl(self) -> None:
         for session_id in tuple(self._sessions):
@@ -386,10 +395,21 @@ class InferenceScheduler:
                 *tuple(self._running_tasks),
                 return_exceptions=True,
             )
-        if self._dispatcher is not None:
-            await self._dispatcher
-        self._gpu_executor.shutdown(wait=True, cancel_futures=True)
-        self._tts_executor.shutdown(wait=True, cancel_futures=True)
+        failed = False
+        dispatcher = self._dispatcher
+        if dispatcher is not None:
+            try:
+                await dispatcher
+            except (Exception, asyncio.CancelledError):
+                failed = True
+            self._dispatcher = None
+        for executor in (self._gpu_executor, self._tts_executor):
+            try:
+                executor.shutdown(wait=True, cancel_futures=True)
+            except Exception:
+                failed = True
+        if failed:
+            raise SchedulerUnavailable("scheduler cleanup is unavailable") from None
 
     @property
     def tracked_session_count(self) -> int:
@@ -449,6 +469,12 @@ class InferenceScheduler:
         except SchedulerStale:
             self._terminalize(job.identity)
             self._set_stale(job.future)
+        except SchedulerRequestRejected:
+            self._terminalize(job.identity)
+            if not job.future.done():
+                job.future.set_exception(
+                    SchedulerRequestRejected("scheduler request rejected")
+                )
         except (SchedulerUnavailable, SchedulerOverflow):
             self._terminalize(job.identity)
             if not job.future.done():

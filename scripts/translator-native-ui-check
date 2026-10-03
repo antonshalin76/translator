@@ -1,0 +1,790 @@
+#!/usr/bin/env python3
+"""Check actual asset-backed Tauri focus/layout and optional preview controls.
+
+Run with Selenium under a private Xvfb/DBus session and a capped user scope.
+The live mode uses an already-running preview daemon; this is not APP-3.
+Tool installation, application builds and audio measurements are separate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import signal
+import socket
+import stat
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from selenium import webdriver
+from selenium.common.exceptions import StaleElementReferenceException
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.utils import is_connectable
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.webkitgtk.options import Options
+
+
+def arguments():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--application", type=Path, required=True)
+    parser.add_argument("--tauri-driver", type=Path, required=True)
+    parser.add_argument("--native-driver", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--build-profile", choices=("debug", "release"), required=True)
+    parser.add_argument("--driver-port", type=int, default=45697)
+    parser.add_argument("--native-port", type=int, default=45698)
+    parser.add_argument("--daemon-port", type=int)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--connected-mix-fixture", action="store_true")
+    modes.add_argument("--live-preview", action="store_true")
+    args = parser.parse_args()
+    if args.daemon_port is None:
+        args.daemon_port = 47682 if args.live_preview else 45699
+    if args.live_preview and args.daemon_port != 47682:
+        parser.error("live-preview requires the existing daemon at 127.0.0.1:47682")
+    ports = (args.driver_port, args.native_port, args.daemon_port)
+    if len(set(ports)) != 3 or any(not 1024 <= port <= 65535 for port in ports):
+        parser.error("three distinct unprivileged ports are required")
+    return args, ports
+
+
+def digest(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def check(name, fn, rows):
+    started = time.monotonic_ns()
+    try:
+        details = fn()
+        rows.append(
+            dict(
+                name=name,
+                status="PASS",
+                details=details,
+                elapsed_ms=(time.monotonic_ns() - started) / 1e6,
+            )
+        )
+    except Exception as error:
+        rows.append(
+            dict(
+                name=name,
+                status="FAIL",
+                error=type(error).__name__,
+                details=getattr(error, "diagnostic", None),
+                elapsed_ms=(time.monotonic_ns() - started) / 1e6,
+            )
+        )
+
+
+class MixFixture:
+    """Private HTTP fixture: no audio, models, processes or daemon forwarding."""
+
+    def __init__(self, port, runtime):
+        self.token = os.urandom(32).hex()
+        token_dir = runtime / "translator"
+        token_dir.mkdir(mode=0o700)
+        (token_dir / "control.token").write_text(self.token, encoding="ascii")
+        self.snapshot = dict(
+            runtime_status="running",
+            translation_running=True,
+            debug_text_enabled=False,
+            debug_capture_enabled=False,
+            provider_id="local",
+            audio_leaves_machine=False,
+            audio_mix=dict(
+                microphone_original_percent=0,
+                microphone_translation_percent=100,
+                speaker_original_percent=0,
+                speaker_translation_percent=100,
+            ),
+            directions=[
+                dict(
+                    direction_id=direction,
+                    source_language=source,
+                    target_language=target,
+                    enabled=True,
+                    runtime_status="running",
+                    voice_profile=dict(language=target, gender="male", engine="piper"),
+                )
+                for direction, source, target in (
+                    ("microphone", "ru", "en"),
+                    ("speaker", "en", "ru"),
+                )
+            ],
+        )
+        self.patches = []
+        self.auth_errors = 0
+        self.patch_entered = threading.Event()
+        self.lock = threading.Lock()
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, status, value):
+                payload = json.dumps(value).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def authenticated(self):
+                if self.headers.get("Authorization") == "Bearer " + fixture.token:
+                    return True
+                with fixture.lock:
+                    fixture.auth_errors += 1
+                self.reply(401, dict(code="invalid_bearer"))
+                return False
+
+            def do_GET(self):
+                if not self.authenticated():
+                    return
+                if self.path == "/v1/status":
+                    with fixture.lock:
+                        snapshot = json.loads(json.dumps(fixture.snapshot))
+                    self.reply(200, snapshot)
+                elif self.path == "/v1/aec-calibration":
+                    self.reply(503, dict(code="aec_calibration_controller_unavailable"))
+                else:
+                    self.reply(404, dict(code="not_found"))
+
+            def do_PATCH(self):
+                if not self.authenticated():
+                    return
+                if self.path != "/v1/audio-mix":
+                    self.reply(404, dict(code="not_found"))
+                    return
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 1024:
+                    self.reply(413, dict(code="body_too_large"))
+                    return
+                patch = json.loads(self.rfile.read(size))
+                patch = {
+                    key: value for key, value in patch.items() if value is not None
+                }
+                if any(
+                    key not in fixture.snapshot["audio_mix"]
+                    or type(value) is not int
+                    or not 0 <= value <= 100
+                    for key, value in patch.items()
+                ):
+                    self.reply(400, dict(code="invalid_audio_mix_volume"))
+                    return
+                with fixture.lock:
+                    fixture.patches.append(patch)
+                fixture.patch_entered.set()
+                if patch.get("microphone_original_percent", 0) > 0:
+                    self.reply(409, dict(code="microphone_original_unavailable"))
+                    return
+                with fixture.lock:
+                    fixture.snapshot["audio_mix"].update(patch)
+                    snapshot = json.loads(json.dumps(fixture.snapshot))
+                self.reply(200, snapshot)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        return not self.thread.is_alive()
+
+
+def connected_mix_checks(browser, wait, fixture, rows):
+    def slider_value(field):
+        return browser.find_element(By.ID, f"audio-mix-{field}").get_attribute("value")
+
+    def change(field, value):
+        return browser.execute_script(
+            "const input=document.getElementById(arguments[0]);input.value=arguments[1];"
+            "input.dispatchEvent(new Event('input',{bubbles:true}));"
+            "input.dispatchEvent(new Event('change',{bubbles:true}));"
+            "return {value:document.getElementById(arguments[0]).value,"
+            "otherDisabled:document.getElementById('audio-mix-speaker_translation_percent').disabled}",
+            f"audio-mix-{field}",
+            str(value),
+        )
+
+    def rejection():
+        wait.until(
+            lambda page: (
+                page.find_element(By.CSS_SELECTOR, ".build-state").text
+                == "Daemon connected"
+            )
+        )
+        pending = change("microphone_original_percent", 100)
+        assert fixture.patch_entered.wait(3)
+        assert pending == dict(value="0", otherDisabled=True)
+        wait.until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, ".warning-error"))
+        )
+        warning = browser.find_element(By.CSS_SELECTOR, ".warning-error").text
+        assert "Оригинал микрофона недоступен" in warning
+        assert "daemon_request_failed" not in warning
+        assert slider_value("microphone_original_percent") == "0"
+        assert browser.find_element(By.ID, "command-translation").text == "Stop"
+        assert fixture.patches == [dict(microphone_original_percent=100)]
+        return dict(acknowledged_original=0, running_preserved=True, mutations=1)
+
+    check("connected_mix_rejection_projection", rejection, rows)
+
+    def accepted_and_stale_poll():
+        # Hold one actual native result at Tauri's debug callback registry. Its
+        # invoke/global descriptors are immutable; no production IPC is changed.
+        browser.execute_script(
+            "const registry=window.__TAURI_INTERNALS__.callbacks;"
+            "const original=registry.set;"
+            "window.__translatorTestPoll={entered:false};"
+            "registry.set=function(id,callback){return original.call(this,id,value=>{"
+            "if(window.__translatorTestPoll.entered||!value?.audio_mix){callback(value);return}"
+            "window.__translatorTestPoll.entered=true;"
+            "registry.set=original;"
+            "window.__translatorTestPoll.release=()=>callback(value)})};"
+            "if(registry.set===original)throw new Error('native_test_seam_unavailable')"
+        )
+        wait.until(
+            lambda page: page.execute_script(
+                "return window.__translatorTestPoll.entered"
+            )
+        )
+        before = len(fixture.patches)
+        change("microphone_translation_percent", 70)
+        wait.until(lambda _: slider_value("microphone_translation_percent") == "70")
+        browser.execute_script("window.__translatorTestPoll.release()")
+        values = browser.execute_async_script(
+            "const done=arguments[arguments.length-1],values=[];"
+            "const timer=setInterval(()=>values.push(document.getElementById('audio-mix-microphone_translation_percent').value),10);"
+            "setTimeout(()=>{clearInterval(timer);done(values)},400)"
+        )
+        assert values and all(value == "70" for value in values)
+        assert len(fixture.patches) == before + 1
+        assert fixture.patches[-1] == dict(microphone_translation_percent=70)
+        assert slider_value("microphone_original_percent") == "0"
+        return dict(
+            acknowledged_translation=70,
+            stale_native_promise_discarded=True,
+            mutations=1,
+        )
+
+    check("connected_mix_acknowledgement_and_stale_poll", accepted_and_stale_poll, rows)
+
+    def calibration_separation():
+        assert not browser.find_elements(By.CSS_SELECTOR, ".warning-error")
+        assert "Контроллер недоступен" in browser.find_element(By.TAG_NAME, "body").text
+        assert fixture.auth_errors == 0
+        return dict(
+            aec_unavailable_not_command_error=True, authentication_enforced=True
+        )
+
+    check("connected_calibration_error_separate", calibration_separation, rows)
+
+
+def preview_guard(runtime, port):
+    if (
+        os.getuid() != 1000
+        or port != 47682
+        or runtime != Path("/run/user/1000/translator-preview")
+        or runtime.resolve(strict=True) != runtime
+    ):
+        raise ValueError("live-preview requires the private user-1000 preview runtime")
+    for directory in (runtime, runtime / "translator"):
+        metadata = directory.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 1000
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise ValueError("live-preview runtime must be owned by user 1000 and mode 0700")
+    metadata = (runtime / "translator/control.token").lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 1000
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise ValueError("live-preview requires the existing owner-only 0600 token")
+    with socket.create_connection(("127.0.0.1", port), timeout=2):
+        pass
+    return dict(
+        endpoint="http://127.0.0.1:47682",
+        runtime=str(runtime),
+        token_mode="0600",
+        token_reader="existing_native_bridge",
+    )
+
+
+def live_preview_checks(browser, runtime, port, packet, rows):
+    wait = WebDriverWait(
+        browser, 10, ignored_exceptions=(StaleElementReferenceException,)
+    )
+
+    def no_error():
+        warnings = browser.find_elements(By.CSS_SELECTOR, ".warning-error")
+        if warnings:
+            error = AssertionError("live-preview command error")
+            error.diagnostic = dict(command_errors=[item.text for item in warnings])
+            raise error
+
+    def command(label, timeout=10, allow_error=False):
+        def acknowledged(page):
+            if not allow_error:
+                no_error()
+            button = page.find_element(By.ID, "command-translation")
+            return (
+                button
+                if button.text == label
+                and button.is_enabled()
+                and page.find_element(By.CSS_SELECTOR, ".build-state").text
+                == "Daemon connected"
+                else False
+            )
+
+        return WebDriverWait(
+            browser, timeout, ignored_exceptions=(StaleElementReferenceException,)
+        ).until(acknowledged)
+
+    def toggle(label, acknowledgement, timeout):
+        preview_guard(runtime, port)
+        button = command(label, allow_error=label == "Stop")
+        button.click()
+        command(acknowledgement, timeout)
+        no_error()
+        return dict(clicked=label, acknowledged=acknowledgement)
+
+    def gain(value):
+        locator = (By.ID, "audio-mix-microphone_original_percent")
+        wait.until(EC.element_to_be_clickable(locator))
+        preview_guard(runtime, port)
+        browser.execute_script(
+            "const input=document.getElementById(arguments[0]);input.value=arguments[1];"
+            "input.dispatchEvent(new Event('input',{bubbles:true}));"
+            "input.dispatchEvent(new Event('change',{bubbles:true}));",
+            locator[1],
+            str(value),
+        )
+
+        def acknowledged(page):
+            no_error()
+            slider = page.find_element(*locator)
+            caption = slider.find_element(By.XPATH, "../div/strong").text
+            return (
+                slider
+                if slider.is_enabled()
+                and slider.get_attribute("value") == str(value)
+                and caption == f"{value}%"
+                else False
+            )
+
+        wait.until(acknowledged)
+        # Observe the next native status poll, without replacing its result.
+        witness = browser.find_element(By.CSS_SELECTOR, ".nav-item")
+        wait.until(EC.staleness_of(witness))
+        wait.until(acknowledged)
+        no_error()
+        return dict(
+            acknowledged_original=value,
+            caption=f"{value}%",
+            next_poll_preserved=True,
+        )
+
+    def connected():
+        details = preview_guard(runtime, port)
+        wait.until(
+            lambda page: page.find_element(By.CSS_SELECTOR, ".build-state").text
+            == "Daemon connected"
+        )
+        no_error()
+        return details
+
+    def baseline():
+        button = wait.until(EC.element_to_be_clickable((By.ID, "command-translation")))
+        if button.text == "Stop":
+            toggle("Stop", "Start", 20)
+        command("Start")
+        gain(0)
+        return dict(acknowledged="Start", acknowledged_original=0)
+
+    def headphones():
+        buttons = browser.find_elements(By.ID, "command-headphones")
+        if not buttons or not buttons[0].is_displayed():
+            return dict(confirmation="not_visible")
+        if buttons[0].text == "Отозвать подтверждение наушников":
+            return dict(confirmation="already_confirmed")
+        button = wait.until(EC.element_to_be_clickable((By.ID, "command-headphones")))
+        assert button.text == "Подтвердить, что подключены наушники"
+        assert "jieli" in button.find_element(By.XPATH, "..").text.casefold()
+        preview_guard(runtime, port)
+        button.click()
+        wait.until(
+            lambda page: page.find_element(By.ID, "command-headphones").text
+            == "Отозвать подтверждение наушников"
+            and page.find_element(By.ID, "command-headphones").is_enabled()
+        )
+        no_error()
+        return dict(confirmation="acknowledged_visible_Jieli_button")
+
+    for name, action in (
+        ("live_preview_connected", connected),
+        ("live_preview_stopped_baseline", baseline),
+        ("live_preview_headphones", headphones),
+        ("live_preview_start_acknowledged", lambda: toggle("Start", "Stop", 145)),
+    ):
+        check(name, action, rows)
+        if rows[-1]["status"] != "PASS":
+            return
+    for value in (35, 100, 0):
+        def raw_gain(value=value):
+            details = gain(value)
+            command("Stop")
+            browser.execute_script(
+                "document.getElementById('audio-mix-microphone_original_percent')"
+                ".scrollIntoView({block:'center'})"
+            )
+            screenshot = packet / f"live-preview-raw-{value}.png"
+            assert browser.save_screenshot(str(screenshot))
+            details["screenshot_sha256"] = digest(screenshot)
+            return details
+
+        check(f"live_preview_raw_gain_{value}", raw_gain, rows)
+        if rows[-1]["status"] != "PASS":
+            break
+    check("live_preview_stop_acknowledged", lambda: toggle("Stop", "Start", 20), rows)
+
+
+def main() -> int:
+    args, PORTS = arguments()
+    PACKET = args.output_dir.resolve()
+    ROOT = args.source_root.resolve(strict=True)
+    APP = args.application.resolve(strict=True)
+    DRIVER = args.tauri_driver.resolve(strict=True)
+    NATIVE = args.native_driver.resolve(strict=True)
+    os.umask(0o077)
+    PACKET.mkdir(mode=0o700, exist_ok=False)
+    runtime = (
+        Path("/run/user/1000/translator-preview")
+        if args.live_preview
+        else PACKET / "runtime"
+    )
+    if not args.live_preview:
+        runtime.mkdir(mode=0o700, exist_ok=False)
+    bindings = {
+        str(path.relative_to(ROOT)): digest(path)
+        for path in (
+            ROOT / "apps/translator-ui/src/main.ts",
+            ROOT / "apps/translator-ui/src/uiModel.ts",
+            ROOT / "apps/translator-ui/src/styles.css",
+            ROOT / "apps/translator-ui/src-tauri/src/main.rs",
+            ROOT / "apps/translator-ui/src-tauri/tauri.conf.json",
+        )
+    }
+    bindings.update(
+        application=digest(APP),
+        driver=digest(DRIVER),
+        native=digest(NATIVE),
+        harness=digest(Path(__file__)),
+    )
+    owned_ports = PORTS[:2] if args.live_preview else PORTS
+    for port in owned_ports:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", port))
+    environment = dict(
+        os.environ,
+        XDG_RUNTIME_DIR=str(runtime),
+        TRANSLATOR_DAEMON_URL=f"http://127.0.0.1:{PORTS[2]}",
+        XDG_CACHE_HOME=str(PACKET / "cache"),
+        XDG_CONFIG_HOME=str(PACKET / "config"),
+        WEBKIT_DISABLE_DMABUF_RENDERER="1",
+        LIBGL_ALWAYS_SOFTWARE="1",
+    )
+    if args.live_preview:
+        for name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ):
+            environment.pop(name, None)
+        environment["NO_PROXY"] = environment["no_proxy"] = "127.0.0.1,localhost,::1"
+    rows = []
+    browser = None
+    cleanup = "COMPLETE"
+    fixture = None
+    with (PACKET / "driver.log").open("xb") as log:
+        process = subprocess.Popen(
+            [
+                str(DRIVER),
+                "--port",
+                str(PORTS[0]),
+                "--native-port",
+                str(PORTS[1]),
+                "--native-driver",
+                str(NATIVE),
+            ],
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            if args.live_preview:
+                preview_guard(runtime, args.daemon_port)
+            WebDriverWait(None, 10).until(
+                lambda _: (
+                    process.poll() is None
+                    and all(is_connectable(port) for port in PORTS[:2])
+                )
+            )
+            options = Options()
+            options.set_capability("browserName", "wry")
+            options.set_capability("tauri:options", {"application": str(APP)})
+            browser = webdriver.Remote(f"http://127.0.0.1:{PORTS[0]}", options=options)
+            wait = WebDriverWait(browser, 10)
+            wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".nav-item")))
+            assert browser.title == "Translator"
+            assert browser.current_url.startswith(
+                ("tauri://", "http://tauri.localhost")
+            )
+            rows.append(
+                dict(
+                    name="native_asset_document", status="PASS", url=browser.current_url
+                )
+            )
+
+            def disconnected():
+                wait.until(
+                    lambda page: (
+                        page.find_element(By.CSS_SELECTOR, ".build-state").text
+                        == "Daemon offline"
+                    )
+                )
+                assert all(
+                    not item.is_enabled()
+                    for item in browser.find_elements(By.CSS_SELECTOR, "select")
+                )
+                starts = [
+                    item
+                    for item in browser.find_elements(By.TAG_NAME, "button")
+                    if item.text == "Начать калибровку"
+                ]
+                assert len(starts) == 1 and not starts[0].is_enabled()
+                return dict(controls_disabled=True, endpoint="isolated_unavailable")
+
+            if not args.live_preview:
+                check("disconnected_fail_closed", disconnected, rows)
+
+            def geometry():
+                results = []
+                for width, height in ((980, 680), (720, 520), (1280, 800)):
+                    browser.set_window_rect(width=width, height=height)
+                    result = browser.execute_script(
+                        "return {width:innerWidth,height:innerHeight,scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth}"
+                    )
+                    assert result["width"] >= 720 and result["height"] >= 480
+                    assert result["scroll"] <= result["client"]
+                    screenshot = PACKET / f"viewport-{width}x{height}.png"
+                    assert browser.save_screenshot(str(screenshot))
+                    results.append(
+                        dict(
+                            requested=[width, height],
+                            observed=result,
+                            screenshot_sha256=digest(screenshot),
+                        )
+                    )
+                return results
+
+            check("native_viewports", geometry, rows)
+
+            def keyboard():
+                witness = []
+
+                def active(stage):
+                    value = browser.execute_script(
+                        'return {tag:document.activeElement.tagName,href:document.activeElement.getAttribute("href"),text:document.activeElement.textContent?.slice(0,80)}'
+                    )
+                    witness.append(dict(stage=stage, **value))
+                    return value["href"]
+
+                # Focus an actual enabled native control, then exercise real keys.
+                # Blurring does not reset WebKit's sequential Tab starting point.
+                browser.execute_script('document.querySelector(".nav-item").focus()')
+                active("before_tab")
+                ActionChains(browser).send_keys(Keys.TAB).perform()
+                focused = browser.switch_to.active_element
+                href = focused.get_attribute("href")
+                after_tab = active("after_tab")
+                if not href or not href.endswith("#routes") or after_tab != "#routes":
+                    error = AssertionError("actual Tab must advance Status to Routes")
+                    error.diagnostic = witness
+                    raise error
+                wait.until(EC.staleness_of(focused))
+                current = active("after_real_poll_replaced_node")
+                if current != "#routes":
+                    error = AssertionError(
+                        "focused Routes must survive actual status polling"
+                    )
+                    error.diagnostic = witness
+                    raise error
+                ActionChains(browser).key_down(Keys.SHIFT).send_keys(Keys.TAB).key_up(
+                    Keys.SHIFT
+                ).perform()
+                if active("after_shift_tab") != "#status":
+                    error = AssertionError(
+                        "actual Shift Tab must return Routes to Status"
+                    )
+                    error.diagnostic = witness
+                    raise error
+                return dict(focus_retained_across_real_poll=True, witness=witness)
+
+            check("keyboard_poll_focus", keyboard, rows)
+
+            def identity_negatives():
+                controls = browser.execute_script(
+                    'return [...document.querySelectorAll("a,button,input,select")].map(item=>item.id)'
+                )
+                assert all(controls) and len(set(controls)) == len(controls)
+
+                def poll():
+                    witness = browser.find_element(By.CSS_SELECTOR, ".nav-item")
+                    wait.until(EC.staleness_of(witness))
+
+                browser.execute_script("document.activeElement.blur()")
+                poll()
+                assert (
+                    browser.execute_script("return document.activeElement.tagName")
+                    == "BODY"
+                )
+                browser.execute_script(
+                    'const item=document.getElementById("nav-status");item.id="retired-test-control";item.focus()'
+                )
+                poll()
+                assert (
+                    browser.execute_script("return document.activeElement.tagName")
+                    == "BODY"
+                )
+                # Ephemeral DOM fault injection, never a forged daemon status.
+                browser.execute_script(
+                    'const item=document.getElementById("cloud-opt-in");item.disabled=false;item.focus()'
+                )
+                poll()
+                assert not browser.find_element(By.ID, "cloud-opt-in").is_enabled()
+                assert (
+                    browser.execute_script("return document.activeElement.id")
+                    != "cloud-opt-in"
+                )
+                return dict(
+                    unique_control_ids=len(controls),
+                    no_focus_not_stolen=True,
+                    retired_identity_not_reassigned=True,
+                    disabled_counterpart_not_focused=True,
+                    scope="ephemeral_native_DOM_faults_not_runtime_admission",
+                )
+
+            if not args.live_preview:
+                check("semantic_focus_identity_negatives", identity_negatives, rows)
+            if args.connected_mix_fixture:
+                fixture = MixFixture(PORTS[2], runtime)
+                connected_mix_checks(browser, wait, fixture, rows)
+            if args.live_preview:
+                live_preview_checks(browser, runtime, PORTS[2], PACKET, rows)
+        except Exception as error:
+            message = (
+                str(getattr(error, "msg", str(error)))
+                .replace(str(ROOT), "<workspace>")
+                .replace(str(DRIVER), "<tauri-driver>")
+                .replace(str(NATIVE), "<native-driver>")
+            )
+            rows.append(
+                dict(
+                    name="native_setup_or_session",
+                    status="FAIL",
+                    error=type(error).__name__,
+                    message=message[:500],
+                )
+            )
+        finally:
+            if fixture is not None and not fixture.close():
+                cleanup = "UNCERTAIN"
+            if browser is not None:
+                try:
+                    browser.quit()
+                except Exception:
+                    cleanup = "UNCERTAIN"
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    cleanup = "UNCERTAIN"
+    try:
+        WebDriverWait(None, 6).until(
+            lambda _: all(not is_connectable(port) for port in owned_ports)
+        )
+        ports_clear = True
+    except Exception:
+        ports_clear = False
+    if not ports_clear:
+        cleanup = "UNCERTAIN"
+    receipt = dict(
+        schema=1,
+        scope="native_asset_live_preview_control"
+        if args.live_preview
+        else (
+            "native_asset_disconnected_and_isolated_mix"
+            if args.connected_mix_fixture
+            else "native_asset_disconnected_diagnostic"
+        ),
+        build_profile=args.build_profile,
+        bindings=bindings,
+        checks=rows,
+        cleanup=cleanup,
+        ports_clear=ports_clear,
+        cleanup_ports=list(owned_ports),
+        release=False,
+        APP_3="NOT_RUN",
+        physical_audio="NOT_RUN",
+    )
+    with (PACKET / "receipt.json").open("x", encoding="utf-8") as output:
+        json.dump(receipt, output, ensure_ascii=False, indent=2)
+    print(
+        json.dumps(
+            dict(
+                checks=[
+                    dict(name=row["name"], status=row["status"], error=row.get("error"))
+                    for row in rows
+                ],
+                cleanup=cleanup,
+                ports_clear=ports_clear,
+                release=False,
+            )
+        )
+    )
+    return (
+        0
+        if cleanup == "COMPLETE" and all(row["status"] == "PASS" for row in rows)
+        else 1
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

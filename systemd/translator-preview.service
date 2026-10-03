@@ -1,0 +1,38 @@
+[Unit]
+Description=Translator private preview (Turbo / Hy-MT2 / Piper)
+After=pipewire.service wireplumber.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
+UnsetEnvironment=GLIBC_TUNABLES GCONV_PATH LOCPATH MALLOC_TRACE
+UnsetEnvironment=LD_ASSUME_KERNEL LD_AUDIT LD_BIND_NOT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT LD_DYNAMIC_WEAK LD_HWCAP_MASK
+UnsetEnvironment=LD_LIBRARY_PATH LD_ORIGIN_PATH LD_POINTER_GUARD LD_PREFER_MAP_32BIT_EXEC LD_PRELOAD LD_PROFILE LD_PROFILE_OUTPUT
+UnsetEnvironment=LD_SHOW_AUXV LD_TRACE_LOADED_OBJECTS LD_TRACE_PRELINKING LD_USE_LOAD_BIAS LD_VERBOSE LD_WARN
+UnsetEnvironment=PYTHONHOME PYTHONPATH PYTHONINSPECT PYTHONSTARTUP PYTHONWARNINGS PYTHONBREAKPOINT BASH_ENV ENV SHELLOPTS
+ExecStart=%h/.local/bin/translator-preview _run-bundle-daemon %E
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=15
+MemoryHigh=6G
+MemoryMax=8G
+MemorySwapMax=256M
+CPUQuota=200%
+TasksMax=256
+RuntimeDirectory=translator-preview
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=translator-preview
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+# User mount namespaces hide host root UID and invalidate trusted CUDA paths.
+# Keep strict application owner checks, private directories and cgroup limits.
+
+[Install]
+WantedBy=default.target

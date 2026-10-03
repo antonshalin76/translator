@@ -4,6 +4,21 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use translator_daemon::{RuntimeLease, SecureRuntimeErrorCode};
 
 #[test]
+fn runtime_ancestor_symlink_is_rejected_before_creating_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    fs::create_dir_all(real.join("session")).unwrap();
+    let link = temp.path().join("alias");
+    symlink(&real, &link).unwrap();
+    let result = RuntimeLease::acquire(&link.join("session"));
+    assert!(
+        result.is_err(),
+        "ancestor symlinks must not acquire runtime state"
+    );
+    assert!(!real.join("session/translator").exists());
+}
+
+#[test]
 fn token_rotates_and_runtime_permissions_are_user_only() {
     let temp = tempfile::tempdir().unwrap();
 

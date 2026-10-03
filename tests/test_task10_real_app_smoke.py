@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
+import os
 import re
 import stat
 import tempfile
 import unittest
-import importlib.machinery
-import importlib.util
 from pathlib import Path
 from typing import Any
-
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK7_REPORT = ROOT / "docs/benchmarks/task7-live-human-round-trip.json"
@@ -26,7 +27,7 @@ def read_json(path: str) -> dict[str, Any]:
 def requires_local_artifacts(*paths: str):
     return unittest.skipUnless(
         all((ROOT / path).exists() for path in paths),
-        "local planning/run evidence is not published",
+        "missing_external_prerequisite:private_human_evidence",
     )
 
 
@@ -84,13 +85,39 @@ class Task10RealAppSmokeTests(unittest.TestCase):
         self.assertNotRegex(script, re.compile(r"\bopenai\b", re.IGNORECASE))
         self.assertNotIn("OPENAI_API_KEY", script)
         self.assertNotRegex(script, re.compile(r"debug[_-]text.*true", re.IGNORECASE))
-        self.assertNotRegex(script, re.compile(r"debug[_-]capture.*true", re.IGNORECASE))
+        self.assertNotRegex(
+            script, re.compile(r"debug[_-]capture.*true", re.IGNORECASE)
+        )
+        self.assertNotRegex(script, re.compile(r"/" r"home/[^/]+/"))
+
+    def test_repo_c4_scan_requires_explicit_portable_tool_paths(self) -> None:
+        smoke = load_smoke_module()
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRANSLATOR_REPO_C4_GENERATOR": "",
+                "TRANSLATOR_REPO_C4_VALIDATOR": "",
+            },
+        ):
+            status = smoke.repo_c4_status(run_scan=True)
+
+        self.assertEqual(
+            status,
+            {
+                "result": "unavailable",
+                "safe_error": "repo_c4_tools_not_configured",
+                "required_at_task_close": True,
+            },
+        )
 
     @requires_local_artifacts("docs/benchmarks/task10-validation-report.json")
     def test_task10_reports_exist_and_record_live_acceptance_completion(self) -> None:
         validation = read_json("docs/benchmarks/task10-validation-report.json")
 
-        self.assertEqual(validation["schema_version"], "translator.task10-validation.v1")
+        self.assertEqual(
+            validation["schema_version"], "translator.task10-validation.v1"
+        )
         self.assertTrue(validation["completed"])
         self.assertTrue(validation["mvp_a_gate_satisfied"])
         self.assertEqual(
@@ -140,7 +167,9 @@ class Task10RealAppSmokeTests(unittest.TestCase):
         self.assertTrue(telegram["virtual_microphone"]["source_present"])
         self.assertTrue(meet["virtual_microphone"]["source_present"])
         self.assertFalse(telegram["virtual_microphone"]["call_app_selection_confirmed"])
-        self.assertFalse(telegram["virtual_microphone"]["remote_outgoing_translation_confirmed"])
+        self.assertFalse(
+            telegram["virtual_microphone"]["remote_outgoing_translation_confirmed"]
+        )
 
     @requires_local_artifacts(
         "docs/benchmarks/task7-live-human-round-trip.json",
@@ -175,7 +204,9 @@ class Task10RealAppSmokeTests(unittest.TestCase):
                 task7["acceptance"]["blocked_acceptance_item"],
             )
 
-        self.assertEqual(ledger["local_provider_latency_classification"], "fails_usable_limit")
+        self.assertEqual(
+            ledger["local_provider_latency_classification"], "fails_usable_limit"
+        )
         self.assertEqual(
             ledger["physical_mic_onset_to_returned_ru_first_audible_ms"],
             task7["latency_ms"]["physical_mic_onset_to_returned_ru_first_audible"],
@@ -188,7 +219,9 @@ class Task10RealAppSmokeTests(unittest.TestCase):
         "docs/benchmarks/task10-privacy-marker-scan.json",
         "docs/benchmarks/task10-validation-report.json",
     )
-    def test_real_app_smoke_reports_record_blockers_without_spoken_content(self) -> None:
+    def test_real_app_smoke_reports_record_blockers_without_spoken_content(
+        self,
+    ) -> None:
         forbidden_keys = {
             "pcm",
             "pcm_bytes",
@@ -212,7 +245,9 @@ class Task10RealAppSmokeTests(unittest.TestCase):
             self.assertFalse(forbidden_keys.intersection(walk_keys(payload)), path)
             rendered = json.dumps(payload, ensure_ascii=False)
             self.assertNotIn("OPENAI_API_KEY", rendered)
-            self.assertNotRegex(rendered, re.compile(r"\bopenai session\b", re.IGNORECASE))
+            self.assertNotRegex(
+                rendered, re.compile(r"\bopenai session\b", re.IGNORECASE)
+            )
 
         scan = read_json("docs/benchmarks/task10-privacy-marker-scan.json")
         self.assertTrue(scan["report_payload_key_scan"]["passed"])
@@ -288,7 +323,12 @@ class Task10RealAppSmokeTests(unittest.TestCase):
             "stream_id": 42,
             "candidate_app_key": "google_meet_browser",
         }
-        recording = {"provided": True, "status": "present", "bytes": 1, "sha256": "0" * 64}
+        recording = {
+            "provided": True,
+            "status": "present",
+            "bytes": 1,
+            "sha256": "0" * 64,
+        }
         telegram = smoke.app_report(
             "telegram_desktop",
             environment,
@@ -325,7 +365,9 @@ class Task10RealAppSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             output_dir = Path(temp)
-            smoke.write_json(smoke.report_path(output_dir, "telegram_desktop"), telegram)
+            smoke.write_json(
+                smoke.report_path(output_dir, "telegram_desktop"), telegram
+            )
             merged = smoke.merge_existing_app_reports(
                 output_dir,
                 {
@@ -359,7 +401,12 @@ class Task10RealAppSmokeTests(unittest.TestCase):
 
     def test_live_app_report_requires_candidate_for_that_app(self) -> None:
         smoke = load_smoke_module()
-        recording = {"provided": True, "status": "present", "bytes": 1, "sha256": "0" * 64}
+        recording = {
+            "provided": True,
+            "status": "present",
+            "bytes": 1,
+            "sha256": "0" * 64,
+        }
         report = smoke.app_report(
             "google_meet_browser",
             {},
@@ -391,7 +438,12 @@ class Task10RealAppSmokeTests(unittest.TestCase):
 
     def test_live_app_report_requires_manual_route_for_same_candidate(self) -> None:
         smoke = load_smoke_module()
-        recording = {"provided": True, "status": "present", "bytes": 1, "sha256": "0" * 64}
+        recording = {
+            "provided": True,
+            "status": "present",
+            "bytes": 1,
+            "sha256": "0" * 64,
+        }
         report = smoke.app_report(
             "google_meet_browser",
             {},
@@ -424,7 +476,9 @@ class Task10RealAppSmokeTests(unittest.TestCase):
 
         self.assertFalse(report["completed"])
         self.assertEqual(report["route_discovery"]["candidate_count"], 1)
-        self.assertIn("incoming_manual_route_not_bound_to_app_candidate", report["blockers"])
+        self.assertIn(
+            "incoming_manual_route_not_bound_to_app_candidate", report["blockers"]
+        )
 
     def test_merge_rejects_stale_completed_report_without_bound_route(self) -> None:
         smoke = load_smoke_module()
@@ -464,7 +518,10 @@ class Task10RealAppSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             output_dir = Path(temp)
-            smoke.write_json(smoke.report_path(output_dir, "telegram_desktop"), stale_completed_report)
+            smoke.write_json(
+                smoke.report_path(output_dir, "telegram_desktop"),
+                stale_completed_report,
+            )
             merged = smoke.merge_existing_app_reports(
                 output_dir,
                 {
@@ -484,7 +541,9 @@ class Task10RealAppSmokeTests(unittest.TestCase):
         prompts = read("docs/planning/translator-live-duplex-task-prompts.md")
         tasks = read("docs/planning/translator-live-duplex-tasks.md")
 
-        prompt_section = prompts.split("## Task 10 Prompt", 1)[1].split("## Task 11 Prompt", 1)[0]
+        prompt_section = prompts.split("## Task 10 Prompt", 1)[1].split(
+            "## Task 11 Prompt", 1
+        )[0]
         task_section = tasks.split("## Task 10.", 1)[1].split("## Task 11.", 1)[0]
 
         self.assertNotIn("- [x] Completed", prompt_section)

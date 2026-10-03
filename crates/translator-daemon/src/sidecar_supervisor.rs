@@ -43,6 +43,12 @@ pub enum CloseOutcome {
     GenerationRestarted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationRetirement {
+    pub generation_id: Uuid,
+    pub old_generation_reaped: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SupervisorError {
     #[error("sidecar is not ready")]
@@ -57,6 +63,8 @@ pub enum SupervisorError {
     ReadinessFailed,
     #[error("sidecar generation did not match")]
     GenerationMismatch,
+    #[error("sidecar generation retirement is not acknowledged")]
+    GenerationRetirementPending,
     #[error("sidecar process could not be killed and reaped")]
     KillAndReapFailed,
     #[error("stale sidecar socket cleanup failed")]
@@ -101,6 +109,8 @@ impl SidecarStatus {
 pub struct SidecarSupervisor<R> {
     runtime: R,
     launch: Option<SidecarLaunch>,
+    retirement: Option<GenerationRetirement>,
+    generation_ready: bool,
     active_sessions: Vec<Uuid>,
     status: SidecarStatus,
 }
@@ -118,12 +128,21 @@ impl<R: SidecarRuntime> SidecarSupervisor<R> {
         Self {
             runtime,
             launch: None,
+            retirement: None,
+            generation_ready: false,
             active_sessions: Vec::new(),
             status: SidecarStatus::default(),
         }
     }
 
     pub async fn start(&mut self) -> Result<(), SupervisorError> {
+        if self.retirement.is_some() {
+            return Err(SupervisorError::GenerationRetirementPending);
+        }
+        self.start_generation().await
+    }
+
+    async fn start_generation(&mut self) -> Result<(), SupervisorError> {
         self.set_unready();
         if self.launch.is_none() {
             self.launch = Some(new_launch()?);
@@ -149,7 +168,8 @@ impl<R: SidecarRuntime> SidecarSupervisor<R> {
                     };
                     match result {
                         Ok(()) => {
-                            self.status.ready.store(true, Ordering::Release);
+                            self.generation_ready = true;
+                            self.publish_readiness();
                             return Ok(());
                         }
                         Err(error) => {
@@ -185,6 +205,9 @@ impl<R: SidecarRuntime> SidecarSupervisor<R> {
     }
 
     pub fn register_session(&mut self, session_id: Uuid) -> Result<(), SupervisorError> {
+        if self.retirement.is_some() {
+            return Err(SupervisorError::GenerationRetirementPending);
+        }
         if !self.is_ready() {
             return Err(SupervisorError::NotReady);
         }
@@ -229,11 +252,48 @@ impl<R: SidecarRuntime> SidecarSupervisor<R> {
             return Ok(CloseOutcome::Acknowledged);
         }
 
+        self.restart_generation().await?;
+        Ok(CloseOutcome::GenerationRestarted)
+    }
+
+    pub async fn restart_generation(&mut self) -> Result<(), SupervisorError> {
+        if self.retirement.is_some() {
+            return Err(SupervisorError::GenerationRetirementPending);
+        }
+        let generation_id = self
+            .launch
+            .as_ref()
+            .ok_or(SupervisorError::NotReady)?
+            .generation_id;
+        self.retirement = Some(GenerationRetirement {
+            generation_id,
+            old_generation_reaped: false,
+        });
         self.set_unready();
         self.reap_and_cleanup().await?;
         self.launch = Some(new_launch()?);
-        self.start().await?;
-        Ok(CloseOutcome::GenerationRestarted)
+        self.start_generation().await
+    }
+
+    pub fn generation_retirement(&self, expected_generation: Uuid) -> Option<GenerationRetirement> {
+        self.retirement
+            .filter(|receipt| receipt.generation_id == expected_generation)
+    }
+
+    pub fn acknowledge_generation_retirement(
+        &mut self,
+        expected_generation: Uuid,
+    ) -> Result<(), SupervisorError> {
+        let receipt = self
+            .generation_retirement(expected_generation)
+            .ok_or(SupervisorError::GenerationMismatch)?;
+        if !receipt.old_generation_reaped {
+            return Err(SupervisorError::GenerationRetirementPending);
+        }
+        self.retirement = None;
+        self.refresh_liveness();
+        self.publish_readiness();
+        Ok(())
     }
 
     pub async fn shutdown(&mut self) -> Result<(), SupervisorError> {
@@ -260,6 +320,12 @@ impl<R: SidecarRuntime> SidecarSupervisor<R> {
         if child_state != ChildState::Reaped {
             return Err(SupervisorError::KillAndReapFailed);
         }
+        if let Some(receipt) = self.retirement.as_mut()
+            && self.launch.as_ref().map(|launch| launch.generation_id)
+                == Some(receipt.generation_id)
+        {
+            receipt.old_generation_reaped = true;
+        }
         self.runtime
             .remove_stale_socket(child_state)
             .await
@@ -267,15 +333,23 @@ impl<R: SidecarRuntime> SidecarSupervisor<R> {
     }
 
     fn set_unready(&mut self) {
-        self.status.ready.store(false, Ordering::Release);
+        self.generation_ready = false;
+        self.publish_readiness();
         self.active_sessions.clear();
         self.sync_active_count();
     }
 
     fn refresh_liveness(&mut self) {
-        if self.status.is_ready() && self.runtime.poll_child_state() != Ok(ChildState::Running) {
+        if self.generation_ready && self.runtime.poll_child_state() != Ok(ChildState::Running) {
             self.set_unready();
         }
+    }
+
+    fn publish_readiness(&self) {
+        self.status.ready.store(
+            self.generation_ready && self.retirement.is_none(),
+            Ordering::Release,
+        );
     }
 
     fn sync_active_count(&self) {

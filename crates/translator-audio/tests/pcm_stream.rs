@@ -1,14 +1,68 @@
 use std::collections::VecDeque;
 
 use translator_audio::{
-    BoundedPcmQueue, CaptureEvent, PcmFrame, PulsePcmCommand, SpeechSegmenter, StreamPcmFormat,
-    VoiceDetector,
+    BoundedPcmQueue, CaptureEvent, PcmFrame, PulsePcmCommand, PulsePcmPlayback, SpeechSegmenter,
+    StreamPcmFormat, VoiceDetector,
 };
 use uuid::Uuid;
 
 #[derive(Default)]
 struct ScriptedDetector {
     decisions: VecDeque<bool>,
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit disposable private PulseAudio socket and virtual fixture sink"]
+async fn private_pulse_production_playback_is_muted_from_first_frame() {
+    let server = std::env::var("PULSE_SERVER").expect("private PULSE_SERVER required");
+    assert!(
+        (server.starts_with("unix:/tmp/translator-loopback-")
+            || server.starts_with("unix:/tmp/translator-handshake-"))
+            && server.ends_with("/native"),
+        "refusing non-fixture PulseAudio server"
+    );
+    let mut playback = PulsePcmPlayback::spawn(&PulsePcmCommand::playback(
+        "translator_mic_out",
+        "translator-outgoing-playback",
+    ))
+    .unwrap();
+    let registration = playback
+        .wait_registered_muted(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .expect("production playback must register muted before its first PCM frame");
+    assert_eq!(registration.device(), "translator_mic_out");
+    assert_eq!(registration.stream_name(), "translator-outgoing-playback");
+    playback.write_frame(&frame(0)).await.unwrap();
+    playback.flush().await.unwrap();
+
+    let observed =
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let output = std::process::Command::new("pactl")
+                    .args(["--format=json", "list", "sink-inputs"])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let streams: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                if let Some(stream) = streams.as_array().unwrap().iter().find(|stream| {
+                    stream["properties"]["media.name"] == "translator-outgoing-playback"
+                }) {
+                    break stream.clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("production playback stream did not appear on private Pulse");
+    assert!(
+        observed["volume"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|channel| channel["value"] == 0),
+        "new production playback must be muted before mix admission"
+    );
+    playback.stop().await.unwrap();
 }
 
 impl ScriptedDetector {
@@ -115,6 +169,7 @@ fn pulse_commands_request_pipewire_resampling_and_mark_owned_streams() {
             .arguments()
             .contains(&"--device=translator_mic_out".to_owned())
     );
+    assert!(playback.arguments().contains(&"--volume=0".to_owned()));
 
     let session_id = Uuid::new_v4();
     let virtual_peer =
@@ -133,6 +188,7 @@ fn pulse_commands_request_pipewire_resampling_and_mark_owned_streams() {
     assert!(virtual_peer.arguments().contains(&format!(
         "--property=translator.self_test_session={session_id}"
     )));
+    assert!(!virtual_peer.arguments().contains(&"--volume=0".to_owned()));
 }
 
 #[test]

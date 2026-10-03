@@ -7,18 +7,18 @@ import hmac
 import os
 import re
 import stat
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol
 from uuid import UUID
 
 import grpc
 
+from .cleanup import finish_cleanup
 from .generated.translator.provider.v1 import provider_pb2, provider_pb2_grpc
 from .local.local_provider import (
-    LocalProvider,
-    LocalProviderPublicationError,
     LocalProviderProtocolError,
+    LocalProviderPublicationError,
 )
 from .provider_contract import (
     AudioDirection,
@@ -52,10 +52,18 @@ from .provider_contract import (
     VoiceGender,
     VoiceProfile,
 )
-from .provider_engine import ProviderEngine, ProviderProtocolError
+from .provider_registry import (
+    ProviderLease,
+    ProviderRegistry,
+    RuntimeProvider,
+    RuntimeSessionReservation,
+    SessionDrainReceipt,
+)
+from .secure_ipc import open_private_directory
 
 AUTH_METADATA_KEY = "authorization"
 CHANNEL_CAPACITY = 64
+SERVER_STOP_GRACE_SECONDS = 0.25
 
 _OPEN_VERSION = "translator.provider.open_session.v1"
 _INPUT_VERSION = "translator.provider.input.v1"
@@ -65,30 +73,11 @@ _DEBUG_VERSION = "translator.provider.update_debug_text.v1"
 _PROBE_REQUEST_VERSION = "translator.provider.probe_request.v1"
 _PROBE_RESPONSE_VERSION = "translator.provider.probe_response.v1"
 
+
 def _proto_events(
     *events: provider_pb2.ProviderEvent,
 ) -> tuple[provider_pb2.ProviderEvent, ...]:
     return events
-
-
-class RuntimeProvider(Protocol):
-    async def open_session(
-        self,
-        request: OpenProviderSession,
-        publish,
-    ) -> tuple[ProviderSessionOpened, ProviderHealth]: ...
-
-    async def submit_frame(self, frame: ProviderInputFrame) -> None: ...
-
-    async def cancel_utterance(self, request: CancelUtterance) -> None: ...
-
-    async def update_debug_text(self, request: UpdateDebugText) -> None: ...
-
-    async def close_session(self, request: CloseProviderSession) -> None: ...
-
-    async def wait_publications(self, session_id: UUID) -> None: ...
-
-    async def shutdown(self) -> None: ...
 
 
 class ChannelOverflow(RuntimeError):
@@ -110,12 +99,6 @@ class BoundedChannel[T]:
 
     async def put(self, item: T) -> None:
         await self._queue.put(item)
-
-    def put_terminal(self, error: T, terminal: T) -> None:
-        if self.capacity - self.qsize() < 2:
-            raise ChannelOverflow("resource_exhausted")
-        self._queue.put_nowait(error)
-        self._queue.put_nowait(terminal)
 
     def put_many_nowait(self, items: tuple[T, ...]) -> None:
         if self.capacity - self.qsize() < len(items):
@@ -201,13 +184,38 @@ class _InvalidRequest(ValueError):
     pass
 
 
-@dataclass(slots=True)
+def _failed_task(task: asyncio.Task) -> bool:
+    return task.done() and (task.cancelled() or task.exception() is not None)
+
+
+@dataclass(eq=False, slots=True)
 class _StreamState:
     session_id: UUID | None = None
-    closed: bool = False
-    runtime_provider: RuntimeProvider | None = None
-    runtime_provider_id: ProviderId | None = None
-    provider_acquired: bool = False
+    provider_lease: ProviderLease | None = None
+    reservation: RuntimeSessionReservation | None = None
+    ending: bool = False
+    reason: CloseRequestReason = CloseRequestReason.DAEMON_SHUTDOWN
+    transport_closed: asyncio.Event = field(default_factory=asyncio.Event)
+    event_drained: asyncio.Event = field(default_factory=asyncio.Event)
+    signal: asyncio.Event = field(default_factory=asyncio.Event)
+    requests: tuple[asyncio.Task, ...] = ()
+    drain_task: asyncio.Task[SessionDrainReceipt] | None = None
+    receipt: SessionDrainReceipt | None = None
+    cleanup_task: asyncio.Task[None] | None = None
+
+    def close_transport(self) -> None:
+        self.ending = True
+        self.transport_closed.set()
+        self.event_drained.set()
+        self.signal.set()
+        for task in self.requests:
+            task.cancel()
+
+    def start_drain(self, *, retry: bool = False) -> asyncio.Task[SessionDrainReceipt]:
+        assert self.reservation is not None
+        if self.drain_task is None or (retry and _failed_task(self.drain_task)):
+            self.drain_task = asyncio.create_task(self.reservation.drain(self.reason))
+        return self.drain_task
 
 
 _CONTROL_END = object()
@@ -217,16 +225,9 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
     def __init__(
         self,
         config: SidecarServerConfig,
-        engine: ProviderEngine,
-        local_provider: LocalProvider | None,
-        openai_provider: RuntimeProvider | None,
         owner: ProviderGrpcServer,
     ) -> None:
         self._config = config
-        self._engine = engine
-        self._uses_runtime_provider = (
-            local_provider is not None or openai_provider is not None
-        )
         self._owner = owner
 
     async def Probe(self, request, context):
@@ -242,6 +243,8 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
         )
 
     async def Stream(self, request_iterator, context):
+        if self._owner._stopping:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "server_stopping")
         capacity = self._config.channel_capacity
         control: BoundedChannel[object] = BoundedChannel(capacity)
         events: BoundedChannel[provider_pb2.ProviderEvent] = BoundedChannel(capacity)
@@ -249,11 +252,12 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
             (("control", capacity), ("event", capacity))
         )
         state = _StreamState()
+        self._owner._streams.add(state)
         failure: list[tuple[grpc.StatusCode, str]] = []
-        signal = asyncio.Event()
-        event_drained = asyncio.Event()
+        signal = state.signal
+        event_drained = state.event_drained
         event_drained.set()
-        transport_closed = asyncio.Event()
+        transport_closed = state.transport_closed
         consumer_done = False
 
         def fail(code: grpc.StatusCode, detail: str) -> None:
@@ -274,23 +278,10 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
 
         async def enqueue_event(event: provider_pb2.ProviderEvent) -> None:
             await event_drained.wait()
+            if transport_closed.is_set():
+                return
             try:
                 events.put_nowait(event)
-                event_drained.clear()
-                signal.set()
-            except ChannelOverflow:
-                fail(
-                    grpc.StatusCode.RESOURCE_EXHAUSTED,
-                    "resource_exhausted",
-                )
-
-        async def enqueue_terminal_pair(
-            error: provider_pb2.ProviderEvent,
-            terminal: provider_pb2.ProviderEvent,
-        ) -> None:
-            await event_drained.wait()
-            try:
-                events.put_terminal(error, terminal)
                 event_drained.clear()
                 signal.set()
             except ChannelOverflow:
@@ -326,7 +317,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
         async def consume_requests() -> None:
             nonlocal consumer_done
             try:
-                while not failure and not state.closed:
+                while not failure and not state.ending:
                     item = await control.get()
                     if item is _CONTROL_END:
                         break
@@ -334,15 +325,14 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                     gate = self._config.control_processing_gate
                     if gate is not None:
                         await gate.wait()
+                    if state.ending or self._owner._stopping:
+                        break
                     try:
-                        if not self._uses_runtime_provider:
-                            produced = self._handle_request(item, state)
-                        else:
-                            produced = await self._handle_runtime_request(
-                                item,
-                                state,
-                                publish_local,
-                            )
+                        produced = await self._handle_runtime_request(
+                            item,
+                            state,
+                            publish_local,
+                        )
                     except _InvalidRequest:
                         fail(
                             grpc.StatusCode.INVALID_ARGUMENT,
@@ -351,7 +341,6 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                         break
                     except (
                         LocalProviderProtocolError,
-                        ProviderProtocolError,
                         ValueError,
                     ):
                         fail(
@@ -366,50 +355,26 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                         )
                         break
 
-                    if (
-                        not self._uses_runtime_provider
-                        and len(produced) == 2
-                        and produced[0].HasField("error")
-                        and produced[1].HasField("utterance_final")
-                    ):
-                        await enqueue_terminal_pair(produced[0], produced[1])
-                    else:
-                        for event in produced:
-                            await enqueue_event(event)
-                            if failure:
-                                break
-                    if (
-                        not self._uses_runtime_provider
-                        and not failure
-                        and item.WhichOneof("request") == "input_frame"
-                        and state.session_id is not None
-                    ):
-                        while True:
-                            wakeup_ms = self._engine.next_wakeup_ms(
-                                state.session_id,
-                                now_ns=self._config.now_ns(),
-                            )
-                            if wakeup_ms is None:
-                                break
-                            await asyncio.sleep(max(1, wakeup_ms) / 1000)
-                            pending = self._process_pending(state.session_id)
-                            for event in pending:
-                                await enqueue_event(event)
-                                if failure:
-                                    break
-                            if failure:
-                                break
+                    for event in produced:
+                        await enqueue_event(event)
+                        if failure:
+                            break
             finally:
                 consumer_done = True
                 signal.set()
 
         producer_task = asyncio.create_task(produce_requests())
         consumer_task = asyncio.create_task(consume_requests())
+        state.requests = (producer_task, consumer_task)
+        aborting = False
         try:
             while True:
                 if failure:
                     code, detail = failure[0]
+                    aborting = True
                     await context.abort(code, detail)
+                if transport_closed.is_set():
+                    break
                 if not events.empty():
                     event = events.get_nowait()
                     if events.empty():
@@ -424,103 +389,17 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                     continue
                 await signal.wait()
         finally:
-            transport_closed.set()
-            producer_task.cancel()
-            consumer_task.cancel()
-            await asyncio.gather(
-                producer_task,
-                consumer_task,
-                return_exceptions=True,
-            )
+            state.close_transport()
             try:
-                await self._cleanup_session(state)
-            finally:
-                if state.provider_acquired:
-                    state.provider_acquired = False
-                    if state.runtime_provider_id is ProviderId.LOCAL:
-                        await self._owner.release_local_provider(state.runtime_provider)
-
-    def _handle_request(
-        self,
-        request: provider_pb2.ProviderRequest,
-        state: _StreamState,
-    ) -> tuple[provider_pb2.ProviderEvent, ...]:
-        kind = request.WhichOneof("request")
-        if kind is None:
-            raise _InvalidRequest("missing request")
-        if state.session_id is None and kind != "open_session":
-            raise ProviderProtocolError("open_session_required")
-        if state.session_id is not None and kind == "open_session":
-            raise ProviderProtocolError("duplicate_open_session")
-
-        if kind == "open_session":
-            model = _open_from_proto(request.open_session)
-            opened = self._engine.open_session(model)
-            state.session_id = model.session_id
-            health = self._engine.health(
-                model.session_id,
-                now_ns=self._config.now_ns(),
-            )
-            return _proto_events(_event_to_proto(opened), _event_to_proto(health))
-
-        if kind == "input_frame":
-            frame = _frame_from_proto(request.input_frame)
-            if frame.session_id != state.session_id:
-                raise ProviderProtocolError("session_identity_mismatch")
-            admission = self._engine.enqueue_frame(
-                frame,
-                now_ns=self._config.now_ns(),
-            )
-            if isinstance(admission, tuple):
-                return _proto_events(*(_event_to_proto(event) for event in admission))
-            produced = []
-            if admission is not None:
-                produced.append(_event_to_proto(admission))
-            else:
-                produced.extend(self._process_pending(frame.session_id))
-            return _proto_events(*produced)
-
-        if kind == "cancel_utterance":
-            model = _cancel_from_proto(request.cancel_utterance)
-            if model.session_id != state.session_id:
-                raise ProviderProtocolError("session_identity_mismatch")
-            return _proto_events(_event_to_proto(self._engine.cancel_utterance(model)))
-
-        if kind == "update_debug_text":
-            model = _debug_from_proto(request.update_debug_text)
-            if model.session_id != state.session_id:
-                raise ProviderProtocolError("session_identity_mismatch")
-            self._engine.update_debug_text(model)
-            return _proto_events()
-
-        if kind == "close_session":
-            model = _close_from_proto(request.close_session)
-            if model.session_id != state.session_id:
-                raise ProviderProtocolError("session_identity_mismatch")
-            closed = self._engine.close_session(model)
-            state.closed = True
-            return _proto_events(_event_to_proto(closed))
-
-        raise _InvalidRequest("unknown request")
-
-    def _process_pending(
-        self, session_id: UUID
-    ) -> tuple[provider_pb2.ProviderEvent, ...]:
-        produced = [
-            _event_to_proto(event)
-            for event in self._engine.process_next(
-                session_id,
-                now_ns=self._config.now_ns(),
-            )
-        ]
-        produced.extend(
-            _event_to_proto(event)
-            for event in self._engine.drain_output(
-                session_id,
-                now_ns=self._config.now_ns(),
-            )
-        )
-        return _proto_events(*produced)
+                await finish_cleanup(self._owner._stream_cleanup(state))
+            except Exception:
+                if not aborting:
+                    code, detail = (
+                        failure[0]
+                        if failure
+                        else (grpc.StatusCode.INTERNAL, "internal_error")
+                    )
+                    await context.abort(code, detail)
 
     async def _handle_runtime_request(
         self,
@@ -538,23 +417,17 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
 
         if kind == "open_session":
             model = _open_from_proto(request.open_session)
-            provider = await self._owner.acquire_runtime_provider(model.provider_id)
-            try:
-                opened, health = await provider.open_session(
-                    model,
-                    publish,
-                )
-            except BaseException:
-                if model.provider_id is ProviderId.LOCAL:
-                    await self._owner.release_local_provider(provider)
-                raise
-            state.runtime_provider = provider
-            state.runtime_provider_id = model.provider_id
-            state.provider_acquired = model.provider_id is ProviderId.LOCAL
+            lease = self._owner.providers.acquire(model.provider_id)
+            provider = lease.provider
+            state.provider_lease = lease
+            state.reservation = provider.reserve_session(model, publish)
             state.session_id = model.session_id
+            opened, health = await state.reservation.open()
             return _proto_events(_event_to_proto(opened), _event_to_proto(health))
 
-        provider = state.runtime_provider
+        provider = (
+            state.provider_lease.provider if state.provider_lease is not None else None
+        )
         if provider is None:
             raise LocalProviderProtocolError("open_session_required")
 
@@ -583,50 +456,14 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
             model = _close_from_proto(request.close_session)
             if model.session_id != state.session_id:
                 raise LocalProviderProtocolError("session_identity_mismatch")
-            await provider.close_session(model)
-            await provider.wait_publications(model.session_id)
-            state.closed = True
+            state.ending = True
+            state.reason = model.reason
+            state.receipt = await finish_cleanup(state.start_drain())
+            if state.receipt.delivery_error is not None:
+                raise LocalProviderPublicationError("provider event delivery failed")
             return _proto_events()
 
         raise _InvalidRequest("unknown request")
-
-    async def _cleanup_session(self, state: _StreamState) -> None:
-        if state.session_id is None:
-            return
-        if self._uses_runtime_provider:
-            provider = state.runtime_provider
-            if provider is None:
-                return
-            if state.closed:
-                return
-            try:
-                await provider.close_session(
-                    CloseProviderSession(
-                        session_id=state.session_id,
-                        reason=CloseRequestReason.DAEMON_SHUTDOWN,
-                    )
-                )
-                await provider.wait_publications(state.session_id)
-            except Exception:
-                pass
-            return
-        try:
-            if state.closed:
-                return
-            try:
-                self._engine.close_session(
-                    CloseProviderSession(
-                        session_id=state.session_id,
-                        reason=CloseRequestReason.DAEMON_SHUTDOWN,
-                    )
-                )
-            except Exception:
-                pass
-        finally:
-            try:
-                self._engine.release_session(state.session_id)
-            except ProviderProtocolError:
-                pass
 
 
 class ProviderGrpcServer:
@@ -634,152 +471,93 @@ class ProviderGrpcServer:
         self,
         config: SidecarServerConfig,
         *,
-        engine: ProviderEngine | None = None,
-        local_provider: LocalProvider | None = None,
+        local_provider: RuntimeProvider | None = None,
         openai_provider: RuntimeProvider | None = None,
         provider_ready: bool = True,
     ) -> None:
-        if engine is not None and (
-            local_provider is not None or openai_provider is not None
-        ):
-            raise ValueError("provider backends are mutually exclusive")
         self.config = config
-        self.engine = engine or ProviderEngine()
-        self.local_provider = local_provider
-        self.openai_provider = openai_provider
-        self.provider_ready = provider_ready
+        self.providers = ProviderRegistry(
+            {
+                key: provider
+                for key, provider in (
+                    (ProviderId.LOCAL, local_provider),
+                    (ProviderId.OPENAI, openai_provider),
+                )
+                if provider is not None
+            }
+        )
+        self.provider_ready = provider_ready and (
+            local_provider is not None or openai_provider is not None
+        )
         self.consumed_request_count = 0
         self.created_channel_capacities: list[tuple[str, int]] = []
         self._server: grpc.aio.Server | None = None
         self._parent_fd: int | None = None
         self._lifecycle_lock = asyncio.Lock()
-        self._provider_lock = asyncio.Lock()
-        self._provider_leases: dict[int, int] = {}
-        self._provider_instances: dict[int, LocalProvider] = {}
-        self._retired_providers: set[int] = set()
-        if local_provider is not None:
-            identity = id(local_provider)
-            self._provider_leases[identity] = 0
-            self._provider_instances[identity] = local_provider
+        self._streams: set[_StreamState] = set()
+        self._stopping = False
 
-    async def acquire_runtime_provider(
-        self,
-        provider_id: ProviderId,
-    ) -> RuntimeProvider:
-        if provider_id is ProviderId.LOCAL:
-            return await self.acquire_local_provider()
-        if provider_id is ProviderId.OPENAI and self.openai_provider is not None:
-            return self.openai_provider
-        raise LocalProviderProtocolError("provider is unavailable")
+    def _stream_cleanup(
+        self, state: _StreamState, *, retry: bool = False
+    ) -> asyncio.Task[None]:
+        if state.cleanup_task is None or (retry and _failed_task(state.cleanup_task)):
+            state.cleanup_task = asyncio.create_task(
+                self._cleanup_stream(state, retry=retry)
+            )
+        return state.cleanup_task
 
-    async def acquire_local_provider(self) -> LocalProvider:
-        async with self._provider_lock:
-            provider = self.local_provider
-            if provider is None:
-                raise RuntimeError("local provider is unavailable")
-            identity = id(provider)
-            self._provider_instances.setdefault(identity, provider)
-            self._provider_leases[identity] = self._provider_leases.get(identity, 0) + 1
-            return provider
+    async def _cleanup_stream(self, state: _StreamState, *, retry: bool) -> None:
+        # An orderly Close may still be delivering its terminal event.
+        await state.transport_closed.wait()
+        for task in state.requests:
+            task.cancel()
+        await asyncio.gather(*state.requests, return_exceptions=True)
+        if state.reservation is not None and state.receipt is None:
+            state.receipt = await finish_cleanup(state.start_drain(retry=retry))
+        if state.receipt is not None and state.receipt.session_id != state.session_id:
+            raise RuntimeError("provider_cleanup_identity_mismatch")
+        if state.provider_lease is not None:
+            await state.provider_lease.release()
+        self._streams.discard(state)
 
-    async def release_local_provider(
-        self,
-        provider: LocalProvider | None,
-    ) -> None:
-        if provider is None:
-            return
-        shutdown: LocalProvider | None = None
-        async with self._provider_lock:
-            identity = id(provider)
-            leases = self._provider_leases.get(identity)
-            if leases is None or leases <= 0:
-                return
-            leases -= 1
-            self._provider_leases[identity] = leases
-            if leases == 0 and identity in self._retired_providers:
-                self._retired_providers.remove(identity)
-                self._provider_leases.pop(identity, None)
-                shutdown = self._provider_instances.pop(
-                    identity,
-                    None,
-                )
-        if shutdown is not None:
-            await shutdown.shutdown()
+    async def retry_stream_cleanup(self) -> None:
+        selected = tuple(state for state in self._streams if state.ending)
+        results = await finish_cleanup(
+            asyncio.gather(
+                *(self._stream_cleanup(state, retry=True) for state in selected),
+                return_exceptions=True,
+            )
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
-    async def replace_local_provider(
-        self,
-        provider: LocalProvider,
-    ) -> None:
-        shutdown: LocalProvider | None = None
-        async with self._provider_lock:
-            previous = self.local_provider
-            if previous is provider:
-                return
-            identity = id(provider)
-            self._provider_instances[identity] = provider
-            self._provider_leases.setdefault(identity, 0)
-            self.local_provider = provider
-            self.provider_ready = True
-            if previous is not None:
-                previous_identity = id(previous)
-                self._retired_providers.add(previous_identity)
-                if self._provider_leases.get(previous_identity, 0) == 0:
-                    self._retired_providers.remove(previous_identity)
-                    self._provider_leases.pop(previous_identity, None)
-                    shutdown = self._provider_instances.pop(
-                        previous_identity,
-                        None,
-                    )
-        if shutdown is not None:
-            await shutdown.shutdown()
-
-    async def _shutdown_local_providers(self) -> None:
-        async with self._provider_lock:
-            providers = tuple(self._provider_instances.values())
-            self._provider_instances.clear()
-            self._provider_leases.clear()
-            self._retired_providers.clear()
-            self.local_provider = None
-        first_error: Exception | None = None
-        for provider in providers:
-            try:
-                await provider.shutdown()
-            except Exception as error:
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
-
-    async def _shutdown_openai_provider(self) -> None:
-        provider = self.openai_provider
-        self.openai_provider = None
-        if provider is not None:
-            await provider.shutdown()
+    def install_local_provider(self, provider: RuntimeProvider) -> None:
+        """Transfer ownership atomically; a rejected transfer leaves it with the caller."""
+        self.providers.replace(ProviderId.LOCAL, provider)
+        self.provider_ready = True
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
             if self._server is not None:
                 raise RuntimeError("server_already_started")
             parent_fd = self._open_verified_parent()
-            server = grpc.aio.server(
-                interceptors=(_AuthInterceptor(self.config.token),)
-            )
-            provider_pb2_grpc.add_ProviderTransportServicer_to_server(
-                _ProviderServicer(
-                    self.config,
-                    self.engine,
-                    self.local_provider,
-                    self.openai_provider,
-                    self,
-                ),
-                server,
-            )
-            bound_path = f"/proc/self/fd/{parent_fd}/{self.config.socket_path.name}"
-            bound = server.add_insecure_port(f"unix:{bound_path}")
-            if bound == 0:
-                os.close(parent_fd)
-                raise RuntimeError("uds_bind_failed")
+            server: grpc.aio.Server | None = None
             try:
+                server = grpc.aio.server(
+                    interceptors=(_AuthInterceptor(self.config.token),)
+                )
+                provider_pb2_grpc.add_ProviderTransportServicer_to_server(
+                    _ProviderServicer(
+                        self.config,
+                        self,
+                    ),
+                    server,
+                )
+                bound_path = f"/proc/self/fd/{parent_fd}/{self.config.socket_path.name}"
+                bound = server.add_insecure_port(f"unix:{bound_path}")
+                if bound == 0:
+                    raise RuntimeError("uds_bind_failed")
                 await server.start()
                 os.chmod(
                     self.config.socket_path.name,
@@ -796,83 +574,54 @@ class ProviderGrpcServer:
                     raise RuntimeError("bound_path_is_not_socket")
                 if socket_stat.st_uid != os.getuid():
                     raise PermissionError("socket owner mismatch")
-                self._server = server
-                self._parent_fd = parent_fd
             except BaseException:
-                await asyncio.shield(server.stop(grace=0))
-                os.close(parent_fd)
+                try:
+                    if server is not None:
+                        await finish_cleanup(server.stop(grace=0))
+                finally:
+                    os.close(parent_fd)
                 raise
+            self._server = server
+            self._parent_fd = parent_fd
 
     async def stop(self) -> None:
         async with self._lifecycle_lock:
-            if self._server is None:
-                await self._shutdown_local_providers()
-                await self._shutdown_openai_provider()
-                return
-            server = self._server
-            stop_task = asyncio.ensure_future(server.stop(grace=0))
-            cancelled: BaseException | None = None
+            await finish_cleanup(self._stop())
+
+    async def _stop(self) -> None:
+        self.provider_ready = False
+        self._stopping = True
+        for state in tuple(self._streams):
+            state.close_transport()
+        if self._server is not None:
+            await self._server.stop(grace=SERVER_STOP_GRACE_SECONDS)
+            self._server = None
+        if self._parent_fd is not None:
+            os.close(self._parent_fd)
+            self._parent_fd = None
+        try:
+            await self.retry_stream_cleanup()
+        finally:
             try:
-                while not stop_task.done():
-                    try:
-                        await asyncio.shield(stop_task)
-                    except BaseException as error:
-                        if not isinstance(error, asyncio.CancelledError):
-                            raise
-                        cancelled = error
-                        current = asyncio.current_task()
-                        if current is not None:
-                            current.uncancel()
-                stop_task.result()
+                await self.providers.shutdown()
             finally:
-                self._server = None
-                if self._parent_fd is not None:
-                    os.close(self._parent_fd)
-                    self._parent_fd = None
-                await self._shutdown_local_providers()
-                await self._shutdown_openai_provider()
-            if cancelled is not None:
-                raise cancelled
+                self.provider_ready = False
 
     def _open_verified_parent(self) -> int:
-        parent = self.config.socket_path.parent
+        parent_fd = open_private_directory(self.config.socket_path.parent)
         try:
-            parent_fd = os.open(
-                parent,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            os.stat(
+                self.config.socket_path.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
             )
-        except OSError as error:
-            parent_stat = os.lstat(parent)
-            if stat.S_ISLNK(parent_stat.st_mode):
-                raise PermissionError(
-                    "socket parent must be a real directory"
-                ) from error
-            if not stat.S_ISDIR(parent_stat.st_mode):
-                raise NotADirectoryError(parent) from error
-            raise
-        parent_stat = os.fstat(parent_fd)
-        try:
-            if not stat.S_ISDIR(parent_stat.st_mode):
-                raise NotADirectoryError(parent)
-            if parent_stat.st_uid != os.getuid():
-                raise PermissionError("socket parent owner mismatch")
-            if stat.S_IMODE(parent_stat.st_mode) != 0o700:
-                raise PermissionError("socket parent mode must be 0700")
-            try:
-                os.stat(
-                    self.config.socket_path.name,
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                return parent_fd
-            raise FileExistsError(self.config.socket_path)
-        except NotADirectoryError:
-            os.close(parent_fd)
-            raise
+        except FileNotFoundError:
+            return parent_fd
         except BaseException:
             os.close(parent_fd)
             raise
+        os.close(parent_fd)
+        raise FileExistsError(self.config.socket_path)
 
 
 _DIRECTION_FROM_PROTO = {
@@ -923,7 +672,7 @@ _CANCEL_FROM_PROTO = {
 }
 
 
-def _enum(mapping: dict[int, T], value: int) -> T:
+def _enum[T](mapping: dict[int, T], value: int) -> T:
     try:
         return mapping[value]
     except KeyError as error:

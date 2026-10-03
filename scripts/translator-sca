@@ -1,0 +1,444 @@
+#!/usr/bin/bash -p
+set -uo pipefail
+
+project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd -- "${project_root}" || exit 1
+
+readonly cargo_audit_version="cargo-audit 0.22.2"
+readonly bun_version="1.3.12"
+readonly osv_scanner_version="osv-scanner version: 2.5.0"
+readonly expected_cargo_audit_sha256="473b9a71e5cb5bde22f69c32f749c9b83931287d92dc36b91cb04f6705640ef2"
+readonly expected_bun_sha256="92a1cd8b6185f676010bb18e767dfc65c772273e79ae9984480843261939eeaa"
+readonly expected_osv_scanner_sha256="edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c"
+
+cargo_audit_command="${TRANSLATOR_CARGO_AUDIT:-cargo-audit}"
+bun_command="${TRANSLATOR_BUN:-bun}"
+osv_scanner_command="${TRANSLATOR_OSV_SCANNER:-osv-scanner}"
+readonly grep_bin="/usr/bin/grep"
+readonly timeout_bin="/usr/bin/timeout"
+readonly mktemp_bin="/usr/bin/mktemp"
+readonly rm_bin="/usr/bin/rm"
+readonly mkdir_bin="/usr/bin/mkdir"
+readonly python_bin="/usr/bin/python3"
+readonly readlink_bin="/usr/bin/readlink"
+
+failures=0
+bun_timed_out=0
+glib_control_directory=""
+rust_timeout=120
+bun_timeout=30
+osv_timeout=120
+
+cleanup() {
+    if [[ -n "${glib_control_directory}" ]]; then
+        "${rm_bin}" -rf -- "${glib_control_directory}"
+    fi
+}
+trap cleanup EXIT
+
+fail() {
+    printf '%s\n' "$1" >&2
+    failures=1
+}
+
+set_bounded_seconds() {
+    local output_name="$1"
+    local variable_name="$2"
+    local default_value="$3"
+    local raw_value="${!variable_name:-${default_value}}"
+
+    if [[ ! "${raw_value}" =~ ^[1-9][0-9]*$ ]] || (( raw_value > 120 )); then
+        fail "${variable_name} must be an integer from 1 through 120"
+        printf -v "${output_name}" '%s' "${default_value}"
+        return
+    fi
+    printf -v "${output_name}" '%s' "${raw_value}"
+}
+
+set_bounded_seconds rust_timeout TRANSLATOR_SCA_RUST_TIMEOUT 120
+set_bounded_seconds bun_timeout TRANSLATOR_SCA_BUN_TIMEOUT 30
+set_bounded_seconds osv_timeout TRANSLATOR_SCA_OSV_TIMEOUT 120
+
+if [[ ! -x "${timeout_bin}" ]]; then
+    printf '%s\n' "timeout is required for bounded supply-chain scans" >&2
+    exit 1
+fi
+if [[ ! -x "${mktemp_bin}" || ! -x "${rm_bin}" ||
+    ! -x "${mkdir_bin}" || ! -x "${python_bin}" ||
+    ! -x "${readlink_bin}" || ! -x "${grep_bin}" ]]; then
+    printf '%s\n' "core temporary-file utilities are required" >&2
+    exit 1
+fi
+
+resolve_executable() {
+    local configured="$1"
+    local resolved
+
+    resolved="$(command -v -- "${configured}" 2>/dev/null)" || return 1
+    "${readlink_bin}" -f -- "${resolved}"
+}
+
+read_tool_identity() {
+    local source_path="$1"
+    local executable_fd_path="$2"
+    local expected_digest="$3"
+
+    "${python_bin}" -I - \
+        "${source_path}" \
+        "${executable_fd_path}" \
+        "${expected_digest}" <<'PY' 2>/dev/null
+import errno
+import hashlib
+import hmac
+import os
+import stat
+import sys
+
+source_path, executable_fd_path, expected_digest = sys.argv[1:]
+metadata_fields = (
+    "st_dev",
+    "st_ino",
+    "st_mode",
+    "st_nlink",
+    "st_uid",
+    "st_gid",
+    "st_size",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
+
+
+def metadata(value: os.stat_result) -> tuple[int, ...]:
+    return tuple(getattr(value, field) for field in metadata_fields)
+
+
+def has_security_capability(path: str) -> bool:
+    try:
+        return bool(os.getxattr(path, "security.capability"))
+    except OSError as error:
+        unsupported = {errno.ENODATA, errno.ENOTSUP}
+        if error.errno in unsupported:
+            return False
+        raise
+
+
+flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+source_fd = os.open(source_path, flags)
+try:
+    before = os.fstat(source_fd)
+    held = os.stat(executable_fd_path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise SystemExit(1)
+    unsafe_mode = stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID
+    if (
+        before.st_uid not in {0, os.geteuid()}
+        or before.st_mode & unsafe_mode
+        or before.st_mode & 0o111 == 0
+        or has_security_capability(executable_fd_path)
+    ):
+        raise SystemExit(1)
+    if metadata(before) != metadata(held):
+        raise SystemExit(1)
+
+    digest = hashlib.sha256()
+    while chunk := os.read(source_fd, 1024 * 1024):
+        digest.update(chunk)
+
+    after = os.fstat(source_fd)
+    path_after = os.stat(source_path, follow_symlinks=False)
+    held_after = os.stat(executable_fd_path)
+    if not (
+        metadata(before)
+        == metadata(after)
+        == metadata(path_after)
+        == metadata(held_after)
+    ) or has_security_capability(executable_fd_path):
+        raise SystemExit(1)
+    observed_digest = digest.hexdigest()
+    if not hmac.compare_digest(observed_digest, expected_digest):
+        raise SystemExit(1)
+finally:
+    os.close(source_fd)
+
+print(":".join(str(value) for value in metadata(before)) + ":" + observed_digest)
+PY
+}
+
+tool_identity_is_current() {
+    local source_path="$1"
+    local executable_fd_path="$2"
+    local expected_digest="$3"
+    local baseline_identity="$4"
+    local observed_identity
+
+    observed_identity="$(
+        read_tool_identity \
+            "${source_path}" \
+            "${executable_fd_path}" \
+            "${expected_digest}"
+    )" || return 1
+    [[ "${observed_identity}" == "${baseline_identity}" ]]
+}
+
+assert_tool_identity() {
+    local label="$1"
+    shift
+
+    if ! tool_identity_is_current "$@"; then
+        fail "${label} executable identity verification failed"
+        return 1
+    fi
+}
+
+cargo_audit_bin="$(resolve_executable "${cargo_audit_command}")" || {
+    fail "cargo-audit ${cargo_audit_version#cargo-audit } is required"
+    exit 1
+}
+bun_bin="$(resolve_executable "${bun_command}")" || {
+    fail "Bun ${bun_version} is required"
+    exit 1
+}
+osv_scanner_bin="$(resolve_executable "${osv_scanner_command}")" || {
+    fail "OSV-Scanner ${osv_scanner_version#osv-scanner version: } is required"
+    exit 1
+}
+readonly cargo_audit_bin bun_bin osv_scanner_bin
+
+exec {cargo_audit_fd}<"${cargo_audit_bin}" || {
+    fail "cargo-audit cannot be opened"
+    exit 1
+}
+exec {bun_fd}<"${bun_bin}" || {
+    fail "Bun cannot be opened"
+    exit 1
+}
+exec {osv_scanner_fd}<"${osv_scanner_bin}" || {
+    fail "OSV-Scanner cannot be opened"
+    exit 1
+}
+readonly cargo_audit_fd bun_fd osv_scanner_fd
+readonly cargo_audit_exec="/proc/self/fd/${cargo_audit_fd}"
+readonly bun_exec="/proc/self/fd/${bun_fd}"
+readonly osv_scanner_exec="/proc/self/fd/${osv_scanner_fd}"
+
+cargo_audit_identity="$(
+    read_tool_identity \
+        "${cargo_audit_bin}" \
+        "${cargo_audit_exec}" \
+        "${expected_cargo_audit_sha256}"
+)" || {
+    fail "cargo-audit executable identity verification failed"
+    exit 1
+}
+bun_identity="$(
+    read_tool_identity "${bun_bin}" "${bun_exec}" "${expected_bun_sha256}"
+)" || {
+    fail "Bun executable identity verification failed"
+    exit 1
+}
+osv_scanner_identity="$(
+    read_tool_identity \
+        "${osv_scanner_bin}" \
+        "${osv_scanner_exec}" \
+        "${expected_osv_scanner_sha256}"
+)" || {
+    fail "OSV-Scanner executable identity verification failed"
+    exit 1
+}
+readonly cargo_audit_identity bun_identity osv_scanner_identity
+
+version_matches() {
+    local timeout_seconds="$1"
+    local expected="$2"
+    shift 2
+    local output
+    local status
+
+    output="$(
+        "${timeout_bin}" --signal=TERM --kill-after=2s "${timeout_seconds}s" "$@" \
+            2>/dev/null
+    )"
+    status=$?
+    if (( status != 0 )); then
+        return 1
+    fi
+    [[ "${output%%$'\n'*}" == "${expected}" ]]
+}
+
+run_bounded() {
+    local timeout_seconds="$1"
+    shift
+    "${timeout_bin}" --signal=TERM --kill-after=2s "${timeout_seconds}s" "$@" \
+        >/dev/null 2>&1
+}
+
+if ! version_matches 10 "${cargo_audit_version}" "${cargo_audit_exec}" --version; then
+    if assert_tool_identity \
+        "cargo-audit" \
+        "${cargo_audit_bin}" \
+        "${cargo_audit_exec}" \
+        "${expected_cargo_audit_sha256}" \
+        "${cargo_audit_identity}"; then
+        fail "cargo-audit version mismatch; expected ${cargo_audit_version#cargo-audit }"
+    fi
+elif ! assert_tool_identity \
+    "cargo-audit" \
+    "${cargo_audit_bin}" \
+    "${cargo_audit_exec}" \
+    "${expected_cargo_audit_sha256}" \
+    "${cargo_audit_identity}"; then
+    :
+else
+    run_bounded "${rust_timeout}" "${cargo_audit_exec}" \
+        audit --file "${project_root}/Cargo.lock"
+    cargo_status=$?
+    if ! assert_tool_identity \
+        "cargo-audit" \
+        "${cargo_audit_bin}" \
+        "${cargo_audit_exec}" \
+        "${expected_cargo_audit_sha256}" \
+        "${cargo_audit_identity}"; then
+        :
+    elif (( cargo_status == 124 || cargo_status == 137 )); then
+        fail "Rust advisory scan timed out"
+    elif (( cargo_status != 0 )); then
+        fail "Rust advisory scan failed"
+    else
+        printf '%s\n' "Rust advisory scan passed"
+    fi
+fi
+
+if ! version_matches 10 "${bun_version}" "${bun_exec}" --version; then
+    if assert_tool_identity \
+        "Bun" \
+        "${bun_bin}" \
+        "${bun_exec}" \
+        "${expected_bun_sha256}" \
+        "${bun_identity}"; then
+        fail "Bun version mismatch; expected ${bun_version}"
+    fi
+elif ! assert_tool_identity \
+    "Bun" \
+    "${bun_bin}" \
+    "${bun_exec}" \
+    "${expected_bun_sha256}" \
+    "${bun_identity}"; then
+    :
+else
+    cd -- "${project_root}/apps/translator-ui" || exit 1
+    run_bounded "${bun_timeout}" "${bun_exec}" audit
+    bun_status=$?
+    cd -- "${project_root}" || exit 1
+    if ! assert_tool_identity \
+        "Bun" \
+        "${bun_bin}" \
+        "${bun_exec}" \
+        "${expected_bun_sha256}" \
+        "${bun_identity}"; then
+        :
+    elif (( bun_status == 124 || bun_status == 137 )); then
+        bun_timed_out=1
+        printf '%s\n' "bun audit timed out; OSV fallback required" >&2
+    elif (( bun_status != 0 )); then
+        fail "bun audit failed"
+    else
+        printf '%s\n' "bun audit passed"
+    fi
+fi
+
+# The glib exception is limited to transitive GTK3 use. A positive control
+# proves that the exact scanner invocation can detect either forbidden symbol;
+# only grep's exact no-match status is accepted as clean for the source tree.
+if [[ ! -x "${grep_bin}" ]]; then
+    fail "grep is required for the glib reachability scan"
+elif ! glib_control_directory="$("${mktemp_bin}" -d \
+    "${TMPDIR:-/tmp}/translator-sca-glib.XXXXXX")"; then
+    fail "Unable to create the glib reachability control workspace"
+else
+    glib_control_ui="${glib_control_directory}/apps/src/nested"
+    glib_control_crates="${glib_control_directory}/crates"
+    if ! "${mkdir_bin}" -p -- "${glib_control_ui}" "${glib_control_crates}"; then
+        fail "Unable to create the glib reachability positive-control tree"
+    elif ! printf '%s\n' 'fn control() { let _ = VariantStrIter; }' \
+        >"${glib_control_ui}/positive-control.rs"; then
+        fail "Unable to create the glib reachability positive control"
+    else
+        run_bounded 10 "${grep_bin}" -r --include='*.rs' --extended-regexp \
+            'VariantStrIter|array_iter_str' \
+            "${glib_control_directory}/apps" \
+            "${glib_control_crates}"
+        glib_control_status=$?
+        if (( glib_control_status == 1 )); then
+            fail "glib reachability scan positive control was not detected"
+        elif (( glib_control_status == 124 || glib_control_status == 137 )); then
+            fail "glib reachability scan positive control timed out"
+        elif (( glib_control_status != 0 )); then
+            fail "glib reachability scan positive control failed"
+        fi
+    fi
+
+    run_bounded 10 "${grep_bin}" -r --include='*.rs' --extended-regexp \
+        'VariantStrIter|array_iter_str' \
+        "${project_root}/apps/translator-ui/src-tauri/src" \
+        "${project_root}/crates"
+    glib_reachability_status=$?
+    if (( glib_reachability_status == 0 )); then
+        fail "glib VariantStrIter/array_iter_str is directly referenced; its exception is invalid"
+    elif (( glib_reachability_status == 124 || glib_reachability_status == 137 )); then
+        fail "glib reachability scan timed out"
+    elif (( glib_reachability_status != 1 )); then
+        fail "glib reachability scan failed"
+    fi
+fi
+
+# This scan is mandatory even when Bun succeeds or any earlier scanner fails.
+if ! version_matches 10 "${osv_scanner_version}" \
+    "${osv_scanner_exec}" --version; then
+    if assert_tool_identity \
+        "OSV-Scanner" \
+        "${osv_scanner_bin}" \
+        "${osv_scanner_exec}" \
+        "${expected_osv_scanner_sha256}" \
+        "${osv_scanner_identity}"; then
+        fail "OSV-Scanner version mismatch; expected ${osv_scanner_version#osv-scanner version: }"
+    fi
+elif ! assert_tool_identity \
+    "OSV-Scanner" \
+    "${osv_scanner_bin}" \
+    "${osv_scanner_exec}" \
+    "${expected_osv_scanner_sha256}" \
+    "${osv_scanner_identity}"; then
+    :
+else
+    run_bounded "${osv_timeout}" "${osv_scanner_exec}" scan source \
+        --config "${project_root}/config/osv-scanner.toml" \
+        --lockfile "${project_root}/Cargo.lock" \
+        --lockfile "${project_root}/sidecar/uv.lock" \
+        --lockfile "${project_root}/apps/translator-ui/bun.lock" \
+        --verbosity error
+    osv_status=$?
+    if ! assert_tool_identity \
+        "OSV-Scanner" \
+        "${osv_scanner_bin}" \
+        "${osv_scanner_exec}" \
+        "${expected_osv_scanner_sha256}" \
+        "${osv_scanner_identity}"; then
+        :
+    elif (( osv_status == 124 || osv_status == 137 )); then
+        fail "OSV lockfile scan timed out"
+    elif (( osv_status != 0 )); then
+        fail "OSV lockfile scan failed"
+    else
+        printf '%s\n' "OSV lockfile scan passed"
+    fi
+fi
+
+if (( failures != 0 )); then
+    printf '%s\n' "Supply-chain gate failed" >&2
+    exit 1
+fi
+
+if (( bun_timed_out != 0 )); then
+    printf '%s\n' "bun audit fallback accepted after a clean OSV scan"
+fi
+printf '%s\n' "Supply-chain gate passed"

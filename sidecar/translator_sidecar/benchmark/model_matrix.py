@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-
 CandidateRole = Literal["asr", "tts", "endpointing"]
 _FASTER_WHISPER_URL = "https://github.com/SYSTRAN/faster-whisper"
 _ALREADY_INTEGRATED = "already integrated"

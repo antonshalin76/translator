@@ -1,15 +1,16 @@
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class Task1BoundaryTests(unittest.TestCase):
-    def test_protobuf_declares_bidirectional_stream_and_discriminated_messages(self) -> None:
+    def test_protobuf_declares_bidirectional_stream_and_discriminated_messages(
+        self,
+    ) -> None:
         proto_root = ROOT / "proto"
         proto_path = proto_root / "translator/provider/v1/provider.proto"
         schema = proto_path.read_text()
@@ -97,9 +98,7 @@ class Task1BoundaryTests(unittest.TestCase):
             'type_name: ".translator.provider.v1.UpdateDebugText"',
             update_field.group("body"),
         )
-        self.assertRegex(
-            update_field.group("body"), r"(?m)^\s*oneof_index:\s*0\s*$"
-        )
+        self.assertRegex(update_field.group("body"), r"(?m)^\s*oneof_index:\s*0\s*$")
         request_oneof = re.search(r"oneof\s+request\s*\{([^}]*)\}", schema, re.DOTALL)
         event_oneof = re.search(r"oneof\s+event\s*\{([^}]*)\}", schema, re.DOTALL)
         self.assertIsNotNone(request_oneof)
@@ -118,7 +117,8 @@ class Task1BoundaryTests(unittest.TestCase):
             "ProviderHealth",
             "UpdateDebugText",
         ):
-            self.assertIn(f'message {message} ', schema)
+            self.assertIn(f"message {message} ", schema)
+
         def message_body(name: str) -> str:
             match = re.search(
                 rf"message\s+{name}\s*\{{(?P<body>.*?)\n\}}",
@@ -141,12 +141,8 @@ class Task1BoundaryTests(unittest.TestCase):
             r"\bstring\s+schema_version\s*=\s*1\s*;",
         )
         probe_response_body = message_body("ProviderProbeResponse")
-        self.assertRegex(
-            probe_response_body, r"\bstring\s+schema_version\s*=\s*1\s*;"
-        )
-        self.assertRegex(
-            probe_response_body, r"\bstring\s+generation_id\s*=\s*2\s*;"
-        )
+        self.assertRegex(probe_response_body, r"\bstring\s+schema_version\s*=\s*1\s*;")
+        self.assertRegex(probe_response_body, r"\bstring\s+generation_id\s*=\s*2\s*;")
         for field in (
             "schema_version",
             "session_id",
@@ -160,9 +156,7 @@ class Task1BoundaryTests(unittest.TestCase):
             path.read_text()
             for path in sorted((ROOT / "crates/translator-core/src").glob("*.rs"))
         )
-        python = (
-            ROOT / "sidecar/translator_sidecar/provider_contract.py"
-        ).read_text()
+        python = (ROOT / "sidecar/translator_sidecar/provider_contract.py").read_text()
         protobuf = (ROOT / "proto/translator/provider/v1/provider.proto").read_text()
 
         for literal in ("microphone", "speaker", "quality_first", "streaming_first"):
@@ -205,7 +199,9 @@ class Task1BoundaryTests(unittest.TestCase):
             self.assertIsNotNone(class_body)
             self.assertIn(version, class_body.group("body"))
 
-    def test_close_request_reasons_are_narrower_than_session_close_reasons(self) -> None:
+    def test_close_request_reasons_are_narrower_than_session_close_reasons(
+        self,
+    ) -> None:
         schema = (ROOT / "proto/translator/provider/v1/provider.proto").read_text()
 
         def enum_values(name: str) -> set[str]:
@@ -248,7 +244,9 @@ class Task1BoundaryTests(unittest.TestCase):
             if match:
                 violations.append(f"{path.relative_to(ROOT)}:{match.group(0)}")
 
-        self.assertGreater(checked_files, 0, "at least one frontend source must be checked")
+        self.assertGreater(
+            checked_files, 0, "at least one frontend source must be checked"
+        )
         self.assertEqual(violations, [])
 
 
