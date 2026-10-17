@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import {
   DEFAULT_AUDIO_MIX,
+  AudioMixIntentQueue,
   DebugTextRing,
   aecCalibrationControlState,
   aecCalibrationPendingCancel,
@@ -10,6 +12,7 @@ import {
   currentAudioMixPatchIntent,
   debugToggleIntent,
   directionToggleIntent,
+  directionRuntimeLabel,
   formatMs,
   headphoneConfirmationIntent,
   labelLanguage,
@@ -26,7 +29,6 @@ import {
   type ProviderId,
   type RouteCandidate,
   type RuntimeSnapshot,
-  type TranslationMode,
   type VoiceGender,
 } from "./uiModel";
 
@@ -40,6 +42,7 @@ interface AppState {
   error: string | null;
   lastUpdated: Date | null;
   activeSection: UiSection;
+  advancedOpen: boolean;
   calibrationStatus: AecCalibrationStatus | null;
   calibrationError: string | null;
   calibrationCancelRequested: string | null;
@@ -47,7 +50,8 @@ interface AppState {
 
 const root = document.querySelector<HTMLDivElement>("#app");
 const debugTextRing = new DebugTextRing();
-const audioMixTimers: Partial<Record<AudioMixField, number>> = {};
+const pendingAudioMix = new AudioMixIntentQueue();
+let activeAudioMixInput: HTMLInputElement | null = null;
 let lastDebugTextKey: string | null = null;
 let wasDisconnected = true;
 let calibrationRevision = 0;
@@ -61,6 +65,7 @@ const state: AppState = {
   error: null,
   lastUpdated: null,
   activeSection: "status",
+  advancedOpen: false,
   calibrationStatus: null,
   calibrationError: null,
   calibrationCancelRequested: null,
@@ -72,6 +77,14 @@ if (!root) {
 const appRoot = root;
 
 render();
+void listen("translator-control-error", (event) => {
+  state.error = safeErrorMessage(event.payload);
+  void refreshStatus();
+  render();
+}).catch(() => {
+  state.error = "Не удалось подключить уведомления меню. Управление доступно в окне.";
+  render();
+});
 await refreshStatus();
 await refreshCalibrationStatus();
 window.setInterval(() => {
@@ -79,10 +92,24 @@ window.setInterval(() => {
   void refreshCalibrationStatus();
 }, 2000);
 window.addEventListener("pagehide", () => {
+  pendingAudioMix.clear();
   clearDebugText("ui_close");
+});
+window.addEventListener("pointerup", () => {
+  if (activeAudioMixInput) {
+    activeAudioMixInput = null;
+    window.requestAnimationFrame(render);
+  }
+});
+window.addEventListener("blur", () => {
+  if (activeAudioMixInput) {
+    activeAudioMixInput = null;
+    render();
+  }
 });
 
 function render(): void {
+  if (activeAudioMixInput && state.connected) return;
   const focused = document.activeElement;
   const focusedId = focused instanceof HTMLElement && appRoot.contains(focused)
     ? focused.id
@@ -105,18 +132,27 @@ function appShell(model: ReturnType<typeof buildUiModel>): HTMLElement {
   main.append(
     topbar(),
     warningBand(model),
-    runtimeBand(model),
+    runtimeBand(),
     controlsBand(),
-    audioMixBand(model),
     directionGrid(),
     routeSection(),
-    graphSection(),
-    aecCalibrationSection(),
-    diagnosticsSection(model),
-    debugTextSection(model),
+    advancedSettings(model),
   );
   shell.append(main);
   return shell;
+}
+
+function advancedSettings(model: ReturnType<typeof buildUiModel>): HTMLElement {
+  const details = element("details", "advanced-settings");
+  details.open = state.advancedOpen;
+  details.addEventListener("toggle", () => { state.advancedOpen = details.open; });
+  const debug = element("div", "inline-controls");
+  debug.append(debugControl("debug_text"), debugControl("debug_capture"));
+  details.append(
+    element("summary", "", "Диагностика и отладка"), debug,
+    graphSection(), aecCalibrationSection(), diagnosticsSection(model), debugTextSection(model),
+  );
+  return details;
 }
 
 function sidebar(model: ReturnType<typeof buildUiModel>): HTMLElement {
@@ -158,6 +194,7 @@ function navItem(text: string, section: UiSection): HTMLElement {
   item.addEventListener("click", (event) => {
     event.preventDefault();
     state.activeSection = section;
+    if (section === "diagnostics") state.advancedOpen = true;
     render();
     window.requestAnimationFrame(() => {
       document.getElementById(section)?.scrollIntoView({ block: "start" });
@@ -170,13 +207,12 @@ function topbar(): HTMLElement {
   const header = element("header", "topbar");
   const title = element("div");
   title.append(
-    element("p", "eyebrow", "Локальный сервис"),
-    element("h1", "", "Состояние переводчика"),
+    element("h1", "", "Translator"),
   );
   const status = element(
     "span",
     `build-state ${state.connected ? "ready" : "offline"}`,
-    state.connected ? "Daemon connected" : "Daemon offline",
+    state.connected ? "Сервис подключён" : "Нет связи с сервисом",
   );
   header.append(title, status);
   return header;
@@ -198,15 +234,7 @@ function warningBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
     warnings.push(
       warning(
         "acoustic",
-        "Акустическая защита: микрофон и динамики требуют наушники либо проверенную AEC.",
-      ),
-    );
-  }
-  if (model.latencyDebt.classification === "fails_usable_limit") {
-    warnings.push(
-      warning(
-        "latency",
-        "Task 7 latency debt: local provider fails usable limit; нужен provider comparison.",
+        "Для двустороннего перевода подключите и подтвердите наушники. Без них нужна проверенная AEC.",
       ),
     );
   }
@@ -219,25 +247,24 @@ function warningBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
 
 function warning(kind: string, text: string): HTMLElement {
   const item = element("div", `warning warning-${kind}`);
+  item.setAttribute("role", kind === "error" ? "alert" : "status");
   item.append(element("span", "status-dot warn"), element("span", "", text));
   return item;
 }
 
-function runtimeBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
+function runtimeBand(): HTMLElement {
   const control = translationControlState(state.snapshot);
   const section = element("section", "status-band");
   section.id = "status";
   const text = element("div");
   text.append(
-    element("h2", "", "Runtime"),
+    element("h2", "", control.summary),
     element(
       "p",
       "",
       [
-        control.summary,
-        `Provider: ${state.snapshot.provider_id}`,
-        `Provider health: ${providerHealthText()}`,
-        `Diagnostics: ${model.diagnostics.checkpoint ?? "idle"}`,
+        state.snapshot.provider_id === "local" ? "Локально · аудио остаётся на компьютере" : "OpenAI · при переводе аудио передаётся в облако",
+        state.busy ? "Выполняется команда…" : "",
       ].join(" · "),
     ),
   );
@@ -264,8 +291,6 @@ function controlsBand(): HTMLElement {
       "translation",
     ),
     providerControl(),
-    debugControl("debug_text"),
-    debugControl("debug_capture"),
   );
   const devices = state.snapshot.devices;
   if (devices && ["unknown_unsafe", "user_confirmed_headphones"].includes(devices.acoustic.mode)) {
@@ -274,8 +299,8 @@ function controlsBand(): HTMLElement {
     const headphones = element("div", "control-item");
     headphones.append(
       element("p", "", confirmed
-        ? "Наушники подтверждены вами. Это не проверка AEC; подтверждение сбрасывается после перезапуска или изменения устройств."
-        : `Тип выхода не определён: ${devices.sink.selected?.name ?? "нет устройства"}. Подтверждайте только реально подключённые наушники, не колонки.`),
+        ? "Наушники подтверждены. После перезапуска или смены устройств подтвердите их снова."
+        : "Подтверждайте только подключённые наушники, не колонки."),
       commandButton(
         confirmed ? "Отозвать подтверждение наушников" : "Подтвердить, что подключены наушники",
         intent?.command ?? null,
@@ -285,23 +310,26 @@ function controlsBand(): HTMLElement {
     );
     section.append(headphones);
   }
+  section.append(deviceStrip());
   return section;
 }
 
 function providerControl(): HTMLElement {
-  const wrap = element("label", "control-item");
-  wrap.append(element("span", "", "Provider"));
+  const wrap = element("div", "control-item provider-control");
+  const label = element("label", "", "Перевод");
+  label.htmlFor = "provider";
+  wrap.append(label);
   const select = selectControl<ProviderId>(
     "provider",
     state.snapshot.provider_id,
     [
-      ["local", "Local"],
-      ["openai", "OpenAI"],
+      ["local", "На компьютере"],
+      ["openai", "OpenAI · облако"],
     ],
     (providerId) => {
       const intent = providerPatchIntent(providerId, state.cloudOptIn);
       if (intent.blocked) {
-        state.error = "OpenAI требует явный cloud opt-in.";
+        state.error = "Сначала разрешите передачу аудио в OpenAI.";
         render();
         return;
       }
@@ -309,6 +337,10 @@ function providerControl(): HTMLElement {
       void invokeAction(intent.command, intent.args, "provider");
     },
   );
+  select.disabled = select.disabled || state.snapshot.runtime_status !== "stopped";
+  if (state.snapshot.runtime_status !== "stopped") {
+    select.title = "Остановите перевод перед сменой сервиса.";
+  }
   wrap.append(select);
 
   const optIn = element("label", "inline-check");
@@ -316,7 +348,8 @@ function providerControl(): HTMLElement {
   checkbox.type = "checkbox";
   checkbox.id = "cloud-opt-in";
   checkbox.checked = state.cloudOptIn;
-  checkbox.disabled = state.busy !== null || !state.connected;
+  checkbox.disabled = state.busy !== null || !state.connected || state.snapshot.runtime_status !== "stopped";
+  checkbox.title = "Менять разрешение на облачный перевод можно после Stop.";
   checkbox.addEventListener("change", () => {
     state.cloudOptIn = checkbox.checked;
     const revocation = cloudOptInChangeIntent(
@@ -334,7 +367,7 @@ function providerControl(): HTMLElement {
     }
     render();
   });
-  optIn.append(checkbox, element("span", "", "Cloud opt-in"));
+  optIn.append(checkbox, element("span", "", "Разрешаю передачу аудио в OpenAI"));
   wrap.append(optIn);
   return wrap;
 }
@@ -354,7 +387,7 @@ function debugControl(control: DebugControl): HTMLElement {
   const button = element("button", `control-button ${enabled ? "active" : ""}`);
   button.type = "button";
   button.id = control;
-  button.disabled = state.busy !== null;
+  button.disabled = state.busy !== null || !state.connected;
   const controlState = enabled ? "On" : "Off";
   button.textContent = isDebugText
     ? `Debug text ${controlState}`
@@ -366,42 +399,6 @@ function debugControl(control: DebugControl): HTMLElement {
     void invokeAction(intent.command, intent.args, control);
   });
   return button;
-}
-
-function audioMixBand(model: ReturnType<typeof buildUiModel>): HTMLElement {
-  const section = element("section", "section-band audio-mix-band");
-  const mix = model.audioMix;
-  section.append(
-    sectionHeading(
-      "Громкость",
-      `Mic ${mix.microphone_original_percent}/${mix.microphone_translation_percent} · Speaker ${mix.speaker_original_percent}/${mix.speaker_translation_percent}`,
-    ),
-  );
-  const grid = element("div", "audio-mix-grid");
-  grid.append(
-    audioMixSlider(
-      "Микрофон original",
-      "microphone_original_percent",
-      mix.microphone_original_percent,
-    ),
-    audioMixSlider(
-      "Микрофон translation",
-      "microphone_translation_percent",
-      mix.microphone_translation_percent,
-    ),
-    audioMixSlider(
-      "Динамики original",
-      "speaker_original_percent",
-      mix.speaker_original_percent,
-    ),
-    audioMixSlider(
-      "Динамики translation",
-      "speaker_translation_percent",
-      mix.speaker_translation_percent,
-    ),
-  );
-  section.append(grid);
-  return section;
 }
 
 function audioMixSlider(
@@ -421,10 +418,24 @@ function audioMixSlider(
   input.max = "100";
   input.step = "1";
   input.value = String(value);
-  input.disabled = state.busy !== null || !state.connected;
+  input.disabled = !state.connected || (state.busy !== null && state.busy !== "audio-mix");
+  input.addEventListener("pointerdown", () => { activeAudioMixInput = input; });
+  input.addEventListener("keydown", (event) => {
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+      activeAudioMixInput = input;
+    }
+  });
+  const endInteraction = () => {
+    if (activeAudioMixInput !== input) return;
+    activeAudioMixInput = null;
+    window.requestAnimationFrame(render);
+  };
+  input.addEventListener("pointerup", endInteraction);
+  input.addEventListener("pointercancel", endInteraction);
+  input.addEventListener("keyup", endInteraction);
+  input.addEventListener("blur", endInteraction);
   input.addEventListener("input", () => {
     valueNode.textContent = `${input.value}%`;
-    queueAudioMixChange(field, Number(input.value));
   });
   input.addEventListener("change", () => {
     flushAudioMixChange(field, Number(input.value));
@@ -443,23 +454,20 @@ function directionGrid(): HTMLElement {
 
 function directionPanel(directionId: AudioDirection): HTMLElement {
   const direction = directionState(directionId);
-  const latency = latencyState(directionId);
   const enabled = directionEnabled(direction);
   const panel = element("article", `direction-panel ${enabled ? "active" : "inactive"}`);
 
   const heading = element("div", "direction-heading");
   const copy = element("div");
   copy.append(
-    element("p", "eyebrow", directionId === "microphone" ? "Микрофон" : "Динамики"),
+    element("p", "eyebrow", directionId === "microphone" ? "Вы говорите → собеседник слышит" : "Собеседник говорит → вы слышите"),
     element(
       "h2",
       "",
       `${labelLanguage(direction.source_language)} → ${labelLanguage(direction.target_language)}`,
     ),
   );
-  const directionStateText = state.connected
-    ? directionEnabledText(enabled)
-    : "Ожидание";
+  const directionStateText = directionRuntimeLabel(direction, state.connected);
   heading.append(
     copy,
     element("span", `state-text ${enabled ? "enabled" : "disabled"}`, directionStateText),
@@ -471,50 +479,29 @@ function directionPanel(directionId: AudioDirection): HTMLElement {
     pairButton(direction, "en", "ru"),
   );
 
-  const mode = selectControl<TranslationMode>(
-    `${directionId}-mode`,
-    latency?.current_mode ?? "quality_first",
-    [
-      ["quality_first", "Quality"],
-      ["balanced", "Balanced"],
-      ["streaming_first", "Streaming"],
-    ],
-    (currentMode) =>
-      void invokeAction(
-        "translator_set_latency_mode",
-        { directionId, currentMode },
-        `${directionId}-mode`,
-      ),
-  );
-
-  const voice = selectControl<VoiceGender>(
-    `${directionId}-voice`,
-    direction.voice_profile.gender,
-    [
-      ["male", "Мужской"],
-      ["female", "Женский"],
-    ],
-    (gender) =>
-      void invokeAction(
+  const controls = element("div", "inline-controls");
+  controls.append(directionToggle(direction));
+  if (state.snapshot.provider_id === "local") {
+    const voice = selectControl<VoiceGender>(
+      `${directionId}-voice`,
+      direction.voice_profile.gender,
+      [["male", "Мужской"], ["female", "Женский"]],
+      (gender) => void invokeAction(
         "translator_set_voice_profile",
-        {
-          directionId,
-          language: direction.target_language,
-          gender,
-          engine: state.snapshot.provider_id === "openai" ? "openai" : "piper",
-        },
+        { directionId, language: direction.target_language, gender, engine: "piper" },
         `${directionId}-voice`,
       ),
-  );
+    );
 
-  const controls = element("div", "inline-controls");
-  controls.append(
-    directionToggle(direction),
-    labeledControl("Mode", mode),
-    labeledControl("Voice", voice),
+    controls.append(labeledControl("Голос", voice));
+  }
+  const mix = buildUiModel(state.snapshot).audioMix;
+  const originalField = `${directionId}_original_percent` as AudioMixField;
+  const translationField = `${directionId}_translation_percent` as AudioMixField;
+  panel.append(heading, pairControls, controls,
+    audioMixSlider("Оригинал", originalField, mix[originalField]),
+    audioMixSlider("Перевод", translationField, mix[translationField]),
   );
-
-  panel.append(heading, pairControls, controls);
   return panel;
 }
 
@@ -530,7 +517,7 @@ function directionToggle(direction: DirectionState): HTMLElement {
   input.addEventListener("change", () => {
     void invokeAction(intent.command, intent.args, `${direction.direction_id}-enabled`);
   });
-  label.append(input, element("span", "toggle-track"), element("span", "", "Канал"));
+  label.append(input, element("span", "toggle-track"), element("span", "", "Переводить"));
   return label;
 }
 
@@ -541,7 +528,8 @@ function pairButton(direction: DirectionState, source: Language, target: Languag
   button.type = "button";
   button.id = `${direction.direction_id}-pair-${source}-${target}`;
   button.textContent = `${source.toUpperCase()} → ${target.toUpperCase()}`;
-  button.disabled = state.busy !== null || active;
+  button.disabled = state.busy !== null || !state.connected || active;
+  button.setAttribute("aria-pressed", String(active));
   button.addEventListener("click", () => {
     void invokeAction(
       "translator_set_direction",
@@ -559,11 +547,11 @@ function pairButton(direction: DirectionState, source: Language, target: Languag
 function routeSection(): HTMLElement {
   const section = element("section", "section-band");
   section.id = "routes";
-  section.append(sectionHeading("Маршруты", selectedRouteText()));
+  section.append(sectionHeading("Звук собеседника", selectedRouteText()));
   const list = element("div", "route-list");
   const candidates = state.snapshot.routes?.candidates ?? [];
   if (candidates.length === 0) {
-    list.append(element("p", "empty", "Нет входящих route candidates."));
+    list.append(element("p", "empty", "Запустите звук в приложении звонка и выберите его здесь. Микрофон в приложении: Translator Virtual Mic."));
   } else {
     for (const candidate of candidates) {
       list.append(routeCandidate(candidate));
@@ -585,7 +573,7 @@ function routeCandidate(candidate: RouteCandidate): HTMLElement {
     ),
   );
   const button = commandButton(
-    "Select",
+    "Выбрать",
     "translator_select_route",
     { streamId: candidate.stream_id },
     `route-${candidate.stream_id}`,
@@ -613,7 +601,7 @@ function graphSection(): HTMLElement {
   if (!endpoints.childElementCount) {
     endpoints.append(element("p", "empty", "Audio graph не опубликован daemon."));
   }
-  section.append(endpoints, deviceStrip());
+  section.append(endpoints);
   return section;
 }
 
@@ -622,9 +610,8 @@ function deviceStrip(): HTMLElement {
   const source = state.snapshot.devices?.source.selected;
   const sink = state.snapshot.devices?.sink.selected;
   strip.append(
-    detailBlock("Physical mic", source?.description ?? source?.name ?? "Нет данных"),
-    detailBlock("Physical sink", sink?.description ?? sink?.name ?? "Нет данных"),
-    detailBlock("Acoustic mode", state.snapshot.devices?.acoustic.mode ?? "unknown"),
+    detailBlock("Микрофон", source?.description ?? source?.name ?? "Не найден"),
+    detailBlock("Наушники / выход", sink?.description ?? sink?.name ?? "Не найден"),
   );
   return strip;
 }
@@ -747,33 +734,44 @@ async function invokeAction(
   args: Record<string, unknown> | null | undefined,
   busyKey: string,
 ): Promise<void> {
-  if (!command) {
+  if (!command || state.busy !== null || !state.connected) {
     return;
+  }
+  if (busyKey !== "audio-mix") {
+    pendingAudioMix.clear();
+    activeAudioMixInput = null;
   }
   state.busy = busyKey;
   controlRevision += 1;
   state.error = null;
   render();
+  let succeeded = false;
   try {
     const snapshot = await invokeDaemon<RuntimeSnapshot>(command, args ?? undefined);
     if (command === "translator_stop") {
       clearDebugText("session_stop");
     }
     applySnapshot(snapshot);
+    succeeded = true;
   } catch (error) {
+    pendingAudioMix.clear();
+    activeAudioMixInput = null;
     const message = safeErrorMessage(error);
     try {
       applySnapshot(await invokeDaemon<RuntimeSnapshot>("translator_status"));
     } catch {
       state.connected = false;
+      activeAudioMixInput = null;
       wasDisconnected = true;
       clearDebugText("daemon_restart");
     }
     state.error = message;
   } finally {
+    if (!succeeded) pendingAudioMix.clear();
     controlRevision += 1;
     state.busy = null;
     render();
+    if (succeeded) void drainAudioMixChanges();
   }
 }
 
@@ -781,6 +779,8 @@ async function invokeCalibrationAction(
   command: "translator_start_aec_calibration" | "translator_cancel_aec_calibration",
   attemptId?: string,
 ): Promise<void> {
+  pendingAudioMix.clear();
+  activeAudioMixInput = null;
   calibrationRevision += 1;
   controlRevision += 1;
   state.busy = "aec-calibration";
@@ -815,33 +815,24 @@ function applyCalibrationStatus(status: AecCalibrationStatus): void {
   render();
 }
 
-function queueAudioMixChange(field: AudioMixField, value: number): void {
-  if (audioMixTimers[field] !== undefined) {
-    window.clearTimeout(audioMixTimers[field]);
-  }
-  audioMixTimers[field] = window.setTimeout(() => {
-    delete audioMixTimers[field];
-    void invokeAudioMixChange(field, value);
-  }, 150);
-}
-
 function flushAudioMixChange(field: AudioMixField, value: number): void {
-  if (audioMixTimers[field] !== undefined) {
-    window.clearTimeout(audioMixTimers[field]);
-    delete audioMixTimers[field];
-  }
   void invokeAudioMixChange(field, value);
 }
 
 async function invokeAudioMixChange(field: AudioMixField, value: number): Promise<void> {
-  if (!state.connected || state.busy !== null) {
-    return;
+  if (state.connected && (state.busy === null || state.busy === "audio-mix")) {
+    pendingAudioMix.set(field, value);
+    await drainAudioMixChanges();
   }
-  const intent = currentAudioMixPatchIntent(field, value, state.snapshot);
-  if (!intent) {
-    return;
-  }
-  await invokeAction(intent.command, intent.args, "audio-mix");
+}
+
+async function drainAudioMixChanges(): Promise<void> {
+  if (!state.connected || state.busy !== null) return;
+  const next = pendingAudioMix.take();
+  if (!next) return;
+  const intent = currentAudioMixPatchIntent(next[0], next[1], state.snapshot);
+  if (intent) await invokeAction(intent.command, intent.args, "audio-mix");
+  else await drainAudioMixChanges();
 }
 
 async function refreshStatus(): Promise<void> {
@@ -850,6 +841,8 @@ async function refreshStatus(): Promise<void> {
   }
   const revision = controlRevision;
   if (!tauriRuntimeAvailable()) {
+    pendingAudioMix.clear();
+    activeAudioMixInput = null;
     state.connected = false;
     state.error = "Tauri runtime недоступен: открыт browser preview.";
     state.lastUpdated = new Date();
@@ -878,6 +871,8 @@ async function refreshStatus(): Promise<void> {
     }
     wasDisconnected = true;
     state.connected = false;
+    pendingAudioMix.clear();
+    activeAudioMixInput = null;
     state.error = safeErrorMessage(error);
     state.lastUpdated = new Date();
     render();
@@ -912,13 +907,32 @@ async function invokeDaemon<T>(
 function applySnapshot(snapshot: RuntimeSnapshot): void {
   const previousSessionId = state.snapshot.self_test?.status.session_id ?? null;
   const nextSessionId = snapshot.self_test?.status.session_id ?? null;
+  if (
+    state.snapshot.runtime_status !== snapshot.runtime_status
+    || state.snapshot.translation_running !== snapshot.translation_running
+    || state.snapshot.provider_id !== snapshot.provider_id
+    || previousSessionId !== nextSessionId
+    || (snapshot.directions ?? []).some((direction) => {
+      const previous = state.snapshot.directions?.find(
+        (candidate) => candidate.direction_id === direction.direction_id,
+      );
+      return previous?.runtime_status !== direction.runtime_status
+        || previous?.enabled !== direction.enabled;
+    })
+  ) {
+    pendingAudioMix.clear();
+    activeAudioMixInput = null;
+  }
   if (state.snapshot.translation_running && !snapshot.translation_running) {
+    pendingAudioMix.clear();
     clearDebugText("session_stop");
   }
   if (state.snapshot.provider_id !== snapshot.provider_id) {
+    pendingAudioMix.clear();
     clearDebugText("provider_switch");
   }
   if (previousSessionId && previousSessionId !== nextSessionId) {
+    pendingAudioMix.clear();
     clearDebugText("daemon_restart");
   }
   if (!snapshot.debug_text_enabled) {
@@ -991,6 +1005,7 @@ function defaultDirection(
     source_language: sourceLanguage,
     target_language: targetLanguage,
     enabled: true,
+    runtime_status: "stopped",
     voice_profile: {
       language: targetLanguage,
       gender: "male",
@@ -1022,14 +1037,6 @@ function directionState(directionId: AudioDirection): DirectionState {
 
 function directionEnabled(direction: DirectionState): boolean {
   return direction.enabled !== false;
-}
-
-function directionEnabledText(enabled: boolean): string {
-  return enabled ? "Включен" : "Отключен";
-}
-
-function latencyState(directionId: AudioDirection): LatencyPolicyState | undefined {
-  return state.snapshot.latency_policy?.find((latency) => latency.direction_id === directionId);
 }
 
 function selectControl<T extends string>(
@@ -1079,25 +1086,9 @@ function detailBlock(label: string, value: string): HTMLElement {
 function selectedRouteText(): string {
   const route = state.snapshot.routes?.active_route;
   if (!route) {
-    return `Resolution: ${state.snapshot.routes?.resolution ?? "unknown"}`;
+    return "Выберите приложение, речь которого нужно переводить";
   }
   return `${route.application} stream ${route.stream_id} → ${route.target_sink_name}`;
-}
-
-function providerHealthText(): string {
-  const preconditions = state.snapshot.self_test?.preconditions;
-  if (!preconditions) {
-    return state.connected ? "not probed" : "offline";
-  }
-  const outgoing = preconditions["outgoing_provider_ready"];
-  const incoming = preconditions["incoming_provider_ready"];
-  if (outgoing === true && incoming === true) {
-    return "ready";
-  }
-  if (outgoing === false || incoming === false) {
-    return "unavailable";
-  }
-  return "unknown";
 }
 
 function graphSummary(): string {
@@ -1124,6 +1115,12 @@ function safeErrorMessage(error: unknown): string {
     }
     if (code === "audio_mix_discovery_failed") {
       return "Аудиопоток для изменения громкости недоступен. Громкость не изменена.";
+    }
+    if (code === "provider_change_requires_stop" || code === "latency_change_requires_stop") {
+      return "Сначала остановите перевод, затем измените настройку.";
+    }
+    if (code === "translation_start_failed") {
+      return "Не удалось запустить перевод. Проверьте модели и устройства; для OpenAI — ключ, лимит API и сеть. Подробности в диагностике.";
     }
     return code;
   }

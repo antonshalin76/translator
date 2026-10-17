@@ -1597,6 +1597,7 @@ def test_runtime_model_failure_has_partial_latency_and_no_private_leak(
             assert latency.tts_first_audio_ms is None
             assert latency.provider_total_ms == provider_total_ms
             assert error.code is SafeErrorCode.PROVIDER_UNAVAILABLE
+            assert error.retryable is False
             assert final.outcome is UtteranceOutcome.DROPPED
             assert final.final_audio_sequence is None
             assert_session_sequence(opened, health, utterance_id, collector.events)
@@ -1642,6 +1643,14 @@ def test_request_scoped_mt_failure_keeps_model_ready_for_next_utterance() -> Non
             failed = await provider.health(session.session_id)
             assert failed.state is ProviderState.READY
             assert failed.models[1].state is ModelState.READY
+            assert (
+                next(
+                    event
+                    for event in collector.events
+                    if isinstance(event, PrivacySafeProviderError)
+                ).retryable
+                is True
+            )
             assert tts.calls == []
             assert any(
                 isinstance(event, ProviderUtteranceFinal)
@@ -1880,6 +1889,8 @@ def test_unavailable_model_fails_closed_without_native_calls(
             assert latency.mt_first_text_ms is None
             assert latency.tts_first_audio_ms is None
             assert error.code is SafeErrorCode.MODEL_NOT_LOADED
+            assert error.retryable is False
+            assert health.safe_error.retryable is False
             assert final.outcome is UtteranceOutcome.DROPPED
             assert final.final_audio_sequence is None
             assert_session_sequence(opened, health, utterance_id, collector.events)

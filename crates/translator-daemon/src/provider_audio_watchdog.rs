@@ -14,7 +14,9 @@ use crate::CLOSE_ACK_TIMEOUT;
 
 const MAX_RECEIVE_BUFFERED_MS: u32 = 400;
 
-pub const INTER_AUDIO_DELTA_TIMEOUT: Duration = Duration::from_millis(250);
+// Real speech providers deliver 400-ms PCM batches up to 690 ms apart.
+// This guard starts after owned playable audio, not after each 20-ms IPC frame.
+pub const INTER_AUDIO_DELTA_TIMEOUT: Duration = Duration::from_millis(500);
 pub const CANCEL_FINAL_TIMEOUT: Duration = Duration::from_millis(250);
 const COLLECTING_INPUT_TIMEOUT: Duration = Duration::from_millis(12_000);
 const FIRST_AUDIO_AFTER_EOU_TIMEOUT: Duration = Duration::from_millis(6_000);
@@ -161,8 +163,12 @@ impl ProviderAudioWatchdog {
             return Err(WatchdogError::StreamMismatch);
         }
         let deadline_ns = match watched.phase {
-            UtterancePhase::CollectingInput { .. } => {
-                return Err(WatchdogError::InputNotComplete);
+            UtterancePhase::CollectingInput { deadline_ns } => {
+                return if now_ns <= deadline_ns {
+                    Ok(())
+                } else {
+                    Err(WatchdogError::DeadlineExpired)
+                };
             }
             UtterancePhase::AwaitingFirstAudio { deadline_ns }
             | UtterancePhase::StreamingAudio { deadline_ns } => deadline_ns,
@@ -212,6 +218,37 @@ impl ProviderAudioWatchdog {
     pub fn disarm_session(&mut self) {
         self.utterances.clear();
         self.session_phase = SessionPhase::Terminal;
+    }
+
+    pub(crate) fn defer_provider_receipt(&mut self, blocked_ns: u64) {
+        // Deliberate local receive backpressure is not provider silence.
+        for watched in self.utterances.values_mut() {
+            match &mut watched.phase {
+                UtterancePhase::AwaitingFirstAudio { deadline_ns } => {
+                    *deadline_ns = deadline_ns.saturating_add(blocked_ns);
+                }
+                UtterancePhase::CollectingInput { .. }
+                | UtterancePhase::StreamingAudio { .. }
+                | UtterancePhase::CancelPending { .. } => {}
+            }
+        }
+    }
+
+    pub(crate) fn credit_playable_audio(
+        &mut self,
+        stream_id: Uuid,
+        utterance_id: Uuid,
+        now_ns: u64,
+        playable_until_ns: u64,
+    ) {
+        if let Some(watched) = self.utterances.get_mut(&utterance_id)
+            && watched.stream_id == stream_id
+            && let UtterancePhase::StreamingAudio { deadline_ns } = &mut watched.phase
+            && now_ns <= *deadline_ns
+        {
+            *deadline_ns = (*deadline_ns)
+                .max(playable_until_ns.saturating_add(INTER_AUDIO_DELTA_TIMEOUT.as_nanos() as u64));
+        }
     }
 
     pub fn record_session_closed(&mut self, session_id: Uuid) -> Result<(), WatchdogError> {
@@ -266,10 +303,8 @@ impl ProviderAudioWatchdog {
             return Err(WatchdogError::StreamMismatch);
         }
         let deadline_ns = match watched.phase {
-            UtterancePhase::CollectingInput { .. } => {
-                return Err(WatchdogError::InputNotComplete);
-            }
-            UtterancePhase::AwaitingFirstAudio { deadline_ns }
+            UtterancePhase::CollectingInput { deadline_ns }
+            | UtterancePhase::AwaitingFirstAudio { deadline_ns }
             | UtterancePhase::StreamingAudio { deadline_ns } => deadline_ns,
             UtterancePhase::CancelPending { .. } => return Err(WatchdogError::CancelPending),
         };
@@ -467,6 +502,21 @@ struct BufferedFrame {
 }
 
 impl ProviderStreamCoordinator {
+    pub(crate) fn credit_playable_audio(
+        &mut self,
+        stream_id: Uuid,
+        utterance_id: Uuid,
+        now_ns: u64,
+        playable_until_ns: u64,
+    ) {
+        self.watchdog
+            .credit_playable_audio(stream_id, utterance_id, now_ns, playable_until_ns);
+    }
+
+    pub(crate) fn defer_provider_receipt(&mut self, blocked_ns: u64) {
+        self.watchdog.defer_provider_receipt(blocked_ns);
+    }
+
     pub fn new(contract: ProviderSessionContract) -> Self {
         Self {
             watchdog: ProviderAudioWatchdog::new(contract.session_id),
@@ -711,4 +761,85 @@ impl ProviderStreamCoordinator {
 
 fn parse_uuid(value: &str) -> Result<Uuid, ProviderStreamCoordinatorError> {
     Uuid::parse_str(value).map_err(|_| ProviderStreamCoordinatorError::InvalidIdentifier)
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::*;
+    use proptest::{prelude::*, test_runner::RngSeed};
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 100, max_shrink_iters: 512,
+            rng_seed: RngSeed::Fixed(0x2026_1019), ..ProptestConfig::default() })]
+
+        #[test]
+        fn playable_credit_is_identity_phase_and_deadline_scoped(
+            phase in 0_u8..4, same_stream in any::<bool>(), same_utterance in any::<bool>(),
+            late in any::<bool>(), credit_ms in 0_u64..=400,
+        ) {
+            let stream = Uuid::from_u128(1);
+            let utterance = Uuid::from_u128(2);
+            let mut watchdog = ProviderAudioWatchdog::new(Uuid::from_u128(3));
+            watchdog.start_utterance(stream, utterance, 0).unwrap();
+            if phase > 0 { watchdog.record_end_of_utterance(stream, utterance, 1).unwrap(); }
+            if phase > 1 { watchdog.record_audio_delta(stream, utterance, 2).unwrap(); }
+            if phase > 2 { watchdog.cancel_utterance(stream, utterance, 3).unwrap(); }
+            let original = watchdog.next_phase_deadline_ns().unwrap();
+            let now = if late { original + 1 } else { 4 };
+            let until = original + credit_ms * 1_000_000;
+            watchdog.credit_playable_audio(
+                if same_stream { stream } else { Uuid::from_u128(4) },
+                if same_utterance { utterance } else { Uuid::from_u128(5) }, now, until);
+            let expected = if phase == 2 && same_stream && same_utterance && !late {
+                until + INTER_AUDIO_DELTA_TIMEOUT.as_nanos() as u64
+            } else { original };
+            prop_assert_eq!(watchdog.next_phase_deadline_ns(), Some(expected));
+            // Repeating the same receipt never manufactures additional media time.
+            watchdog.credit_playable_audio(
+                if same_stream { stream } else { Uuid::from_u128(4) },
+                if same_utterance { utterance } else { Uuid::from_u128(5) }, now, until);
+            prop_assert_eq!(watchdog.next_phase_deadline_ns(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn deliberate_receive_backpressure_preserves_active_provider_receipt_budget() {
+        let stream = Uuid::new_v4();
+        let utterance = Uuid::new_v4();
+        let mut watchdog = ProviderAudioWatchdog::new(Uuid::new_v4());
+        watchdog.start_utterance(stream, utterance, 0).unwrap();
+        watchdog
+            .record_end_of_utterance(stream, utterance, 1)
+            .unwrap();
+        let original = watchdog.next_phase_deadline_ns().unwrap();
+        let blocked = 350_000_000;
+        watchdog.defer_provider_receipt(blocked);
+        assert!(watchdog.poll(original + blocked).is_empty());
+        assert!(matches!(
+            watchdog.poll(original + blocked + 1).as_slice(),
+            [WatchdogAction::CancelUtterance { .. }]
+        ));
+        let cancel_deadline = watchdog.next_phase_deadline_ns();
+        watchdog.defer_provider_receipt(blocked);
+        assert_eq!(
+            watchdog.next_phase_deadline_ns(),
+            cancel_deadline,
+            "local backpressure cannot prolong cancellation"
+        );
+    }
+
+    #[test]
+    fn deliberate_receive_backpressure_does_not_prolong_input_collection() {
+        let stream = Uuid::new_v4();
+        let utterance = Uuid::new_v4();
+        let mut watchdog = ProviderAudioWatchdog::new(Uuid::new_v4());
+        watchdog.start_utterance(stream, utterance, 0).unwrap();
+        let original = watchdog.next_phase_deadline_ns().unwrap();
+        watchdog.defer_provider_receipt(350_000_000);
+        assert_eq!(watchdog.next_phase_deadline_ns(), Some(original));
+        assert!(matches!(
+            watchdog.poll(original + 1).as_slice(),
+            [WatchdogAction::CancelUtterance { .. }]
+        ));
+    }
 }

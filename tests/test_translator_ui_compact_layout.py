@@ -7,22 +7,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TranslatorUiCompactLayoutTests(unittest.TestCase):
-    def test_direction_panels_do_not_render_low_value_detail_table(self) -> None:
+    def test_primary_surface_groups_volume_with_each_direction(self) -> None:
         source = (ROOT / "apps/translator-ui/src/main.ts").read_text()
 
-        for label in (
-            'detail("Канал"',
-            'detail("Режим"',
-            'detail("Latency p50"',
-            'detail("Latency p95 first"',
-            'detail("Latency p95 last"',
-            'detail("Degradation"',
-            'detail("Голос"',
-        ):
-            self.assertNotIn(label, source)
+        self.assertNotIn("function audioMixBand", source)
+        self.assertIn('audioMixSlider("Оригинал", originalField', source)
+        self.assertIn('audioMixSlider("Перевод", translationField', source)
+        self.assertNotIn('"translator_set_latency_mode"', source)
+        self.assertIn('state.snapshot.provider_id === "local"', source)
+        self.assertIn('labeledControl("Голос", voice)', source)
 
-        self.assertIn('labeledControl("Mode", mode)', source)
-        self.assertIn('labeledControl("Voice", voice)', source)
+    def test_advanced_controls_are_collapsed_and_keep_open_state(self) -> None:
+        source = (ROOT / "apps/translator-ui/src/main.ts").read_text()
+        self.assertIn('element("details", "advanced-settings")', source)
+        self.assertIn("details.open = state.advancedOpen", source)
+        self.assertIn('details.addEventListener("toggle"', source)
+        self.assertIn("activeAudioMixInput && state.connected", source)
 
 
 if __name__ == "__main__":

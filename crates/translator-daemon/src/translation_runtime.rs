@@ -1383,6 +1383,7 @@ struct PreparedDirection {
     capture: Option<PulsePcmCapture>,
     playback: Option<PulsePcmPlayback>,
     playback_reusable: bool,
+    productive_playback: bool,
     playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
     runtime_generation: Uuid,
     native: Option<Arc<NativeDuplexIo>>,
@@ -1479,6 +1480,10 @@ trait DirectionEffects: Clone + 'static {
     type Acquisition: 'static;
     type Prepared: 'static;
 
+    fn productive_playback(_prepared: &Self::Prepared) -> bool {
+        false
+    }
+
     fn validate_start(&self, _deadline: Instant) -> Result<(), DuplexRuntimeError> {
         Ok(())
     }
@@ -1512,6 +1517,7 @@ trait DirectionEffects: Clone + 'static {
         deadline: Instant,
     ) -> Result<(), DuplexRuntimeError>;
     fn discard_provider(&self, owner: &mut Self::Acquisition);
+    fn pcm_stopped(owner: &Self::Acquisition) -> bool;
     fn is_clean(owner: &Self::Acquisition) -> bool;
     async fn wait_ready<R: crate::SidecarRuntime>(
         &self,
@@ -1558,6 +1564,7 @@ struct WorkerDone {
     direction: AudioDirection,
     epoch: u64,
     outcome: DirectionOutcome,
+    productive_playback: bool,
 }
 
 type JoinedWorker = Result<(TaskId, WorkerDone), JoinError>;
@@ -1766,6 +1773,17 @@ impl DuplexCoordinator<ProcessSidecarRuntime, ProcessDirectionEffects> {
             config.socket_path.clone(),
             config.expected_uid,
         )
+        .map(|runtime| {
+            runtime.with_provider(
+                desired
+                    .microphone
+                    .as_ref()
+                    .or(desired.speaker.as_ref())
+                    .expect("admitted runtime has an enabled direction")
+                    .runtime
+                    .provider_id,
+            )
+        })
         .map_err(|_| CoordinatorStartFailure {
             error: DuplexRuntimeError::StartFailed,
             cleanup: None,
@@ -2108,6 +2126,10 @@ impl<R: crate::SidecarRuntime, E: DirectionEffects> DuplexCoordinator<R, E> {
                         ))
                     }
                 };
+                let productive_playback = match &state.resource {
+                    DirectionResource::Prepared(prepared) => E::productive_playback(prepared),
+                    _ => false,
+                };
                 let resource =
                     std::mem::replace(&mut state.resource, DirectionResource::Transitioning);
                 if let DirectionResource::Prepared(prepared) = resource {
@@ -2119,6 +2141,7 @@ impl<R: crate::SidecarRuntime, E: DirectionEffects> DuplexCoordinator<R, E> {
                     direction,
                     epoch,
                     outcome,
+                    productive_playback,
                 }
             });
             let task_id = handle.id();
@@ -2225,8 +2248,25 @@ impl<R: crate::SidecarRuntime, E: DirectionEffects> DuplexCoordinator<R, E> {
         launch: DirectionLaunch,
         deadline: Instant,
     ) -> Result<(), DuplexRuntimeError> {
-        self.cleanup_worker(direction, CloseRequestReason::ProviderSwitch, deadline)
-            .await?;
+        if let Err(error) = self
+            .cleanup_worker(direction, CloseRequestReason::ProviderSwitch, deadline)
+            .await
+        {
+            let pcm_stopped = self
+                .workers
+                .get(&direction)
+                .and_then(|worker| worker.cell.try_lock().ok())
+                .is_some_and(|state| {
+                    matches!(&state.resource,
+                    DirectionResource::Cleanup(owner) if E::pcm_stopped(owner))
+                });
+            if !pcm_stopped {
+                return Err(error);
+            }
+            // A dead RPC cannot acknowledge CloseSession; only a reaped generation
+            // can settle its retained provider ownership before either leg resumes.
+            return Box::pin(self.restart_shared(deadline)).await;
+        }
         self.recover_launch(direction, launch, deadline).await
     }
 
@@ -2434,6 +2474,12 @@ impl<R: crate::SidecarRuntime, E: DirectionEffects> DuplexCoordinator<R, E> {
         self.observer.reset_direction(direction);
         match joined {
             Ok((_id, done)) if done.direction == direction && done.epoch == expected_epoch => {
+                if done.productive_playback && matches!(done.outcome, DirectionOutcome::Fault(_)) {
+                    self.direction_faults.remove(&direction);
+                    if matches!(done.outcome, DirectionOutcome::Fault(FaultScope::Shared)) {
+                        self.shared_faults = 0;
+                    }
+                }
                 Ok((direction, done.outcome))
             }
             Ok(_) | Err(_) => {
@@ -3051,6 +3097,10 @@ impl DirectionEffects for ProcessDirectionEffects {
     type Acquisition = ProcessAcquisition;
     type Prepared = PreparedDirection;
 
+    fn productive_playback(prepared: &Self::Prepared) -> bool {
+        prepared.productive_playback
+    }
+
     fn validate_start(&self, deadline: Instant) -> Result<(), DuplexRuntimeError> {
         let Some(check) = self.activation_check.as_ref() else {
             return Ok(());
@@ -3172,6 +3222,7 @@ impl DirectionEffects for ProcessDirectionEffects {
             capture,
             playback,
             playback_reusable: true,
+            productive_playback: false,
             playback_mix_authority: self.playback_mix_authority.clone(),
             runtime_generation,
             native: owner.native,
@@ -3306,6 +3357,10 @@ impl DirectionEffects for ProcessDirectionEffects {
 
     fn is_clean(owner: &Self::Acquisition) -> bool {
         owner.provider.is_none() && owner.capture.is_none() && owner.playback.is_none()
+    }
+
+    fn pcm_stopped(owner: &Self::Acquisition) -> bool {
+        owner.native.is_none() && owner.capture.is_none() && owner.playback.is_none()
     }
 
     async fn wait_ready<R: crate::SidecarRuntime>(
@@ -3819,6 +3874,7 @@ async fn run_direction_loop(
         capture,
         playback,
         playback_reusable,
+        productive_playback,
         playback_mix_authority,
         runtime_generation,
         native,
@@ -3838,10 +3894,14 @@ async fn run_direction_loop(
     let mut playback_queue = BoundedPcmQueue::default();
     let mut playback_metadata = VecDeque::<Option<QueuedPlaybackMetadata>>::new();
     let mut playback_audible_until_ns = 0;
+    let mut playback_audible_utterance = None;
     let mut watchdog = tokio::time::interval(WATCHDOG_INTERVAL);
     watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut paused = native.as_ref().map(|native| native.paused.subscribe());
     let mut mode_change_requested = false;
+    let mut provider_backpressure_since_ns = None::<u64>;
+    let mut played_utterances = HashSet::new();
+    let mut completed_playback = HashSet::new();
     loop {
         let playback_frame = playback_queue.pop();
         let playback_context = if playback_frame.is_some() {
@@ -3856,11 +3916,7 @@ async fn run_direction_loop(
             None
         };
         let admitted = Instant::now();
-        let playback_deadline = Some(
-            watchdog_phase_deadline(session)
-                .unwrap_or(admitted + HOT_IO_LIVENESS_TIMEOUT)
-                .min(admitted + HOT_IO_LIVENESS_TIMEOUT),
-        );
+        let playback_deadline = Some(admitted + HOT_IO_LIVENESS_TIMEOUT);
         let mut playback_finished = playback_frame.is_none();
         let mut playback_stop = stop.clone();
         let mut reset_playback = false;
@@ -3885,6 +3941,29 @@ async fn run_direction_loop(
             tokio::pin!(operation);
             async {
                 'poll: loop {
+                    let now_ns = monotonic_ns();
+                    if let Some(previous_ns) = provider_backpressure_since_ns {
+                        session.defer_provider_receipt(now_ns.saturating_sub(previous_ns));
+                    }
+                    let receive_provider = playback_queue
+                        .has_capacity_for(translator_audio::StreamPcmFormat::provider_default());
+                    provider_backpressure_since_ns = (!receive_provider).then_some(now_ns);
+                    // Only owned translation PCM can defer starvation. Bypass audio,
+                    // another utterance, input collection and cancellation earn no credit.
+                    for utterance in playback_context.iter().chain(playback_metadata.iter().flatten())
+                        .map(|metadata| metadata.utterance_id)
+                        .chain(playback_audible_utterance.filter(|_| playback_audible_until_ns > now_ns))
+                    {
+                        let queued_frames = playback_metadata.iter().flatten()
+                            .filter(|metadata| metadata.utterance_id == utterance).count() as u64;
+                        let writing_ms = if !playback_finished && playback_context.is_some_and(|metadata| metadata.utterance_id == utterance) {
+                            playback_frame.as_ref().map_or(0, |frame| u64::from(frame.format().frame_duration_ms()))
+                        } else { 0 };
+                        let queued_ms = queued_frames * u64::from(translator_audio::StreamPcmFormat::provider_default().frame_duration_ms());
+                        let audible_until = if playback_audible_utterance == Some(utterance) { playback_audible_until_ns.max(now_ns) } else { now_ns };
+                        session.credit_playable_audio(utterance, now_ns,
+                            audible_until.saturating_add((queued_ms + writing_ms).saturating_mul(1_000_000)));
+                    }
                     let is_paused = paused.as_ref().is_some_and(|paused| *paused.borrow());
                     let native_bypass = is_paused
                         && launch.runtime.direction == AudioDirection::Speaker
@@ -3981,10 +4060,11 @@ async fn run_direction_loop(
 
                         event = async {
                             tokio::select! {
-                                event = provider.next_event() => DirectionLoopEvent::Provider(event),
+                                event = provider.next_event(), if receive_provider => DirectionLoopEvent::Provider(event),
                                 frame = read_direction_capture(capture.as_mut(), native.as_ref(),
                                     launch.runtime.direction, capture_sequence),
-                                    if !mode_change_requested && (!is_paused || native_bypass) =>
+                                    if !mode_change_requested && (!is_paused || native_bypass)
+                                        && (!native_bypass || receive_provider) =>
                                     DirectionLoopEvent::Capture(frame),
                                 result = operation.as_mut() => DirectionLoopEvent::Playback(result),
                             }
@@ -4087,11 +4167,32 @@ async fn run_direction_loop(
                                                 code,
                                                 retryable,
                                             });
+                                            if code == SafeProviderErrorCode::ModelNotLoaded
+                                                || (matches!(code, SafeProviderErrorCode::ProviderUnavailable | SafeProviderErrorCode::ProviderAuthFailed | SafeProviderErrorCode::CloudNotEnabled) && !retryable)
+                                            {
+                                                return Err(DirectionFailureOrigin::ProviderShared);
+                                            }
                                         }
                                         DirectionEffect::UtteranceTerminalOutcome {
                                             utterance_id,
                                             outcome,
                                         } => {
+                                            if !*productive_playback {
+                                                let pending = (!playback_finished && playback_context
+                                                    .is_some_and(|metadata| metadata.utterance_id == utterance_id))
+                                                    || playback_metadata.iter().flatten()
+                                                        .any(|metadata| metadata.utterance_id == utterance_id);
+                                                let played = played_utterances.remove(&utterance_id);
+                                                if outcome == TerminalOutcome::Completed {
+                                                    if pending {
+                                                        completed_playback.insert(utterance_id);
+                                                    } else if played {
+                                                        *productive_playback = true;
+                                                    }
+                                                } else {
+                                                    completed_playback.remove(&utterance_id);
+                                                }
+                                            }
                                             if let Some(native) = native.as_ref() {
                                                 let mut states = native.progress.lock().map_err(|_| DirectionFailureOrigin::InternalTransport)?;
                                                 let state = states.entry(launch.runtime.direction).or_default();
@@ -4268,12 +4369,22 @@ async fn run_direction_loop(
                                 match result? {
                                     PlaybackWrite::Completed(observed) => {
                                         playback_finished = true;
-                                        if playback_context.is_some() {
+                                        if let Some(metadata) = playback_context {
+                                            if !*productive_playback {
+                                                played_utterances.insert(metadata.utterance_id);
+                                                if completed_playback.contains(&metadata.utterance_id)
+                                                    && !playback_metadata.iter().flatten().any(|queued|
+                                                        queued.utterance_id == metadata.utterance_id)
+                                                {
+                                                    *productive_playback = true;
+                                                }
+                                            }
                                             playback_audible_until_ns = extend_playback_deadline(
                                                 playback_audible_until_ns,
                                                 observed,
                                                 u64::from(playback_frame.as_ref().expect("active playback frame").format().frame_duration_ms()),
                                             );
+                                            playback_audible_utterance = Some(metadata.utterance_id);
                                         }
                                         break 'poll Ok(None);
                                     }
@@ -4293,6 +4404,8 @@ async fn run_direction_loop(
             return Ok(outcome);
         }
         if reset_playback {
+            played_utterances.clear();
+            completed_playback.clear();
             if let Some(reason) =
                 stop_playback_for_reset(&mut playback_io, stop, watchdog_phase_deadline(session))
                     .await?
@@ -4300,6 +4413,7 @@ async fn run_direction_loop(
                 return Ok(DirectionOutcome::Stopped(reason));
             }
             playback_audible_until_ns = 0;
+            playback_audible_utterance = None;
             if let Some(request) = reset_request {
                 let (runtime_direction, phase_deadline, operation) =
                     provider_send_operation(launch.runtime.direction, session, provider, request);
@@ -5289,6 +5403,194 @@ pub(crate) mod tests {
         }
     }
 
+    fn live_progress_complete(
+        seconds: u64,
+        observed: Duration,
+        stalled: bool,
+        completed: [u64; 2],
+        written: [u64; 2],
+    ) -> bool {
+        !stalled
+            && observed >= Duration::from_secs(seconds)
+            && completed
+                .iter()
+                .all(|count| *count >= (seconds / 20).max(1))
+            && written.iter().all(|count| *count > 0)
+    }
+
+    #[test]
+    fn live_progress_oracle_rejects_stall_even_when_cleanup_crosses_the_finish_line() {
+        assert!(live_progress_complete(
+            1200,
+            Duration::from_secs(1200),
+            false,
+            [60, 60],
+            [100, 100]
+        ));
+        for (observed, stalled, completed, written) in [
+            (1208, true, [60, 60], [100, 100]),
+            (1199, false, [60, 60], [100, 100]),
+            (1200, false, [60, 59], [100, 100]),
+            (1200, false, [60, 60], [100, 0]),
+        ] {
+            assert!(!live_progress_complete(
+                1200,
+                Duration::from_secs(observed),
+                stalled,
+                completed,
+                written
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires private Pulse, synthetic speech and real model/API prerequisites"]
+    fn private_live_duplex_progress() {
+        use crate::AudioMixController;
+        let _ = tracing_subscriber::fmt().with_ansi(false).try_init();
+        struct Progress(Mutex<([u64; 2], [u64; 2], u64)>);
+        impl DuplexRuntimeObserver for Progress {
+            fn observe(&self, event: DuplexRuntimeEvent) {
+                let mut progress = self.0.lock().unwrap();
+                let index = |direction| usize::from(direction == AudioDirection::Speaker);
+                match event {
+                    DuplexRuntimeEvent::UtteranceTerminalOutcome {
+                        direction,
+                        outcome: TerminalOutcome::Completed,
+                        ..
+                    } => progress.0[index(direction)] += 1,
+                    DuplexRuntimeEvent::AudioFrame { direction, .. } => {
+                        progress.1[index(direction)] += 1
+                    }
+                    DuplexRuntimeEvent::ProviderError { .. }
+                    | DuplexRuntimeEvent::GenerationRestart { .. }
+                    | DuplexRuntimeEvent::FirstAudioExpired { .. } => progress.2 += 1,
+                    _ => {}
+                }
+            }
+        }
+        let directory =
+            PathBuf::from(std::env::var("TRANSLATOR_LIVE_CHECK_ROOT").expect("private check root"));
+        assert!(directory.is_absolute() && directory.starts_with("/tmp"));
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::env::var("PULSE_SERVER").unwrap(),
+            format!("unix:{}", directory.join("native").display())
+        );
+        let cards = std::process::Command::new("pactl")
+            .args(["--format=json", "list", "cards"])
+            .output()
+            .unwrap();
+        assert!(cards.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&cards.stdout).unwrap(),
+            serde_json::json!([])
+        );
+        let seconds: u64 = std::env::var("TRANSLATOR_LIVE_CHECK_SECONDS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((15..=1200).contains(&seconds));
+        let provider = match std::env::var("TRANSLATOR_LIVE_CHECK_PROVIDER")
+            .unwrap()
+            .as_str()
+        {
+            "local" => ProviderId::Local,
+            "openai" => ProviderId::Openai,
+            _ => panic!("unsupported check provider"),
+        };
+        let mut snapshot = ready_snapshot();
+        snapshot.provider_id = provider;
+        snapshot.audio_leaves_machine = provider == ProviderId::Openai;
+        for direction in &mut snapshot.directions {
+            direction.voice_profile.engine = if provider == ProviderId::Local {
+                VoiceEngine::Piper
+            } else {
+                VoiceEngine::Openai
+            };
+        }
+        let launch = test_launch(
+            snapshot,
+            TestAudioTargets {
+                microphone_capture: "translator_test_mic.monitor".into(),
+                microphone_playback: "translator_mic_out".into(),
+                speaker_capture: "translator_remote_in.monitor".into(),
+                speaker_playback: "translator_test_out".into(),
+            },
+        );
+        let config = ProcessDuplexConfig::from_runtime(
+            PathBuf::from(std::env::var("TRANSLATOR_PYTHON").unwrap()),
+            PathBuf::from(std::env::var("TRANSLATOR_SIDECAR_ROOT").unwrap()),
+            directory.join("provider.sock"),
+        )
+        .unwrap();
+        let progress = Arc::new(Progress(Mutex::new(([0; 2], [0; 2], 0))));
+        let mix = Arc::new(crate::AudioMixApplication::new(
+            translator_audio::SystemCommandRunner,
+        ));
+        mix.reconcile_committed(crate::TranslationMixMode::Quarantine {
+            mic_original_expected: false,
+        })
+        .unwrap();
+        let runner = ProcessDuplexRunner::with_observer(config, progress.clone())
+            .with_playback_mix_authority(mix.clone());
+        // This test bypasses only acoustic admission for a zero-card private server.
+        let mut runtime = runner
+            .start_launch(launch, None, Instant::now() + RUNTIME_START_BUDGET, None)
+            .unwrap();
+        mix.apply_desired(
+            crate::AudioMixState::default(),
+            crate::TranslationMixMode::Translating,
+        )
+        .unwrap();
+        fs::write(directory.join("runtime-ready"), b"ready").unwrap();
+        let began = std::time::Instant::now();
+        let mut previous = [0; 2];
+        let mut previous_written = [0; 2];
+        let mut last_progress = [Duration::ZERO; 2];
+        let mut stalled = false;
+        while began.elapsed() < Duration::from_secs(seconds) {
+            thread::sleep(Duration::from_secs(5));
+            let state = *progress.0.lock().unwrap();
+            println!(
+                "LIVE_PROGRESS {}",
+                serde_json::json!({"elapsed_ms": began.elapsed().as_millis(), "completed":state.0, "played_frames":state.1, "faults":state.2})
+            );
+            for index in 0..2 {
+                if state.0[index] > previous[index] && state.1[index] > previous_written[index] {
+                    last_progress[index] = began.elapsed();
+                }
+            }
+            previous = state.0;
+            previous_written = state.1;
+            if last_progress
+                .iter()
+                .any(|last| began.elapsed().saturating_sub(*last) > Duration::from_secs(20))
+                || state.2 != 0
+            {
+                stalled = true;
+                break;
+            }
+        }
+        let observed = began.elapsed();
+        runtime
+            .stop(Instant::now() + RUNTIME_CLEANUP_BUDGET)
+            .unwrap();
+        let state = *progress.0.lock().unwrap();
+        assert!(
+            live_progress_complete(seconds, observed, stalled, state.0, state.1),
+            "insufficient bidirectional progress or stall/fault: {state:?}"
+        );
+        assert_eq!(state.2, 0, "provider fault or expired first audio");
+        assert!(
+            !directory.join("provider.sock").exists(),
+            "provider socket retained"
+        );
+    }
+
     #[derive(Clone)]
     struct HealthyPrepareTransport {
         stream_task: Arc<AsyncMutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -5492,6 +5794,7 @@ pub(crate) mod tests {
         events: mpsc::Sender<Result<ProviderEvent, Status>>,
         event_sequence: Arc<std::sync::atomic::AtomicU64>,
         inputs: Arc<Mutex<Vec<translator_ipc::provider::ProviderInputFrame>>>,
+        cancels: Arc<Mutex<Vec<translator_ipc::provider::CancelUtterance>>>,
     }
 
     impl DuplexLoopProvider {
@@ -5518,6 +5821,26 @@ pub(crate) mod tests {
                             sample_format: translator_ipc::provider::SampleFormat::S16le.into(),
                             frame_duration_ms: 20,
                             pcm: vec![0; 640],
+                        },
+                    )),
+                }))
+                .await
+                .unwrap();
+        }
+
+        async fn completed(&self, stream_id: Uuid, utterance_id: Uuid, final_audio_sequence: u64) {
+            self.events
+                .send(Ok(ProviderEvent {
+                    event: Some(provider_event::Event::UtteranceFinal(
+                        translator_ipc::provider::ProviderUtteranceFinal {
+                            schema_version: "translator.provider.utterance_final.v1".into(),
+                            session_id: self.open.session_id.clone(),
+                            direction_id: self.open.direction_id,
+                            stream_id: stream_id.to_string(),
+                            utterance_id: utterance_id.to_string(),
+                            event_sequence: self.next_event_sequence(),
+                            final_audio_sequence: Some(final_audio_sequence),
+                            outcome: translator_ipc::provider::UtteranceOutcome::Completed.into(),
                         },
                     )),
                 }))
@@ -5586,6 +5909,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let inputs = Arc::new(Mutex::new(Vec::new()));
+            let cancels = Arc::new(Mutex::new(Vec::new()));
             let event_sequence = Arc::new(std::sync::atomic::AtomicU64::new(3));
             self.opened
                 .send(DuplexLoopProvider {
@@ -5593,6 +5917,7 @@ pub(crate) mod tests {
                     events: events.clone(),
                     event_sequence: event_sequence.clone(),
                     inputs: inputs.clone(),
+                    cancels: cancels.clone(),
                 })
                 .await
                 .unwrap();
@@ -5601,6 +5926,9 @@ pub(crate) mod tests {
                     match request.request {
                         Some(provider_request::Request::InputFrame(frame)) => {
                             inputs.lock().unwrap().push(frame);
+                        }
+                        Some(provider_request::Request::CancelUtterance(cancel)) => {
+                            cancels.lock().unwrap().push(cancel);
                         }
                         Some(provider_request::Request::CloseSession(_)) => {
                             let _ = events
@@ -5853,6 +6181,17 @@ pub(crate) mod tests {
             } else {
                 for sequence in 0..12 {
                     output.write_all(&duplex_voice_frame(sequence)).unwrap();
+                    if mode.contains("batched_audio") {
+                        output.flush().unwrap();
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                if mode.contains("batched_audio") {
+                    for _ in 0..40 {
+                        output.write_all(&[0; 640]).unwrap();
+                        output.flush().unwrap();
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
                 }
                 output.flush().unwrap();
                 fs::write(marker.with_extension("ready"), b"ready").unwrap();
@@ -5941,7 +6280,7 @@ pub(crate) mod tests {
         prepared: &mut PreparedDirection,
         provider: &DuplexLoopProvider,
         frames: u64,
-    ) {
+    ) -> Uuid {
         let utterance_id = Uuid::new_v4();
         let stream_id = prepared.session.stream_id();
         prepared
@@ -5966,6 +6305,7 @@ pub(crate) mod tests {
         for sequence in 0..frames {
             provider.audio(stream_id, utterance_id, sequence).await;
         }
+        utterance_id
     }
 
     type DuplexLoopTask = tokio::task::JoinHandle<(
@@ -5983,6 +6323,54 @@ pub(crate) mod tests {
             (prepared, result)
         });
         (stop, task)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_dead_rpc_retains_provider_until_independent_teardown() {
+        if duplex_loop_child(
+            "production_duplex_dead_rpc_retains_provider_until_independent_teardown",
+        )
+        .await
+        {
+            return;
+        }
+        let mut fixture = DuplexLoopFixture::start();
+        let (mut prepared, provider) = fixture.prepare(AudioDirection::Microphone).await;
+        provider
+            .events
+            .send(Err(Status::invalid_argument("protocol_error")))
+            .await
+            .unwrap();
+        assert!(matches!(
+            prepared.provider.next_event().await,
+            Err(ProviderClientError::EventStreamProtocol)
+        ));
+        let mut owner = fixture.effects.recover_owner(prepared);
+        fixture
+            .effects
+            .stop_pcm(&mut owner, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(owner.capture.is_none() && owner.playback.is_none());
+        assert_eq!(
+            fixture
+                .effects
+                .close_provider(
+                    &mut owner,
+                    CloseRequestReason::ProviderSwitch,
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .await,
+            Err(DuplexRuntimeError::StopFailed)
+        );
+        assert!(
+            owner.provider.is_some(),
+            "dead RPC is not proof of remote cleanup"
+        );
+        fixture.shutdown().await;
+        // Only the test server's independently joined teardown settles this owner.
+        owner.provider = None;
+        assert!(ProcessDirectionEffects::is_clean(&owner));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6039,6 +6427,344 @@ pub(crate) mod tests {
             }
             fixture.shutdown().await;
         }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_batched_audio_credits_owned_media_and_expires_real_starvation() {
+        if duplex_loop_child(
+            "production_duplex_batched_audio_credits_owned_media_and_expires_real_starvation",
+        )
+        .await
+        {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(duplex_batched_audio(false))
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_batched_audio_completes_while_capture_continues() {
+        if duplex_loop_child("production_duplex_batched_audio_completes_while_capture_continues")
+            .await
+        {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(duplex_batched_audio(true))
+            .await;
+    }
+
+    async fn duplex_batched_audio(complete: bool) {
+        let mut fixture = DuplexLoopFixture::start();
+        let observer = Arc::new(RecordingObserver::default());
+        let direction = AudioDirection::Microphone;
+        let (prepared, provider) = fixture.prepare(direction).await;
+        fs::write(duplex_loop_gate("capture", direction), b"release").unwrap();
+        fs::write(duplex_loop_gate("playback", direction), b"release").unwrap();
+        let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+        duplex_wait_until(|| !provider.inputs.lock().unwrap().is_empty()).await;
+        let first = provider.inputs.lock().unwrap()[0].clone();
+        let stream = Uuid::parse_str(&first.stream_id).unwrap();
+        let utterance = Uuid::parse_str(&first.utterance_id).unwrap();
+        assert!(!first.end_of_utterance);
+        let mut sequence = 0;
+        // Preserve each measured connection's cadence, rather than stacking
+        // unrelated worst gaps into an invented vendor trace.
+        let gaps_ms: &[u64] = if complete {
+            &[0, 359, 416, 690]
+        } else {
+            &[0, 249, 412, 427, 638, 43, 93, 259]
+        };
+        for (batch, gap_ms) in gaps_ms.iter().enumerate() {
+            tokio::time::sleep(Duration::from_millis(*gap_ms)).await;
+            assert!(
+                provider.cancels.lock().unwrap().is_empty(),
+                "owned PCM batch {batch} was mistaken for silence"
+            );
+            for _ in 0..20 {
+                provider.audio(stream, utterance, sequence).await;
+                sequence += 1;
+            }
+        }
+        assert!(
+            provider
+                .inputs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|frame| frame.end_of_utterance),
+            "capture/EOU must continue during batched playback"
+        );
+        if complete {
+            provider.completed(stream, utterance, sequence - 1).await;
+            duplex_wait_until(|| {
+                observer
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|event| matches!(event, DuplexRuntimeEvent::AudioFrame { .. }))
+                    .count()
+                    == sequence as usize
+            })
+            .await;
+        } else {
+            let last_batch = Instant::now();
+            tokio::time::timeout(Duration::from_millis(2000), async {
+                while provider.cancels.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("true starvation must expire after owned media and its guard");
+            assert!(last_batch.elapsed() >= crate::INTER_AUDIO_DELTA_TIMEOUT);
+            assert_eq!(provider.cancels.lock().unwrap().len(), 1);
+            assert!(
+                !task.is_finished(),
+                "cancellation acknowledgement budget must remain scoped"
+            );
+        }
+        let sequences = observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| {
+                if let DuplexRuntimeEvent::AudioFrame { sequence, .. } = event {
+                    Some(*sequence)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            sequences
+                .iter()
+                .enumerate()
+                .all(|(index, sequence)| *sequence == index as u64)
+        );
+        assert_eq!(
+            sequences.len(),
+            sequence as usize,
+            "all owned PCM must play before final/starvation"
+        );
+        stop.send(Some(WorkerStop::Close {
+            reason: CloseRequestReason::UserStop,
+            deadline: Instant::now() + Duration::from_secs(2),
+        }))
+        .unwrap();
+        let (prepared, result) = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+        assert_eq!(
+            prepared.productive_playback, complete,
+            "only Completed plus ordered PCM drain proves a productive epoch"
+        );
+        fixture.cleanup(prepared).await;
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_burst_backpressure_preserves_capture_and_audio_order() {
+        if duplex_loop_child(
+            "production_duplex_burst_backpressure_preserves_capture_and_audio_order",
+        )
+        .await
+        {
+            return;
+        }
+        tokio::task::LocalSet::new().run_until(async {
+            let mut fixture = DuplexLoopFixture::start();
+            let observer = Arc::new(RecordingObserver::default());
+            let (mut prepared, provider) = fixture.prepare(AudioDirection::Microphone).await;
+            let stream_id = prepared.session.stream_id();
+            let utterance_id = duplex_seed_playback(&mut prepared, &provider, 0).await;
+            for sequence in 0..80 {
+                provider.audio(stream_id, utterance_id, sequence).await;
+                provider.events.send(Ok(ProviderEvent {
+                    event: Some(provider_event::Event::Latency(
+                        translator_ipc::provider::ProviderLatency {
+                            schema_version: "translator.provider.latency.v1".into(),
+                            session_id: provider.open.session_id.clone(),
+                            direction_id: provider.open.direction_id,
+                            stream_id: stream_id.to_string(),
+                            event_sequence: provider.next_event_sequence(),
+                            provider_total_ms: Some(1),
+                            ..Default::default()
+                        },
+                    )),
+                })).await.unwrap();
+            }
+            provider.completed(stream_id, utterance_id, 79).await;
+            let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+            duplex_wait_until(|| observer.events.lock().unwrap().iter().filter(|event| {
+                matches!(event, DuplexRuntimeEvent::AudioFrame { .. })
+            }).count() == 6).await;
+            fs::write(duplex_loop_gate("capture", AudioDirection::Microphone), b"release").unwrap();
+            duplex_wait_until(|| provider.inputs.lock().unwrap().len() >= 4).await;
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            assert!(!task.is_finished(), "a provider burst must wait for playback, not overflow or expire its own receive watchdog");
+            let received = observer.events.lock().unwrap().iter().filter(|event| {
+                matches!(event, DuplexRuntimeEvent::ProviderLatency { .. })
+            }).count();
+            assert!((6..=26).contains(&received),
+                "reads must stop at six written + one active + twenty queued frames, not consume all eighty: {received}");
+            fs::write(duplex_loop_gate("playback", AudioDirection::Microphone), b"release").unwrap();
+            duplex_wait_until(|| observer.events.lock().unwrap().iter().filter(|event| {
+                matches!(event, DuplexRuntimeEvent::AudioFrame { .. })
+            }).count() == 80).await;
+            let sequences = observer.events.lock().unwrap().iter().filter_map(|event| {
+                if let DuplexRuntimeEvent::AudioFrame { sequence, .. } = event { Some(*sequence) } else { None }
+            }).collect::<Vec<_>>();
+            assert_eq!(sequences, (0..80).collect::<Vec<_>>());
+            stop.send(Some(WorkerStop::Close { reason: CloseRequestReason::UserStop,
+                deadline: Instant::now() + Duration::from_secs(2) })).unwrap();
+            let (prepared, result) = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+            assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+            assert!(prepared.productive_playback, "Completed plus ordered PCM drain proves a productive epoch");
+            fixture.cleanup(prepared).await;
+            fixture.shutdown().await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_burst_backpressure_remains_stoppable() {
+        if duplex_loop_child("production_duplex_burst_backpressure_remains_stoppable").await {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut fixture = DuplexLoopFixture::start();
+                let observer = Arc::new(RecordingObserver::default());
+                let (mut prepared, provider) = fixture.prepare(AudioDirection::Microphone).await;
+                duplex_seed_playback(&mut prepared, &provider, 80).await;
+                let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+                duplex_wait_until(|| {
+                    observer
+                        .events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|event| matches!(event, DuplexRuntimeEvent::AudioFrame { .. }))
+                        .count()
+                        == 6
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(
+                    !task.is_finished(),
+                    "blocked playback must apply backpressure"
+                );
+                stop.send(Some(WorkerStop::Close {
+                    reason: CloseRequestReason::UserStop,
+                    deadline: Instant::now() + Duration::from_secs(2),
+                }))
+                .unwrap();
+                let (prepared, result) = tokio::time::timeout(Duration::from_millis(250), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+                assert!(
+                    !prepared.productive_playback,
+                    "partial writes without Completed must not reset recovery"
+                );
+                fixture.cleanup(prepared).await;
+                fixture.shutdown().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_duplex_fatal_provider_errors_restart_but_retryable_requests_stay_local() {
+        if duplex_loop_child(
+            "production_duplex_fatal_provider_errors_restart_but_retryable_requests_stay_local",
+        )
+        .await
+        {
+            return;
+        }
+        use translator_ipc::provider::{ProviderError, SafeErrorCode};
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut fixture = DuplexLoopFixture::start();
+                for (code, retryable, fatal) in [
+                    (SafeErrorCode::ProviderAuthFailed, false, true),
+                    (SafeErrorCode::CloudNotEnabled, false, true),
+                    (SafeErrorCode::ModelNotLoaded, false, true),
+                    (SafeErrorCode::ModelNotLoaded, true, true),
+                    (SafeErrorCode::ProviderUnavailable, false, true),
+                    (SafeErrorCode::ProviderUnavailable, true, false),
+                ] {
+                    let observer = Arc::new(RecordingObserver::default());
+                    let (prepared, provider) = fixture.prepare(AudioDirection::Microphone).await;
+                    let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+                    provider
+                        .events
+                        .send(Ok(ProviderEvent {
+                            event: Some(provider_event::Event::Error(ProviderError {
+                                schema_version: "translator.provider.error.v1".into(),
+                                session_id: provider.open.session_id.clone(),
+                                direction_id: provider.open.direction_id,
+                                utterance_id: None,
+                                code: code.into(),
+                                retryable,
+                                safe_message: match code {
+                                    SafeErrorCode::ModelNotLoaded => "Required model is not loaded",
+                                    SafeErrorCode::ProviderUnavailable => "Provider is unavailable",
+                                    SafeErrorCode::ProviderAuthFailed => {
+                                        "Provider authentication failed"
+                                    }
+                                    SafeErrorCode::CloudNotEnabled => {
+                                        "Cloud provider is not enabled"
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                .into(),
+                                event_sequence: provider.next_event_sequence(),
+                                ..Default::default()
+                            })),
+                        }))
+                        .await
+                        .unwrap();
+                    duplex_wait_until(|| {
+                        observer
+                            .events
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|event| matches!(event, DuplexRuntimeEvent::ProviderError { .. }))
+                    })
+                    .await;
+                    if !fatal {
+                        assert!(!task.is_finished());
+                        stop.send(Some(WorkerStop::Close {
+                            reason: CloseRequestReason::UserStop,
+                            deadline: Instant::now() + Duration::from_secs(2),
+                        }))
+                        .unwrap();
+                    }
+                    let (prepared, result) = tokio::time::timeout(Duration::from_millis(250), task)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if fatal {
+                        assert_eq!(result, Err(DirectionFailureOrigin::ProviderShared));
+                    } else {
+                        assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+                    }
+                    fixture.cleanup(prepared).await;
+                    for kind in ["capture", "playback"] {
+                        fs::remove_file(duplex_loop_marker(kind, AudioDirection::Microphone))
+                            .unwrap();
+                    }
+                }
+                fixture.shutdown().await;
+            })
+            .await;
     }
 
     #[derive(Default)]
@@ -6150,11 +6876,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn production_duplex_playback_overflow_is_local_and_peer_keeps_capturing() {
-        if duplex_loop_child(
-            "production_duplex_playback_overflow_is_local_and_peer_keeps_capturing",
-        )
-        .await
+    async fn production_duplex_playback_backpressure_preserves_peer_capture() {
+        if duplex_loop_child("production_duplex_playback_backpressure_preserves_peer_capture").await
         {
             return;
         }
@@ -6166,7 +6889,7 @@ pub(crate) mod tests {
                     fixture.prepare(AudioDirection::Microphone).await;
                 let (speaker, speaker_provider) = fixture.prepare(AudioDirection::Speaker).await;
                 duplex_seed_playback(&mut microphone, &microphone_provider, 28).await;
-                let (_microphone_stop, microphone_task) =
+                let (microphone_stop, microphone_task) =
                     duplex_spawn_direction(microphone, observer.clone());
                 let (speaker_stop, speaker_task) = duplex_spawn_direction(speaker, observer);
                 fs::write(
@@ -6175,22 +6898,27 @@ pub(crate) mod tests {
                 )
                 .unwrap();
                 duplex_wait_until(|| speaker_provider.inputs.lock().unwrap().len() >= 3).await;
-                let (microphone, result) = tokio::time::timeout(
-                    Duration::from_millis(300),
-                    microphone_task,
-                )
-                .await
-                .expect("the 400ms playback bound must fail locally while the writer is blocked")
-                .unwrap();
-                assert_eq!(result, Err(DirectionFailureOrigin::Queue));
-                assert_eq!(
-                    classify_direction_failure(result.unwrap_err()),
-                    FaultScope::Local
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(
+                    !microphone_task.is_finished(),
+                    "burst playback must apply bounded backpressure"
                 );
                 assert!(
                     !speaker_task.is_finished(),
-                    "a local queue overflow stopped its peer"
+                    "backpressure stopped its healthy peer"
                 );
+                microphone_stop
+                    .send(Some(WorkerStop::Close {
+                        reason: CloseRequestReason::UserStop,
+                        deadline: Instant::now() + Duration::from_secs(2),
+                    }))
+                    .unwrap();
+                let (microphone, result) =
+                    tokio::time::timeout(Duration::from_millis(250), microphone_task)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
                 assert!(
                     !microphone.playback_reusable,
                     "a cancelled pending write must not be reused"
@@ -8053,6 +8781,7 @@ pub(crate) mod tests {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum Trigger {
             Fault(DirectionFailureOrigin),
+            ProductivePlayback,
             Panic,
         }
 
@@ -8127,6 +8856,7 @@ pub(crate) mod tests {
             provider: bool,
             capture: bool,
             playback: bool,
+            productive_playback: bool,
         }
 
         struct ScriptPrepared(ScriptAcquisition);
@@ -8421,6 +9151,10 @@ pub(crate) mod tests {
             type Acquisition = ScriptAcquisition;
             type Prepared = ScriptPrepared;
 
+            fn productive_playback(prepared: &Self::Prepared) -> bool {
+                prepared.0.productive_playback
+            }
+
             fn validate_start(&self, _deadline: Instant) -> Result<(), DuplexRuntimeError> {
                 if self.state.lock().unwrap().reject_start {
                     Err(DuplexRuntimeError::StartFailed)
@@ -8439,6 +9173,7 @@ pub(crate) mod tests {
                     provider: false,
                     capture: false,
                     playback: false,
+                    productive_playback: false,
                 }
             }
 
@@ -8557,6 +9292,10 @@ pub(crate) mod tests {
                         .get_mut(&direction)
                         .and_then(VecDeque::pop_front);
                     match trigger {
+                        Some(Trigger::ProductivePlayback) => {
+                            prepared.0.productive_playback = true;
+                            continue;
+                        }
                         Some(Trigger::Fault(origin)) => {
                             return DirectionOutcome::Fault(classify_direction_failure(origin));
                         }
@@ -8654,6 +9393,10 @@ pub(crate) mod tests {
 
             fn is_clean(owner: &Self::Acquisition) -> bool {
                 !owner.provider && !owner.capture && !owner.playback
+            }
+
+            fn pcm_stopped(owner: &Self::Acquisition) -> bool {
+                !owner.capture && !owner.playback
             }
 
             async fn wait_ready<R: SidecarRuntime>(
@@ -10574,6 +11317,51 @@ pub(crate) mod tests {
         }
 
         #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn productive_current_epoch_resets_recovery_budget_not_worker_activation() {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let effects = ScriptedEffects::default();
+                    let lifecycle = Arc::new(LifecycleRecorder::default());
+                    let mut coordinator = started(effects.clone(), lifecycle).await;
+                    coordinator.shared_faults = MAX_RUNTIME_RESTARTS;
+                    for _ in 0..5 {
+                        effects.clear_events();
+                        effects.trigger(AudioDirection::Microphone, Trigger::ProductivePlayback);
+                        effects.trigger(
+                            AudioDirection::Microphone,
+                            Trigger::Fault(DirectionFailureOrigin::PcmCapture),
+                        );
+                        let recovery = tokio::task::spawn_local(async move {
+                            let result = coordinator
+                                .handle_next_worker_completion(transaction_deadline())
+                                .await;
+                            (coordinator, result)
+                        });
+                        assert_prepare_after_exact_delay(
+                            &effects,
+                            AudioDirection::Microphone,
+                            0,
+                            Duration::from_millis(50),
+                        )
+                        .await;
+                        let completed = finish_recovery(recovery).await;
+                        coordinator = completed.0;
+                        completed.1.unwrap();
+                        assert!(
+                            coordinator
+                                .worker_epoch(AudioDirection::Microphone)
+                                .is_some()
+                        );
+                        assert_eq!(coordinator.direction_faults[&AudioDirection::Microphone], 1);
+                        assert_eq!(coordinator.shared_faults, MAX_RUNTIME_RESTARTS, "productive local recovery must not erase an unrelated shared storm budget");
+                    }
+                    coordinator.shutdown(cleanup_deadline()).await.unwrap();
+                    assert_eq!(effects.live_count(), 0);
+                })
+                .await;
+        }
+
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
         async fn source_p1_exhausted_local_recovery_publishes_a_fresh_failed_epoch() {
             tokio::task::LocalSet::new()
                 .run_until(async {
@@ -10901,6 +11689,122 @@ pub(crate) mod tests {
                 }))
                 .await
                 .expect("the generation probe classifier must remain bounded");
+        }
+
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn failed_provider_close_during_local_fault_retires_generation_before_replacement() {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    for productive in [false, true] {
+                        let effects = ScriptedEffects::default();
+                        let mut coordinator =
+                            started(effects.clone(), Arc::new(LifecycleRecorder::default())).await;
+                        let prior_epochs = coordinator.worker_epochs();
+                        let old_ids = [AudioDirection::Microphone, AudioDirection::Speaker]
+                            .map(|direction| (direction, effects.last_acquisition_id(direction)));
+                        effects.clear_events();
+                        if productive {
+                            effects
+                                .trigger(AudioDirection::Microphone, Trigger::ProductivePlayback);
+                        }
+                        effects.fail_cleanup(AudioDirection::Microphone, Resource::Provider);
+                        effects.trigger(
+                            AudioDirection::Microphone,
+                            Trigger::Fault(DirectionFailureOrigin::ProviderLocal),
+                        );
+                        let result = coordinator
+                            .handle_next_worker_completion(transaction_deadline())
+                            .await;
+                        assert_eq!(
+                            result,
+                            Ok(()),
+                            "a dead provider RPC must not terminate both directions"
+                        );
+                        assert_eq!(effects.event_count(&ScriptEvent::GenerationKill), 1);
+                        assert_eq!(effects.event_count(&ScriptEvent::RecoveryAttempt(1)), 1);
+                        let events = effects.events();
+                        let reaped = events
+                            .iter()
+                            .position(|event| *event == ScriptEvent::GenerationKill)
+                            .unwrap();
+                        for (direction, id) in old_ids {
+                            for resource in [Resource::Capture, Resource::Playback] {
+                                assert!(
+                                    events[..reaped]
+                                        .contains(&ScriptEvent::Stop(id, direction, resource)),
+                                    "all PCM must be quiescent before generation retirement"
+                                );
+                            }
+                            let discarded = events
+                                .iter()
+                                .position(|event| {
+                                    *event == ScriptEvent::DiscardProvider(id, direction)
+                                })
+                                .unwrap();
+                            assert!(
+                                discarded > reaped,
+                                "failed RPC retains custody until independent generation reap"
+                            );
+                        }
+                        assert!(
+                            coordinator.worker_epochs().iter().all(
+                                |(direction, epoch)| prior_epochs.get(direction) != Some(epoch)
+                            )
+                        );
+                        assert!(!coordinator.has_pending_cleanup());
+                        coordinator.shutdown(cleanup_deadline()).await.unwrap();
+                        assert_eq!(effects.live_count(), 0);
+                    }
+                })
+                .await;
+        }
+
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn productive_local_close_failure_preserves_exhausted_shared_budget_and_custody() {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let effects = ScriptedEffects::default();
+                    let mut coordinator =
+                        started(effects.clone(), Arc::new(LifecycleRecorder::default())).await;
+                    let peer_epoch = coordinator.worker_epoch(AudioDirection::Speaker).unwrap();
+                    let old_id = effects.last_acquisition_id(AudioDirection::Microphone);
+                    coordinator.shared_faults = MAX_RUNTIME_RESTARTS;
+                    effects.clear_events();
+                    effects.trigger(AudioDirection::Microphone, Trigger::ProductivePlayback);
+                    effects.fail_cleanup(AudioDirection::Microphone, Resource::Provider);
+                    effects.trigger(
+                        AudioDirection::Microphone,
+                        Trigger::Fault(DirectionFailureOrigin::ProviderLocal),
+                    );
+
+                    let result = coordinator
+                        .handle_next_worker_completion(transaction_deadline())
+                        .await;
+                    assert_eq!(result, Err(DuplexRuntimeError::StartFailed));
+                    assert_eq!(coordinator.shared_faults, MAX_RUNTIME_RESTARTS);
+                    assert_eq!(
+                        coordinator.worker_epoch(AudioDirection::Speaker),
+                        Some(peer_epoch)
+                    );
+                    assert!(effects.is_live(old_id, Resource::Provider));
+                    assert!(!effects.is_live(old_id, Resource::Capture));
+                    assert!(!effects.is_live(old_id, Resource::Playback));
+                    assert!(coordinator.has_cleanup_owner(AudioDirection::Microphone));
+                    assert!(coordinator.has_pending_cleanup());
+                    assert!(!effects.events().iter().any(|event| matches!(
+                        event,
+                        ScriptEvent::RecoveryAttempt(_)
+                            | ScriptEvent::GenerationKill
+                            | ScriptEvent::GenerationStart
+                            | ScriptEvent::DiscardProvider(_, _)
+                            | ScriptEvent::Acquire(_, _, _)
+                            | ScriptEvent::Activate(_, _)
+                    )));
+
+                    coordinator.shutdown(cleanup_deadline()).await.unwrap();
+                    assert_eq!(effects.live_count(), 0);
+                })
+                .await;
         }
 
         #[tokio::test(flavor = "current_thread", start_paused = true)]

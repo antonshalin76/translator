@@ -20,6 +20,7 @@ from .local.local_provider import (
     LocalProviderProtocolError,
     LocalProviderPublicationError,
 )
+from .openai_runtime import OpenAIProviderFailure, OpenAIProviderTransportFailure
 from .provider_contract import (
     AudioDirection,
     CancelReason,
@@ -259,6 +260,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
         event_drained.set()
         transport_closed = state.transport_closed
         consumer_done = False
+        drain_failure_events = False
 
         def fail(code: grpc.StatusCode, detail: str) -> None:
             if not failure:
@@ -315,7 +317,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
             signal.set()
 
         async def consume_requests() -> None:
-            nonlocal consumer_done
+            nonlocal consumer_done, drain_failure_events
             try:
                 while not failure and not state.ending:
                     item = await control.get()
@@ -337,6 +339,20 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
                         fail(
                             grpc.StatusCode.INVALID_ARGUMENT,
                             "invalid_request",
+                        )
+                        break
+                    except OpenAIProviderTransportFailure as error:
+                        drain_failure_events = True
+                        fail(grpc.StatusCode.UNAVAILABLE, error.code.value)
+                        break
+                    except OpenAIProviderFailure as error:
+                        fail(
+                            grpc.StatusCode.UNAUTHENTICATED
+                            if error.code is SafeErrorCode.PROVIDER_AUTH_FAILED
+                            else grpc.StatusCode.RESOURCE_EXHAUSTED
+                            if error.resource_exhausted
+                            else grpc.StatusCode.UNAVAILABLE,
+                            error.code.value,
                         )
                         break
                     except (
@@ -369,7 +385,7 @@ class _ProviderServicer(provider_pb2_grpc.ProviderTransportServicer):
         aborting = False
         try:
             while True:
-                if failure:
+                if failure and (not drain_failure_events or events.empty()):
                     code, detail = failure[0]
                     aborting = True
                     await context.abort(code, detail)

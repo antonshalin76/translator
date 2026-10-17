@@ -1,3 +1,4 @@
+use proptest::{prelude::*, test_runner::RngSeed};
 use translator_daemon::{
     CANCEL_FINAL_TIMEOUT, CLOSE_ACK_TIMEOUT, INTER_AUDIO_DELTA_TIMEOUT, ProviderAudioWatchdog,
     ProviderStreamCoordinator, WatchdogAction, WatchdogError,
@@ -33,7 +34,7 @@ fn next_phase_deadline_tracks_current_phase_without_polling_or_resetting_it() {
     watchdog
         .record_audio_delta(stream_id, utterance_id, 2_000 * NS_PER_MS)
         .unwrap();
-    let streaming_deadline = 2_250 * NS_PER_MS;
+    let streaming_deadline = 2_000 * NS_PER_MS + INTER_AUDIO_DELTA_TIMEOUT.as_nanos() as u64;
     let mut unread = watchdog.clone();
     for _ in 0..3 {
         assert_eq!(watchdog.next_phase_deadline_ns(), Some(streaming_deadline));
@@ -332,7 +333,7 @@ fn collecting_input_over_twelve_seconds_is_cancelled() {
 }
 
 #[test]
-fn provider_audio_before_eou_is_rejected() {
+fn provider_audio_before_eou_keeps_the_immutable_input_deadline() {
     let session_id = Uuid::new_v4();
     let stream_id = Uuid::new_v4();
     let utterance_id = Uuid::new_v4();
@@ -341,14 +342,34 @@ fn provider_audio_before_eou_is_rejected() {
         .start_utterance(stream_id, utterance_id, 0)
         .unwrap();
 
+    watchdog
+        .record_audio_delta(stream_id, utterance_id, 1)
+        .unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(12_000 * NS_PER_MS));
+    watchdog
+        .record_audio_delta(stream_id, utterance_id, 11_999 * NS_PER_MS)
+        .unwrap();
+    assert_eq!(watchdog.next_phase_deadline_ns(), Some(12_000 * NS_PER_MS));
     assert_eq!(
-        watchdog.record_audio_delta(stream_id, utterance_id, 1),
-        Err(WatchdogError::InputNotComplete)
+        watchdog.record_audio_delta(Uuid::new_v4(), utterance_id, 11_999 * NS_PER_MS),
+        Err(WatchdogError::StreamMismatch)
+    );
+    assert_eq!(
+        watchdog.record_audio_delta(stream_id, utterance_id, 12_000 * NS_PER_MS + 1),
+        Err(WatchdogError::DeadlineExpired)
+    );
+    assert_eq!(
+        watchdog.poll(12_000 * NS_PER_MS + 1),
+        vec![cancel_action(session_id, stream_id, utterance_id)]
+    );
+    assert_eq!(
+        watchdog.record_audio_delta(stream_id, utterance_id, 12_000 * NS_PER_MS + 2),
+        Err(WatchdogError::CancelPending)
     );
 }
 
 #[test]
-fn coordinator_rejects_provider_audio_and_final_before_eou() {
+fn coordinator_accepts_streaming_audio_before_eou_but_not_a_premature_final() {
     let session_id = Uuid::new_v4();
     let stream_id = Uuid::new_v4();
     let utterance_id = Uuid::new_v4();
@@ -358,20 +379,91 @@ fn coordinator_rejects_provider_audio_and_final_before_eou() {
         .start_utterance(stream_id, utterance_id, 0)
         .unwrap();
 
-    assert_eq!(
-        coordinator.validate_event(
+    coordinator
+        .validate_event(
             &audio_delta(session_id, stream_id, utterance_id, 0, 2, 1),
             1,
-        ),
-        Err(WatchdogError::InputNotComplete.into())
+        )
+        .unwrap();
+    assert_eq!(
+        coordinator
+            .consume_receive_audio(stream_id, utterance_id)
+            .unwrap()
+            .len(),
+        3_200
+    );
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        Some(12_000 * NS_PER_MS)
     );
     assert_eq!(
         coordinator.validate_event(
-            &completed_final(session_id, stream_id, utterance_id, 2, None),
+            &completed_final(session_id, stream_id, utterance_id, 3, Some(0)),
             1,
         ),
         Err(WatchdogError::InputNotComplete.into())
     );
+    coordinator
+        .record_end_of_utterance(stream_id, utterance_id, 3_000 * NS_PER_MS)
+        .unwrap();
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        Some(9_000 * NS_PER_MS)
+    );
+    coordinator
+        .validate_event(
+            &audio_delta(session_id, stream_id, utterance_id, 1, 3, 3_500 * NS_PER_MS),
+            3_500 * NS_PER_MS,
+        )
+        .unwrap();
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        Some(3_500 * NS_PER_MS + INTER_AUDIO_DELTA_TIMEOUT.as_nanos() as u64)
+    );
+    coordinator
+        .validate_event(
+            &completed_final(session_id, stream_id, utterance_id, 4, Some(1)),
+            3_700 * NS_PER_MS,
+        )
+        .unwrap();
+    assert_eq!(coordinator.next_phase_deadline_ns(), None);
+    assert_eq!(
+        coordinator
+            .consume_receive_audio(stream_id, utterance_id)
+            .unwrap()
+            .len(),
+        3_200
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 100, max_shrink_iters: 512,
+        rng_seed: RngSeed::Fixed(0x2026_1018),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn early_output_never_rejuvenates_the_input_deadline(
+        capture_ns in 0_u64..1_000_000_000_000,
+        mut early_ms in proptest::collection::vec(0_u64..=12_000, 0..=32),
+    ) {
+        let session = Uuid::from_u128(1);
+        let stream = Uuid::from_u128(2);
+        let utterance = Uuid::from_u128(3);
+        let deadline = capture_ns + 12_000 * NS_PER_MS;
+        let mut watchdog = ProviderAudioWatchdog::new(session);
+        watchdog.start_utterance(stream, utterance, capture_ns).unwrap();
+        early_ms.sort_unstable();
+        for elapsed in early_ms {
+            prop_assert_eq!(watchdog.record_audio_delta(stream, utterance, capture_ns + elapsed * NS_PER_MS), Ok(()));
+            prop_assert_eq!(watchdog.next_phase_deadline_ns(), Some(deadline));
+        }
+        prop_assert_eq!(watchdog.record_audio_delta(stream, utterance, deadline + 1), Err(WatchdogError::DeadlineExpired));
+        prop_assert_eq!(watchdog.next_phase_deadline_ns(), Some(deadline));
+        prop_assert_eq!(watchdog.poll(deadline + 1), vec![cancel_action(session, stream, utterance)]);
+        prop_assert_eq!(watchdog.record_audio_delta(stream, utterance, deadline + 2), Err(WatchdogError::CancelPending));
+    }
 }
 
 #[test]
@@ -415,13 +507,15 @@ fn watchdog_switches_from_first_audio_to_inter_delta_deadline() {
     watchdog
         .record_audio_delta(stream_id, utterance_id, started_at + 1_250 * NS_PER_MS)
         .unwrap();
-    assert!(watchdog.poll(started_at + 1_500 * NS_PER_MS).is_empty());
+    let next_deadline =
+        started_at + 1_250 * NS_PER_MS + INTER_AUDIO_DELTA_TIMEOUT.as_nanos() as u64;
+    assert!(watchdog.poll(next_deadline).is_empty());
     assert_eq!(
-        watchdog.poll(started_at + 1_500 * NS_PER_MS + 1),
+        watchdog.poll(next_deadline + 1),
         vec![cancel_action(session_id, stream_id, utterance_id)]
     );
     assert!(watchdog.cancel_pending(stream_id, utterance_id));
-    assert!(watchdog.poll(started_at + 1_500 * NS_PER_MS + 1).is_empty());
+    assert!(watchdog.poll(next_deadline + 1).is_empty());
 }
 
 #[test]
@@ -583,8 +677,9 @@ fn coordinator_atomically_purges_and_marks_validator_before_cancel_action() {
         1
     );
 
+    let expired = 100 * NS_PER_MS + INTER_AUDIO_DELTA_TIMEOUT.as_nanos() as u64 + 1;
     assert_eq!(
-        coordinator.poll(350 * NS_PER_MS + 1).unwrap(),
+        coordinator.poll(expired).unwrap(),
         vec![cancel_action(session_id, stream_id, utterance_id)]
     );
     assert_eq!(
@@ -596,7 +691,7 @@ fn coordinator_atomically_purges_and_marks_validator_before_cancel_action() {
     coordinator
         .validate_event(
             &cancelled_final(session_id, stream_id, utterance_id),
-            350 * NS_PER_MS + 1,
+            expired,
         )
         .unwrap();
     assert!(!coordinator.validator_cancel_pending(utterance_id));
@@ -732,7 +827,9 @@ fn buffer_full_does_not_advance_watchdog_deadline() {
             .is_err()
     );
     assert_eq!(
-        coordinator.poll(650 * NS_PER_MS + 1).unwrap(),
+        coordinator
+            .poll(400 * NS_PER_MS + INTER_AUDIO_DELTA_TIMEOUT.as_nanos() as u64 + 1)
+            .unwrap(),
         vec![cancel_action(session_id, stream_id, utterance_id)]
     );
 }
@@ -816,7 +913,7 @@ fn coordinator_checks_deadline_before_final_and_gates_close_pending_events() {
 
 #[test]
 fn watchdog_rejects_wrong_scope_late_audio_and_duplicate_ids() {
-    assert_eq!(INTER_AUDIO_DELTA_TIMEOUT.as_millis(), 250);
+    assert_eq!(INTER_AUDIO_DELTA_TIMEOUT.as_millis(), 500);
     let session_id = Uuid::new_v4();
     let stream_id = Uuid::new_v4();
     let utterance_id = Uuid::new_v4();

@@ -19,8 +19,8 @@ use crate::{
     AdmittedDuplex, AecRuntimeAuthority, AudioMixController, AudioMixPatch, AudioMixState,
     AudioOperationGate, AudioOperationLease, DirectionPatch, DirectionRuntimeFailure,
     DirectionRuntimeStatus, DuplexCompletionObserver, DuplexRunner, DuplexRuntimeError, FactsError,
-    ProviderPatch, RuntimeFactsSource, RuntimeMutationError, RuntimeSnapshot, RuntimeStore,
-    TranslationMixMode, VoiceProfilePatch,
+    LatencyPolicyPatch, ProviderPatch, RuntimeFactsSource, RuntimeMutationError, RuntimeSnapshot,
+    RuntimeStore, TranslationMixMode, VoiceProfilePatch,
     acoustic_admission::{admit_translation_with_reservation, enabled_directions},
     api::ControlFailure,
     runtime_state::{AudioMixKnowledge, RuntimeStatus},
@@ -39,6 +39,7 @@ pub enum ControlCommand {
     ConfirmHeadphones(Option<Box<translator_audio::HeadphoneConfirmation>>),
     PatchDirection(DirectionPatch),
     PatchProvider(ProviderPatch),
+    PatchLatencyPolicy(LatencyPolicyPatch),
     PatchVoice(VoiceProfilePatch),
     PatchAudioMix(AudioMixPatch),
     ReconcileAudio,
@@ -1160,6 +1161,12 @@ impl ControlOwner {
                 )?;
             }
             ControlCommand::PatchProvider(patch) => {
+                if supervisor.status() != RuntimeStatus::Stopped {
+                    return Err(ControlFailure {
+                        status: StatusCode::CONFLICT,
+                        code: "provider_change_requires_stop",
+                    });
+                }
                 apply_candidate(
                     supervisor,
                     store,
@@ -1168,6 +1175,15 @@ impl ControlOwner {
                     aec_runtime_generation,
                     deadline,
                 )?;
+            }
+            ControlCommand::PatchLatencyPolicy(patch) => {
+                if supervisor.status() != RuntimeStatus::Stopped {
+                    return Err(ControlFailure {
+                        status: StatusCode::CONFLICT,
+                        code: "latency_change_requires_stop",
+                    });
+                }
+                store.set_latency_policy(patch);
             }
             ControlCommand::PatchVoice(patch) => {
                 apply_candidate(
@@ -2392,6 +2408,72 @@ pub(crate) mod safe_admission_tests {
         Instant::now() + crate::DIRECTION_CLEANUP_BUDGET
     }
 
+    #[test]
+    fn provider_change_requires_stopped_runtime_without_replacement_or_state_write() {
+        let store = RuntimeStore::default();
+        let effects = Arc::new(Effects::default());
+        let mut control = owner(
+            store.clone(),
+            Arc::new(Runner(effects.clone())),
+            effects.clone(),
+        );
+        control.execute(ControlCommand::Start, deadline()).unwrap();
+        let before = serde_json::to_value(store.snapshot()).unwrap();
+        let error = control
+            .execute(
+                ControlCommand::PatchProvider(crate::ProviderPatch {
+                    provider_id: translator_core::ProviderId::Openai,
+                    cloud_opt_in: Some(true),
+                }),
+                deadline(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "provider_change_requires_stop");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(effects.replacements.load(Ordering::SeqCst), 0);
+        assert_eq!(serde_json::to_value(store.snapshot()).unwrap(), before);
+        control.execute(ControlCommand::Stop, deadline()).unwrap();
+        control
+            .execute(
+                ControlCommand::PatchProvider(crate::ProviderPatch {
+                    provider_id: translator_core::ProviderId::Openai,
+                    cloud_opt_in: Some(true),
+                }),
+                deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.snapshot().provider_id,
+            translator_core::ProviderId::Openai
+        );
+    }
+
+    #[test]
+    fn latency_policy_cannot_diverge_from_the_active_session_contract() {
+        let store = RuntimeStore::default();
+        let effects = Arc::new(Effects::default());
+        let mut control = owner(store.clone(), Arc::new(Runner(effects.clone())), effects);
+        let patch = crate::LatencyPolicyPatch {
+            direction_id: AudioDirection::Speaker,
+            current_mode: translator_core::TranslationMode::Balanced,
+        };
+        control.execute(ControlCommand::Start, deadline()).unwrap();
+        let before = serde_json::to_value(store.snapshot()).unwrap();
+        let error = control
+            .execute(ControlCommand::PatchLatencyPolicy(patch), deadline())
+            .unwrap_err();
+        assert_eq!(error.code, "latency_change_requires_stop");
+        assert_eq!(serde_json::to_value(store.snapshot()).unwrap(), before);
+        control.execute(ControlCommand::Stop, deadline()).unwrap();
+        control
+            .execute(ControlCommand::PatchLatencyPolicy(patch), deadline())
+            .unwrap();
+        assert_eq!(
+            store.snapshot().latency_policy[1].current_mode,
+            translator_core::TranslationMode::Balanced
+        );
+    }
+
     #[derive(Default)]
     struct ExpiringBypassMix {
         calls: StdMutex<Vec<TranslationMixMode>>,
@@ -3483,10 +3565,6 @@ pub(crate) mod safe_admission_tests {
                 source_language: Some(translator_core::Language::En),
                 target_language: Some(translator_core::Language::Ru),
                 enabled: None,
-            }),
-            ControlCommand::PatchProvider(crate::ProviderPatch {
-                provider_id: translator_core::ProviderId::Openai,
-                cloud_opt_in: Some(true),
             }),
             ControlCommand::PatchVoice(crate::VoiceProfilePatch {
                 direction_id: AudioDirection::Microphone,

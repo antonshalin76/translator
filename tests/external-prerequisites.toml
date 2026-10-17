@@ -2,6 +2,11 @@ schema_version = 1
 
 [[skip]]
 framework = "rust"
+id = "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_live_duplex_progress"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
 id = "translator-daemon::bin::translator-daemon::tests::private_pulse_native_z_composed_shutdown_releases_cancelled_custody"
 code = "missing_external_prerequisite:private_pulse_fixture"
 

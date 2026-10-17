@@ -146,7 +146,7 @@ def package(output: Path, cache: Path, source_tree: str, cuda_root: Path) -> Pat
     os.environ["TRANSLATOR_MODEL_CACHE_ROOT"] = str(cache)
     manifest = load_manifest(ROOT / "models/manifest.json")
     output.mkdir(mode=0o700)
-    payload = output / "translator-preview-20261002"
+    payload = output / "translator-preview-20261017"
     payload.mkdir(mode=0o700)
     for relative in (
         "scripts/translator-desktop",
@@ -202,7 +202,7 @@ def package(output: Path, cache: Path, source_tree: str, cuda_root: Path) -> Pat
         "manifest_sha256": digest(ROOT / "models/manifest.json"),
         "aec": "unavailable",
         "full_chain_quality": "not_established",
-        "source_aggregate": "not_done",
+        "source_aggregate": "not_embedded",
         "simultaneous_production": False,
         "host_dependencies": [
             "Python 3.12",

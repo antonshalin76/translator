@@ -26,7 +26,9 @@ class Task8UiControlsTests(unittest.TestCase):
         self.assertIn('section.id = "routes"', source)
         self.assertIn('section.id = "diagnostics"', source)
 
-    def test_audio_mix_sliders_apply_changes_from_input_events(self) -> None:
+    def test_audio_mix_sliders_commit_changes_without_replacing_active_input(
+        self,
+    ) -> None:
         source = read("apps/translator-ui/src/main.ts")
 
         input_handler = re.search(
@@ -37,11 +39,16 @@ class Task8UiControlsTests(unittest.TestCase):
         self.assertIsNotNone(input_handler, "audio mix input handler is missing")
         body = input_handler.group("body")
 
-        self.assertIn("queueAudioMixChange(field, Number(input.value))", body)
+        self.assertIn("valueNode.textContent", body)
+        self.assertNotIn("invoke", body)
         self.assertIn("flushAudioMixChange(field, Number(input.value))", source)
         self.assertIn("function invokeAudioMixChange", source)
-        self.assertIn("state.snapshot.audio_mix", source)
-        self.assertIn("audioMixTimers", source)
+        self.assertIn(
+            "currentAudioMixPatchIntent(next[0], next[1], state.snapshot)", source
+        )
+        self.assertIn("pendingAudioMix.set(field, value)", source)
+        self.assertIn("pendingAudioMix.clear()", source)
+        self.assertIn("drainAudioMixChanges", source)
 
 
 if __name__ == "__main__":

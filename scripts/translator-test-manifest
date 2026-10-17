@@ -188,6 +188,7 @@ RUFF_TARGETS = [
     "scripts/translator-task11-openai-synthetic-smoke",
     "scripts/translator-task12-zoom-diagnostic",
     "scripts/translator-native-ui-check",
+    "scripts/translator-provider-progress-check",
     "scripts/translator_duplex_overlap_check.py",
     "scripts/translator-publication-check",
     "scripts/translator-test-manifest",

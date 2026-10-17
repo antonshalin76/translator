@@ -2720,7 +2720,7 @@ async fn failed_start_with_cleanup_owner_is_truthful_and_retryable_over_http() {
 }
 
 #[tokio::test]
-async fn control_ownership_applies_provider_change_before_publishing_it() {
+async fn provider_change_is_stopped_only_and_next_start_uses_acknowledged_provider() {
     let store = RuntimeStore::default();
     let runner = Arc::new(FakeDuplexRunner::default());
     let controller = control_application(store.clone(), runner.clone());
@@ -2746,7 +2746,40 @@ async fn control_ownership_applies_provider_change_before_publishing_it() {
         .unwrap();
     assert_eq!(started.status(), StatusCode::OK);
 
+    let rejected = router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            "/v1/provider",
+            Some(TOKEN),
+            Body::from(r#"{"provider_id":"openai","cloud_opt_in":true}"#),
+        ))
+        .await
+        .unwrap();
+    assert_problem(
+        rejected,
+        StatusCode::CONFLICT,
+        "Conflict",
+        "provider_change_requires_stop",
+    )
+    .await;
+    assert_eq!(store.snapshot().provider_id, ProviderId::Local);
+    assert!(!store.snapshot().audio_leaves_machine);
+    assert_eq!(runner.state.snapshots.lock().unwrap().len(), 1);
+
+    let stopped = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/translation/stop",
+            Some(TOKEN),
+            Body::from("{}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
     let patched = router
+        .clone()
         .oneshot(request(
             Method::PATCH,
             "/v1/provider",
@@ -2759,6 +2792,24 @@ async fn control_ownership_applies_provider_change_before_publishing_it() {
     let published = json_body(patched).await;
     assert_eq!(published["provider_id"], "openai");
     assert_eq!(published["audio_leaves_machine"], true);
+    assert!(
+        published["directions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|direction| direction["voice_profile"]["engine"] == "openai")
+    );
+    assert_eq!(runner.state.snapshots.lock().unwrap().len(), 1);
+    let restarted = router
+        .oneshot(request(
+            Method::POST,
+            "/v1/translation/start",
+            Some(TOKEN),
+            Body::from("{}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(restarted.status(), StatusCode::OK);
     assert_eq!(
         runner
             .state

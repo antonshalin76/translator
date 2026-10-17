@@ -56,6 +56,7 @@ enum ResolutionComponent {
 }
 
 pub struct ProcessSidecarRuntime {
+    provider: translator_core::ProviderId,
     python: PathBuf,
     sidecar_root: PathBuf,
     socket_path: PathBuf,
@@ -80,6 +81,7 @@ impl ProcessSidecarRuntime {
             return Err(SupervisorError::StartFailed);
         }
         Ok(Self {
+            provider: translator_core::ProviderId::Local,
             python,
             sidecar_root,
             socket_path,
@@ -94,6 +96,11 @@ impl ProcessSidecarRuntime {
         self.child.as_ref().and_then(Child::id)
     }
 
+    pub fn with_provider(mut self, provider: translator_core::ProviderId) -> Self {
+        self.provider = provider;
+        self
+    }
+
     pub fn last_reaped_pid(&self) -> Option<u32> {
         self.last_reaped_pid
     }
@@ -106,6 +113,13 @@ impl ProcessSidecarRuntime {
             .current_dir(&self.sidecar_root)
             .env("TRANSLATOR_SIDECAR_SOCKET", &self.socket_path)
             .env("TRANSLATOR_SIDECAR_TOKEN", &launch.token)
+            .env(
+                "TRANSLATOR_PROVIDER_ID",
+                match self.provider {
+                    translator_core::ProviderId::Local => "local",
+                    translator_core::ProviderId::Openai => "openai",
+                },
+            )
             .env(
                 "TRANSLATOR_SIDECAR_GENERATION",
                 launch.generation_id.to_string(),
@@ -651,6 +665,7 @@ mod tests {
             let output = child.stdout.take().expect("fixture readiness pipe");
             let mut fixture = Self {
                 runtime: ProcessSidecarRuntime {
+                    provider: translator_core::ProviderId::Local,
                     python: PathBuf::from("/usr/bin/python3"),
                     sidecar_root: PathBuf::from("/tmp"),
                     socket_path: PathBuf::from("/tmp/d083-unused.sock"),

@@ -124,7 +124,7 @@ class MixFixture:
         )
         self.patches = []
         self.auth_errors = 0
-        self.patch_entered = threading.Event()
+        self.status_reads = 0
         self.lock = threading.Lock()
         fixture = self
 
@@ -153,6 +153,7 @@ class MixFixture:
                     return
                 if self.path == "/v1/status":
                     with fixture.lock:
+                        fixture.status_reads += 1
                         snapshot = json.loads(json.dumps(fixture.snapshot))
                     self.reply(200, snapshot)
                 elif self.path == "/v1/aec-calibration":
@@ -162,6 +163,23 @@ class MixFixture:
 
             def do_PATCH(self):
                 if not self.authenticated():
+                    return
+                if self.path == "/v1/provider":
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 1024:
+                        self.reply(413, dict(code="body_too_large"))
+                        return
+                    patch = json.loads(self.rfile.read(size))
+                    provider = patch.get("provider_id")
+                    if provider not in ("local", "openai") or (
+                        provider == "openai" and patch.get("cloud_opt_in") is not True
+                    ):
+                        self.reply(400, dict(code="cloud_provider_opt_in_required"))
+                        return
+                    with fixture.lock:
+                        fixture.snapshot["provider_id"] = provider
+                        snapshot = json.loads(json.dumps(fixture.snapshot))
+                    self.reply(200, snapshot)
                     return
                 if self.path != "/v1/audio-mix":
                     self.reply(404, dict(code="not_found"))
@@ -184,7 +202,6 @@ class MixFixture:
                     return
                 with fixture.lock:
                     fixture.patches.append(patch)
-                fixture.patch_entered.set()
                 if patch.get("microphone_original_percent", 0) > 0:
                     self.reply(409, dict(code="microphone_original_unavailable"))
                     return
@@ -219,16 +236,35 @@ def connected_mix_checks(browser, wait, fixture, rows):
             str(value),
         )
 
+    def commit_while_busy(commits):
+        # One DOM task queues user commits before the native promise settles;
+        # delaying HTTP instead would exceed the bridge's 1500-ms deadline.
+        return browser.execute_script(
+            "const observed=[];for(const [field,value] of arguments[0]){"
+            "const input=document.getElementById('audio-mix-'+field);"
+            "if(input.disabled)throw new Error('busy_gain_unavailable');"
+            "input.value=String(value);"
+            "input.dispatchEvent(new Event('input',{bubbles:true}));"
+            "input.dispatchEvent(new Event('change',{bubbles:true}));"
+            "observed.push(document.getElementById('command-translation').disabled)}"
+            "return observed",
+            commits,
+        )
+
     def rejection():
         wait.until(
             lambda page: (
                 page.find_element(By.CSS_SELECTOR, ".build-state").text
-                == "Daemon connected"
+                == "Сервис подключён"
             )
         )
-        pending = change("microphone_original_percent", 100)
-        assert fixture.patch_entered.wait(3)
-        assert pending == dict(value="0", otherDisabled=True)
+        before = len(fixture.patches)
+        assert commit_while_busy(
+            [
+                ["microphone_original_percent", 100],
+                ["speaker_translation_percent", 50],
+            ]
+        ) == [True, True]
         wait.until(
             EC.visibility_of_element_located((By.CSS_SELECTOR, ".warning-error"))
         )
@@ -237,8 +273,17 @@ def connected_mix_checks(browser, wait, fixture, rows):
         assert "daemon_request_failed" not in warning
         assert slider_value("microphone_original_percent") == "0"
         assert browser.find_element(By.ID, "command-translation").text == "Stop"
-        assert fixture.patches == [dict(microphone_original_percent=100)]
-        return dict(acknowledged_original=0, running_preserved=True, mutations=1)
+        reads = fixture.status_reads
+        wait.until(lambda _: fixture.status_reads >= reads + 2)
+        assert fixture.patches[before:] == [dict(microphone_original_percent=100)]
+        assert slider_value("speaker_translation_percent") == "100"
+        return dict(
+            acknowledged_original=0,
+            running_preserved=True,
+            mutations=1,
+            queued_intent_discarded=True,
+            automatic_retry=False,
+        )
 
     check("connected_mix_rejection_projection", rejection, rows)
 
@@ -282,6 +327,139 @@ def connected_mix_checks(browser, wait, fixture, rows):
 
     check("connected_mix_acknowledgement_and_stale_poll", accepted_and_stale_poll, rows)
 
+    def active_range_poll():
+        field = "audio-mix-microphone_translation_percent"
+        original = browser.find_element(By.ID, field)
+        browser.execute_script(
+            "arguments[0].dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));",
+            original,
+        )
+        try:
+            reads = fixture.status_reads
+            wait.until(lambda _: fixture.status_reads >= reads + 2)
+            assert original == browser.find_element(By.ID, field)
+            assert original.get_attribute("value") == "70"
+        finally:
+            browser.execute_script(
+                "window.dispatchEvent(new PointerEvent('pointerup'))"
+            )
+        wait.until(EC.staleness_of(original))
+        return dict(
+            active_node_preserved_across_status_reads=2,
+            released_node_resumes_polling=True,
+        )
+
+    check("connected_active_range_survives_poll", active_range_poll, rows)
+
+    def active_range_does_not_hide_runtime_failure():
+        field = "audio-mix-microphone_translation_percent"
+        original = browser.find_element(By.ID, field)
+        browser.execute_script(
+            "arguments[0].dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));",
+            original,
+        )
+        try:
+            with fixture.lock:
+                fixture.snapshot["directions"][0]["runtime_status"] = "failed"
+            wait.until(EC.staleness_of(original))
+            assert (
+                "Сбой" in browser.find_element(By.CSS_SELECTOR, ".direction-panel").text
+            )
+            original = browser.find_element(By.ID, field)
+            browser.execute_script(
+                "arguments[0].dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));",
+                original,
+            )
+            with fixture.lock:
+                fixture.snapshot.update(
+                    runtime_status="stopped", translation_running=False
+                )
+            wait.until(EC.staleness_of(original))
+            assert browser.find_element(By.ID, "command-translation").text == "Start"
+        finally:
+            with fixture.lock:
+                fixture.snapshot.update(
+                    runtime_status="running", translation_running=True
+                )
+                fixture.snapshot["directions"][0]["runtime_status"] = "running"
+            browser.execute_script(
+                "window.dispatchEvent(new PointerEvent('pointerup'))"
+            )
+        wait.until(
+            lambda page: page.find_element(By.ID, "command-translation").text == "Stop"
+        )
+        return dict(direction_failure_visible=True, stopped_visible=True)
+
+    check(
+        "connected_active_range_does_not_hide_runtime_failure",
+        active_range_does_not_hide_runtime_failure,
+        rows,
+    )
+
+    def busy_final_gain():
+        before = len(fixture.patches)
+        assert commit_while_busy(
+            [
+                ["microphone_translation_percent", 35],
+                ["microphone_translation_percent", 60],
+                ["microphone_translation_percent", 100],
+            ]
+        ) == [True, True, True]
+        wait.until(
+            lambda _: (
+                fixture.snapshot["audio_mix"]["microphone_translation_percent"] == 100
+            )
+        )
+        wait.until(lambda _: slider_value("microphone_translation_percent") == "100")
+        assert fixture.patches[before:] == [
+            dict(microphone_translation_percent=35),
+            dict(microphone_translation_percent=100),
+        ]
+        return dict(
+            final_acknowledged_gain=100, superseded_gain_not_sent=60, mutations=2
+        )
+
+    check("connected_busy_gain_keeps_final_commit", busy_final_gain, rows)
+
+    def details_poll_and_cloud():
+        details = browser.find_element(By.CSS_SELECTOR, ".advanced-settings")
+        if not details.get_attribute("open"):
+            details.find_element(By.TAG_NAME, "summary").click()
+        reads = fixture.status_reads
+        wait.until(lambda _: fixture.status_reads >= reads + 2)
+        assert browser.find_element(
+            By.CSS_SELECTOR, ".advanced-settings"
+        ).get_attribute("open")
+        assert browser.find_element(By.ID, "aec-calibration-start").is_displayed()
+        with fixture.lock:
+            fixture.snapshot.update(runtime_status="stopped", translation_running=False)
+        wait.until(lambda page: page.find_element(By.ID, "provider").is_enabled())
+        browser.find_element(By.ID, "cloud-opt-in").click()
+        wait.until(lambda page: page.find_element(By.ID, "cloud-opt-in").is_selected())
+        browser.execute_script(
+            "const select=document.getElementById('provider');select.value='openai';"
+            "select.dispatchEvent(new Event('change',{bubbles:true}))"
+        )
+        wait.until(lambda _: fixture.snapshot["provider_id"] == "openai")
+        wait.until(
+            lambda page: (
+                page.find_element(By.ID, "provider").get_attribute("value") == "openai"
+            )
+        )
+        assert not browser.find_elements(
+            By.CSS_SELECTOR, "select[id$='-voice'],select[id$='-mode']"
+        )
+        assert browser.find_element(
+            By.CSS_SELECTOR, ".advanced-settings"
+        ).get_attribute("open")
+        return dict(
+            details_preserved_across_poll=True,
+            consent_required=True,
+            cloud_has_no_fake_voice_or_mode=True,
+        )
+
+    check("connected_details_and_honest_cloud_controls", details_poll_and_cloud, rows)
+
     def calibration_separation():
         assert not browser.find_elements(By.CSS_SELECTOR, ".warning-error")
         assert "Контроллер недоступен" in browser.find_element(By.TAG_NAME, "body").text
@@ -308,7 +486,9 @@ def preview_guard(runtime, port):
             or metadata.st_uid != 1000
             or stat.S_IMODE(metadata.st_mode) != 0o700
         ):
-            raise ValueError("live-preview runtime must be owned by user 1000 and mode 0700")
+            raise ValueError(
+                "live-preview runtime must be owned by user 1000 and mode 0700"
+            )
     metadata = (runtime / "translator/control.token").lstat()
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -348,7 +528,7 @@ def live_preview_checks(browser, runtime, port, packet, rows):
                 if button.text == label
                 and button.is_enabled()
                 and page.find_element(By.CSS_SELECTOR, ".build-state").text
-                == "Daemon connected"
+                == "Сервис подключён"
                 else False
             )
 
@@ -403,8 +583,10 @@ def live_preview_checks(browser, runtime, port, packet, rows):
     def connected():
         details = preview_guard(runtime, port)
         wait.until(
-            lambda page: page.find_element(By.CSS_SELECTOR, ".build-state").text
-            == "Daemon connected"
+            lambda page: (
+                page.find_element(By.CSS_SELECTOR, ".build-state").text
+                == "Сервис подключён"
+            )
         )
         no_error()
         return details
@@ -425,13 +607,18 @@ def live_preview_checks(browser, runtime, port, packet, rows):
             return dict(confirmation="already_confirmed")
         button = wait.until(EC.element_to_be_clickable((By.ID, "command-headphones")))
         assert button.text == "Подтвердить, что подключены наушники"
-        assert "jieli" in button.find_element(By.XPATH, "..").text.casefold()
+        assert (
+            "jieli"
+            in browser.find_element(By.CSS_SELECTOR, ".device-strip").text.casefold()
+        )
         preview_guard(runtime, port)
         button.click()
         wait.until(
-            lambda page: page.find_element(By.ID, "command-headphones").text
-            == "Отозвать подтверждение наушников"
-            and page.find_element(By.ID, "command-headphones").is_enabled()
+            lambda page: (
+                page.find_element(By.ID, "command-headphones").text
+                == "Отозвать подтверждение наушников"
+                and page.find_element(By.ID, "command-headphones").is_enabled()
+            )
         )
         no_error()
         return dict(confirmation="acknowledged_visible_Jieli_button")
@@ -446,6 +633,7 @@ def live_preview_checks(browser, runtime, port, packet, rows):
         if rows[-1]["status"] != "PASS":
             return
     for value in (35, 100, 0):
+
         def raw_gain(value=value):
             details = gain(value)
             command("Stop")
@@ -499,6 +687,7 @@ def main() -> int:
     owned_ports = PORTS[:2] if args.live_preview else PORTS
     for port in owned_ports:
         with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(("127.0.0.1", port))
     environment = dict(
         os.environ,
@@ -569,7 +758,7 @@ def main() -> int:
                 wait.until(
                     lambda page: (
                         page.find_element(By.CSS_SELECTOR, ".build-state").text
-                        == "Daemon offline"
+                        == "Нет связи с сервисом"  # noqa: RUF001 - literal Russian UI label
                     )
                 )
                 assert all(

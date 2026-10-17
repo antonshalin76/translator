@@ -7,8 +7,10 @@ import re
 import stat
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -120,7 +122,7 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         script = script_path.read_text()
 
         for token in (
-            "translator.task11-openai-adapter-preflight.v1",
+            "translator.task11-openai-ga-preflight.v2",
             "cloud_opt_in_required",
             "missing_credentials_safe_error",
             "audio_leaves_machine_visible_before_session",
@@ -150,7 +152,7 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
 
         for token in (
             "PiperTts",
-            "websocket.WebSocket",
+            "OpenAIRealtimeProvider",
             "stored_audio",
             "stored_transcript_or_translation",
             "debug_text_enabled",
@@ -160,6 +162,171 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
 
         self.assertNotRegex(script, re.compile(r"sk-[A-Za-z0-9_-]+"))
         self.assertNotIn("print(os.environ", script)
+
+    def test_ga_preflight_does_not_reuse_dedicated_translation_evidence(self):
+        module = load_preflight_module()
+        self.assertEqual(module.DEFAULT_REPORT.name, "task11-openai-ga-preflight.json")
+        previous = {
+            "schema_version": "translator.task11-openai-adapter-preflight.v1",
+            "synthetic_speech_comparison": {
+                "provider_id": "openai",
+                "model": "gpt-realtime-translate",
+                "status": "passed",
+                "stored_audio": False,
+                "stored_transcript_or_translation": False,
+                "debug_text_enabled": False,
+                "plaintext_credential_persisted": False,
+            },
+        }
+        current = module.preserved_synthetic_speech_comparison(previous, False)
+        self.assertEqual(current["model"], "gpt-realtime-2.1")
+        self.assertNotEqual(current["status"], "passed")
+
+    def test_ga_smoke_reuses_production_provider_and_rejects_old_receipt(self):
+        module = load_preflight_module("translator-task11-openai-synthetic-smoke")
+        self.assertEqual(module.REPORT_PATH.name, "task11-openai-ga-preflight.json")
+        with patch.object(module, "REPORT_PATH") as report:
+            report.read_text.return_value = json.dumps(
+                {"schema_version": "translator.task11-openai-adapter-preflight.v1"}
+            )
+            with self.assertRaisesRegex(ValueError, "current_ga_preflight_required"):
+                module.read_report()
+
+    def test_ga_smoke_requires_completed_nonzero_pcm_and_closes_provider(self):
+        module = load_preflight_module("translator-task11-openai-synthetic-smoke")
+        cases = [(False, False, None), (True, False, None), (True, True, None)]
+        cases.extend(
+            (True, False, fault)
+            for fault in (
+                "audio_session",
+                "audio_direction",
+                "audio_stream",
+                "audio_utterance",
+                "final_session",
+                "final_direction",
+                "final_stream",
+                "final_utterance",
+                "audio_sequence",
+                "audio_format",
+                "audio_duration",
+                "audio_bytes",
+                "final_sequence",
+                "event_sequence",
+                "reordered",
+                "duplicate_audio",
+                "duplicate_final",
+            )
+        )
+        for nonzero, cleanup_fails, fault in cases:
+            with self.subTest(
+                nonzero=nonzero, cleanup_fails=cleanup_fails, fault=fault
+            ):
+
+                class FakeProvider:
+                    def __init__(self, pcm_nonzero, fails, event_fault):
+                        self.pcm_nonzero = pcm_nonzero
+                        self.cleanup_fails = fails
+                        self.event_fault = event_fault
+                        self.shutdown_called = False
+
+                    async def open(self):
+                        pass
+
+                    def reserve_session(self, request, publish):
+                        self.request, self.publish = request, publish
+                        self.closed = False
+                        return self
+
+                    async def submit_frame(self, frame):
+                        assert frame.end_of_utterance
+                        audio = module.ProviderAudioDelta(
+                            session_id=frame.session_id,
+                            direction_id=frame.direction_id,
+                            stream_id=frame.stream_id,
+                            utterance_id=frame.utterance_id,
+                            sequence=0,
+                            event_sequence=1,
+                            provider_monotonic_ns=1,
+                            sample_rate_hz=24000,
+                            channels=1,
+                            sample_format=module.SampleFormat.S16LE,
+                            frame_duration_ms=20,
+                            pcm=bytes([int(self.pcm_nonzero), 0]) * 480,
+                        )
+                        final = module.ProviderUtteranceFinal(
+                            session_id=frame.session_id,
+                            direction_id=frame.direction_id,
+                            stream_id=frame.stream_id,
+                            utterance_id=frame.utterance_id,
+                            event_sequence=2,
+                            final_audio_sequence=0,
+                            outcome=module.UtteranceOutcome.COMPLETED,
+                        )
+                        identity_faults = {
+                            "session": {"session_id": uuid4()},
+                            "direction": {
+                                "direction_id": module.AudioDirection.SPEAKER
+                            },
+                            "stream": {"stream_id": uuid4()},
+                            "utterance": {"utterance_id": uuid4()},
+                        }
+                        audio_updates = {
+                            **identity_faults,
+                            "sequence": {"sequence": 1},
+                            "format": {"sample_rate_hz": 16000},
+                            "duration": {"frame_duration_ms": 40},
+                            "bytes": {"pcm": b"\x01\x00"},
+                        }
+                        final_updates = {
+                            **identity_faults,
+                            "sequence": {"final_audio_sequence": 1},
+                        }
+                        prefix, _, field = (self.event_fault or "").partition("_")
+                        if prefix == "audio" and field in audio_updates:
+                            audio = audio.model_copy(update=audio_updates[field])
+                        elif prefix == "final" and field in final_updates:
+                            final = final.model_copy(update=final_updates[field])
+                        elif self.event_fault == "event_sequence":
+                            final = final.model_copy(update={"event_sequence": 1})
+                        batch = (audio, final)
+                        if self.event_fault == "reordered":
+                            batch = (final, audio)
+                        elif self.event_fault == "duplicate_audio":
+                            batch = (audio, audio, final)
+                        elif self.event_fault == "duplicate_final":
+                            batch = (audio, final, final)
+                        await self.publish(batch, lambda: None)
+
+                    async def drain(self, reason):
+                        self.closed = True
+                        if self.cleanup_fails:
+                            raise RuntimeError("synthetic cleanup failure")
+                        return SimpleNamespace(delivery_error=None)
+
+                    async def shutdown(self):
+                        assert self.closed
+                        self.shutdown_called = True
+
+                provider = FakeProvider(nonzero, cleanup_fails, fault)
+                with patch.object(
+                    module, "OpenAIRealtimeProvider", return_value=provider
+                ):
+                    result = module.run_direction(
+                        "ru_to_en",
+                        module.DIRECTION_CONFIGS["ru_to_en"],
+                        [bytes(960)],
+                        "synthetic-key",
+                        module.Barrier(1),
+                    )
+                self.assertEqual(
+                    result["status"],
+                    "passed"
+                    if nonzero and not cleanup_fails and fault is None
+                    else "failed",
+                )
+                self.assertTrue(provider.closed)
+                self.assertTrue(provider.shutdown_called)
+                self.assertNotIn("synthetic-key", json.dumps(result))
 
     @requires_local_artifacts("docs/benchmarks/task11-openai-adapter-preflight.json")
     def test_report_shape_carries_debts_and_keeps_task11_open(self) -> None:

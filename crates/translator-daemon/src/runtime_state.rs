@@ -428,6 +428,14 @@ impl RuntimeStore {
         let mut snapshot = self.snapshot();
         snapshot.provider_id = patch.provider_id;
         snapshot.audio_leaves_machine = patch.provider_id == ProviderId::Openai;
+        for direction in &mut snapshot.directions {
+            direction.voice_profile.engine = match patch.provider_id {
+                ProviderId::Local => VoiceEngine::Piper,
+                ProviderId::Openai => VoiceEngine::Openai,
+            };
+            direction.voice_profile.model_path = None;
+            direction.voice_profile.provider_voice_id = None;
+        }
         snapshot.self_test.status.debug_text = None;
         Ok(snapshot)
     }
@@ -823,6 +831,35 @@ mod tests {
     };
 
     use super::{RuntimeEvent, RuntimeStore};
+
+    #[test]
+    fn provider_switch_normalizes_voice_engine_without_losing_language_or_gender() {
+        let store = RuntimeStore::default();
+        let before = store.snapshot();
+        let cloud = store
+            .provider_candidate(super::ProviderPatch {
+                provider_id: super::ProviderId::Openai,
+                cloud_opt_in: Some(true),
+            })
+            .unwrap();
+        assert!(
+            cloud
+                .directions
+                .iter()
+                .all(|direction| direction.voice_profile.engine == super::VoiceEngine::Openai)
+        );
+        store.commit_control(cloud);
+        let local = store
+            .provider_candidate(super::ProviderPatch {
+                provider_id: super::ProviderId::Local,
+                cloud_opt_in: None,
+            })
+            .unwrap();
+        assert!(!local.audio_leaves_machine);
+        for (actual, expected) in local.directions.iter().zip(before.directions.iter()) {
+            assert_eq!(actual.voice_profile, expected.voice_profile);
+        }
+    }
 
     #[test]
     fn voice_override_candidates_reject_all_present_values_without_snapshot_or_events() {

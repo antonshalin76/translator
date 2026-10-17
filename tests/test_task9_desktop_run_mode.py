@@ -236,6 +236,7 @@ class Task9DesktopRunModeTests(unittest.TestCase):
             )
             environment_dir.mkdir(mode=0o700)
             environment_file.touch(mode=0o644)
+            environment_file.chmod(0o644)
 
             self._assert_start_rejected_before_systemd(env, log_path)
 
@@ -274,6 +275,7 @@ class Task9DesktopRunModeTests(unittest.TestCase):
                 self._desktop_security_test_environment(Path(tmp))
             )
             environment_dir.mkdir(mode=0o755)
+            environment_dir.chmod(0o755)
             environment_file.touch(mode=0o600)
 
             self._assert_start_rejected_before_systemd(env, log_path)
@@ -368,6 +370,7 @@ class Task9DesktopRunModeTests(unittest.TestCase):
             self.assertEqual(symlink_result.returncode, 78)
             environment_file.unlink()
             environment_file.touch(mode=0o644)
+            environment_file.chmod(0o644)
 
             mode_result = self._run_daemon_wrapper(env, environment_dir.parent, daemon)
 

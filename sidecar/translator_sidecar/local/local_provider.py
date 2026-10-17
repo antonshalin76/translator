@@ -1377,6 +1377,10 @@ class LocalProvider:
         mt_ms: int | None = None,
         tts_ms: int | None = None,
     ) -> None:
+        retryable = code is not SafeErrorCode.MODEL_NOT_LOADED and not any(
+            self._model_state(session, kind) is ModelState.FAILED
+            for kind in (ModelKind.ASR, ModelKind.MT, ModelKind.TTS)
+        )
         self._cancel_commit(utterance)
         self._purge_publications_locked(
             session,
@@ -1404,7 +1408,7 @@ class LocalProvider:
                         utterance_id=utterance.utterance_id,
                         event_sequence=(session.next_event_sequence()),
                         code=code,
-                        retryable=True,
+                        retryable=retryable,
                         safe_message=SAFE_ERROR_MESSAGES[code],
                     ),
                     ProviderUtteranceFinal(
@@ -1500,7 +1504,7 @@ class LocalProvider:
             SafeErrorSummary(
                 code=SafeErrorCode.MODEL_NOT_LOADED,
                 message=SAFE_ERROR_MESSAGES[SafeErrorCode.MODEL_NOT_LOADED],
-                retryable=True,
+                retryable=False,
             )
             if unavailable
             else None

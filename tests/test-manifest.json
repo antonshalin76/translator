@@ -12,7 +12,7 @@
       "files": [
         "apps/translator-ui/src/uiModel.test.ts"
       ],
-      "node_count": 26,
+      "node_count": 29,
       "nodes": [
         {
           "file": "apps/translator-ui/src/uiModel.test.ts",
@@ -136,7 +136,25 @@
         },
         {
           "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::committed audio gains::lifecycle or failure discards unsent gains rather than retrying them",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::committed audio gains::retains the latest committed gain while another request is in flight",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
           "id": "apps/translator-ui/src/uiModel.test.ts::direction controls::direction toggle intent updates only channel enabled state",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::direction runtime projection::direction labels distinguish a live channel, recovery and failure without claiming translated speech",
           "reason": "",
           "status": "deterministic"
         },
@@ -174,7 +192,7 @@
     },
     "pytest": {
       "external_skip_count": 5,
-      "file_count": 29,
+      "file_count": 30,
       "files": [
         "sidecar/tests/test_asr_quality.py",
         "sidecar/tests/test_cuda_runtime.py",
@@ -197,6 +215,7 @@
         "sidecar/tests/test_product_release_coverage.py",
         "sidecar/tests/test_provider_contract.py",
         "sidecar/tests/test_provider_engine.py",
+        "sidecar/tests/test_provider_progress_check.py",
         "sidecar/tests/test_provider_registry.py",
         "sidecar/tests/test_quality_model_matrix.py",
         "sidecar/tests/test_secure_ipc.py",
@@ -206,7 +225,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1208,
+      "node_count": 1288,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -516,6 +535,24 @@
         },
         {
           "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_bootstrap_rejects_invalid_selected_provider[OPENAI]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_bootstrap_rejects_invalid_selected_provider[]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_bootstrap_rejects_invalid_selected_provider[unknown]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
           "id": "sidecar/tests/test_grpc_server.py::test_cleanup_releases_session_even_when_close_raises",
           "reason": "",
           "status": "deterministic"
@@ -523,6 +560,66 @@
         {
           "file": "sidecar/tests/test_grpc_server.py",
           "id": "sidecar/tests/test_grpc_server.py::test_client_cancellation_releases_open_session",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_accepted_send_failure_delivers_terminal_pair_then_unavailable[input_audio_buffer.append-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_accepted_send_failure_delivers_terminal_pair_then_unavailable[input_audio_buffer.append-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_accepted_send_failure_delivers_terminal_pair_then_unavailable[input_audio_buffer.commit-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_accepted_send_failure_delivers_terminal_pair_then_unavailable[response.create-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_bootstrap_skips_local_models_and_cleans_up[False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_bootstrap_skips_local_models_and_cleans_up[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_open_failure_has_safe_status_and_drains_without_false_open[401-StatusCode.UNAUTHENTICATED-provider_auth_failed]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_open_failure_has_safe_status_and_drains_without_false_open[429-StatusCode.RESOURCE_EXHAUSTED-provider_unavailable]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_open_failure_has_safe_status_and_drains_without_false_open[missing_key-StatusCode.UNAUTHENTICATED-provider_auth_failed]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_cloud_open_failure_has_safe_status_and_drains_without_false_open[quota-StatusCode.RESOURCE_EXHAUSTED-provider_unavailable]",
           "reason": "",
           "status": "deterministic"
         },
@@ -684,7 +781,13 @@
         },
         {
           "file": "sidecar/tests/test_grpc_server.py",
-          "id": "sidecar/tests/test_grpc_server.py::test_production_bootstrap_injects_local_provider",
+          "id": "sidecar/tests/test_grpc_server.py::test_production_bootstrap_injects_local_provider[local]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_production_bootstrap_injects_local_provider[openai]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4308,7 +4411,7 @@
         },
         {
           "file": "sidecar/tests/test_openai_provider.py",
-          "id": "sidecar/tests/test_openai_provider.py::test_preflight_voice_override_keeps_existing_auth_error_precedence[openai-True-False-provider_auth_failed-True]",
+          "id": "sidecar/tests/test_openai_provider.py::test_preflight_voice_override_keeps_existing_auth_error_precedence[openai-True-False-provider_auth_failed-False]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4356,37 +4459,43 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_debug_reprepare_clears_soft_idle_failure_and_does_not_poison_controls",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[[]]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.closed\"}]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"conversation.item.input_audio_transcription.delta\", \"event_id\": \"event_synthetic\", \"item_id\": \"input_synthetic\", \"content_index\": 0, \"delta\": \"unconfigured\"}]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.input_transcript.delta\", \"event_id\": \"event_synthetic\", \"delta\": \"unconfigured\"}]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"response.done\"}]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.output_audio.delta\", \"event_id\": \"event_synthetic\", \"delta\": \"!\"}]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"response.output_audio.delta\", \"event_id\": \"event_synthetic\", \"response_id\": \"resp_synthetic\", \"item_id\": \"out_synthetic\", \"output_index\": 0, \"content_index\": 0, \"delta\": \"!\"}]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.output_audio.delta\", \"event_id\": \"event_synthetic\", \"delta\": \"AA==\", \"sample_rate\": 16000}]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"response.output_audio.delta\", \"event_id\": \"event_synthetic\", \"response_id\": \"resp_synthetic\", \"item_id\": \"out_synthetic\", \"output_index\": 0, \"content_index\": 0, \"delta\": \"AA==\", \"sample_rate\": 16000}]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"session.output_audio.delta\", \"event_id\": \"event_synthetic\", \"delta\": 1}]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_documented_event_drift_fails_generation_closed[{\"type\": \"response.output_audio.delta\", \"event_id\": \"event_synthetic\", \"response_id\": \"resp_synthetic\", \"item_id\": \"out_synthetic\", \"output_index\": 0, \"content_index\": 0, \"delta\": 1}]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4398,13 +4507,19 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_failed_close_and_abort_retain_owner_until_shutdown_retry[False]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_abort_or_join_retain_owner_until_shutdown_retry[False]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_failed_close_and_abort_retain_owner_until_shutdown_retry[True]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_abort_or_join_retain_owner_until_shutdown_retry[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_failed_idle_prepare_is_retained_once_and_typed_on_next_input",
           "reason": "",
           "status": "deterministic"
         },
@@ -4452,6 +4567,36 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_fatal_idle_prepare_keeps_failed_delivery_or_cleanup_custody[cleanup]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_fatal_idle_prepare_keeps_failed_delivery_or_cleanup_custody[publication]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_fatal_idle_prepare_reports_session_failure_and_health_during_silence[auth]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_fatal_idle_prepare_reports_session_failure_and_health_during_silence[config]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_fatal_idle_prepare_reports_session_failure_and_health_during_silence[quota]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_frame_contract_mismatch_does_not_mutate_or_replace_generation[updates0]",
           "reason": "",
           "status": "deterministic"
@@ -4494,6 +4639,162 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_failed_response_preserves_safe_fatal_auth_classification",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_generation_rejects_foreign_or_duplicate_response_and_input_ids[event0]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_generation_rejects_foreign_or_duplicate_response_and_input_ids[event1]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_generation_rejects_foreign_or_duplicate_response_and_input_ids[event2]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_generation_rejects_foreign_or_duplicate_response_and_input_ids[event3]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_generation_rejects_foreign_or_duplicate_response_and_input_ids[event4]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_handshake_refuses_unnegotiated_settings_and_disposes_socket[automatic_turn]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_handshake_refuses_unnegotiated_settings_and_disposes_socket[format]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_handshake_refuses_unnegotiated_settings_and_disposes_socket[instructions]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_handshake_refuses_unnegotiated_settings_and_disposes_socket[modalities]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_handshake_refuses_unnegotiated_settings_and_disposes_socket[voice]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_manual_turn_requests_commit_then_one_audio_response",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_noncompleted_response_is_not_success_and_next_phrase_is_independent[cancelled-cancelled]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_noncompleted_response_is_not_success_and_next_phrase_is_independent[failed-dropped]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_noncompleted_response_is_not_success_and_next_phrase_is_independent[incomplete-dropped]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_source_transcript_completed_is_bound_and_not_duplicated[False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_ga_source_transcript_completed_is_bound_and_not_duplicated[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_genuine_connect_failure_is_retryable_not_invalid_input[closed]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_genuine_connect_failure_is_retryable_not_invalid_input[oserror]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_genuine_connect_failure_is_retryable_not_invalid_input[timeout]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_idle_prepare_cancel_is_joined_before_stop_or_debug_replacement[cancelled-debug]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_idle_prepare_cancel_is_joined_before_stop_or_debug_replacement[cancelled-stop]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_idle_prepare_cancel_is_joined_before_stop_or_debug_replacement[completed-debug]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_idle_prepare_cancel_is_joined_before_stop_or_debug_replacement[completed-stop]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_next_isolated_connection_is_prepared_during_idle_not_next_capture[cancelled]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_next_isolated_connection_is_prepared_during_idle_not_next_capture[completed]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_no_close_ack_has_bounded_failure_not_success",
           "reason": "",
           "status": "deterministic"
@@ -4501,6 +4802,30 @@
         {
           "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_noncommitting_publication_fails_logical_session_and_releases_generation",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_openai_accepted_input_send_failure_is_typed_and_terminal_after_cleanup[input_audio_buffer.append-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_openai_accepted_input_send_failure_is_typed_and_terminal_after_cleanup[input_audio_buffer.append-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_openai_accepted_input_send_failure_is_typed_and_terminal_after_cleanup[input_audio_buffer.commit-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_openai_accepted_input_send_failure_is_typed_and_terminal_after_cleanup[response.create-False]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4632,7 +4957,43 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_real_socket_cancel_joins_local_abort_without_remote_close_handshake",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_replay_split_audio_debug_error_unknown_and_partial_tail",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_retryable_error_on_unbound_idle_generation_does_not_reconnect[rate_limit_error]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_retryable_error_on_unbound_idle_generation_does_not_reconnect[server_error]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_safe_remote_retirement_prepares_one_next_generation_during_idle[cancelled]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_safe_remote_retirement_prepares_one_next_generation_during_idle[retryable_error]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_safe_remote_retirement_prepares_one_next_generation_during_idle[retryable_failed]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4645,6 +5006,24 @@
         {
           "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_supersession_retires_generation_before_new_input",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_ack_reaps_connection_without_waiting_for_remote_close[cancelled]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_ack_reaps_connection_without_waiting_for_remote_close[completed]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_terminal_ack_reaps_connection_without_waiting_for_remote_close[dropped]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4699,6 +5078,84 @@
         {
           "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_unresolved_cleanup_refuses_new_uuid_without_growing_retained_resources[opening]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_vendor_close_without_audio_drops_only_that_phrase_and_next_phrase_recovers[microphone]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_vendor_close_without_audio_drops_only_that_phrase_and_next_phrase_recovers[speaker]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[authentication_error-invalid_api_key-provider_auth_failed-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[authentication_error-rate_limit_exceeded-provider_auth_failed-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[invalid_request_error-None-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[invalid_request_error-insufficient_quota-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[invalid_request_error-invalid_value-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[invalid_request_error-rate_limit_exceeded-provider_unavailable-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[rate_limit_error-None-provider_unavailable-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[rate_limit_error-billing_hard_limit_reached-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[rate_limit_error-insufficient_quota-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[server_error-None-provider_unavailable-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_wire_failure_retires_generation_with_safe_terminal_error[server_error-insufficient_quota-provider_unavailable-False]",
           "reason": "",
           "status": "deterministic"
         },
@@ -6001,6 +6458,48 @@
         {
           "file": "sidecar/tests/test_provider_engine.py",
           "id": "sidecar/tests/test_provider_engine.py::test_two_sessions_keep_direction_queues_and_event_sequences_independent",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_progress_check.py",
+          "id": "sidecar/tests/test_provider_progress_check.py::test_budget_rejects_before_mutating_counters",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_progress_check.py",
+          "id": "sidecar/tests/test_provider_progress_check.py::test_cancellation_preserves_failed_result_and_drains_both_directions",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_progress_check.py",
+          "id": "sidecar/tests/test_provider_progress_check.py::test_credentials_are_private_unique_and_never_executed",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_progress_check.py",
+          "id": "sidecar/tests/test_provider_progress_check.py::test_drain_delivery_error_cannot_pass",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_progress_check.py",
+          "id": "sidecar/tests/test_provider_progress_check.py::test_terminal_alone_is_not_progress_and_cleanup_is_required[False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_progress_check.py",
+          "id": "sidecar/tests/test_provider_progress_check.py::test_terminal_alone_is_not_progress_and_cleanup_is_required[True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_provider_progress_check.py",
+          "id": "sidecar/tests/test_provider_progress_check.py::test_timeout_cannot_pass_or_leave_provider_alive",
           "reason": "",
           "status": "deterministic"
         },
@@ -7459,8 +7958,8 @@
       ]
     },
     "rust": {
-      "external_skip_count": 19,
-      "file_count": 50,
+      "external_skip_count": 20,
+      "file_count": 51,
       "files": [
         "apps/translator-ui/src-tauri/src/main.rs",
         "crates/translator-aec-backend/src/fixture.rs",
@@ -7506,6 +8005,7 @@
         "crates/translator-daemon/tests/round_trip_process.rs",
         "crates/translator-daemon/tests/round_trip_runtime.rs",
         "crates/translator-daemon/tests/round_trip_state.rs",
+        "crates/translator-daemon/tests/runtime_backpressure_properties.rs",
         "crates/translator-daemon/tests/sidecar_supervisor.rs",
         "crates/translator-daemon/tests/stale_sidecar_socket.rs",
         "crates/translator-daemon/tests/task7_benchmark_bridge.rs",
@@ -7513,7 +8013,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1076,
+      "node_count": 1095,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -10172,7 +10672,17 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::latency_policy_cannot_diverge_from_the_active_session_contract",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::microphone_start_applies_non_bypass_mix_before_opening_runtime",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::control_application::safe_admission_tests::provider_change_requires_stopped_runtime_without_replacement_or_state_write",
           "status": "deterministic"
         },
         {
@@ -10298,6 +10808,21 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::process_sidecar::tests::unsafe_shadow_library_in_cuda_directory_is_rejected",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::provider_audio_watchdog::backpressure_tests::deliberate_receive_backpressure_does_not_prolong_input_collection",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::provider_audio_watchdog::backpressure_tests::deliberate_receive_backpressure_preserves_active_provider_receipt_budget",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::provider_audio_watchdog::backpressure_tests::playable_credit_is_identity_phase_and_deadline_scoped",
           "status": "deterministic"
         },
         {
@@ -10517,6 +11042,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::runtime_state::tests::provider_switch_normalizes_voice_engine_without_losing_language_or_gender",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::runtime_state::tests::voice_override_candidates_reject_all_present_values_without_snapshot_or_events",
           "status": "deterministic"
         },
@@ -10662,6 +11192,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::live_progress_oracle_rejects_stall_even_when_cleanup_crosses_the_finish_line",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::batch_activates_after_all_prepares_and_preserves_unaffected_peer",
           "status": "deterministic"
         },
@@ -10683,6 +11218,11 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::failed_candidate_compensation_retains_each_exact_owner_until_stop_retry",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::failed_provider_close_during_local_fault_retires_generation_before_replacement",
           "status": "deterministic"
         },
         {
@@ -10763,6 +11303,16 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::production_failure_classifier_probes_only_ambiguous_provider_transport",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::productive_current_epoch_resets_recovery_budget_not_worker_activation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::productive_local_close_failure_preserves_exhausted_shared_budget_and_custody",
           "status": "deterministic"
         },
         {
@@ -10927,6 +11477,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_live_duplex_progress",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::process_prepare_capture_crossing_deadline_retains_owner_without_playback",
           "status": "deterministic"
         },
@@ -10952,6 +11507,26 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_completes_while_capture_continues",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_credits_owned_media_and_expires_real_starvation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_burst_backpressure_preserves_capture_and_audio_order",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_burst_backpressure_remains_stoppable",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_capture_eof_retains_cleanup_custody",
           "status": "deterministic"
         },
@@ -10962,7 +11537,17 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
-          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_playback_overflow_is_local_and_peer_keeps_capturing",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_dead_rpc_retains_provider_until_independent_teardown",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_fatal_provider_errors_restart_but_retryable_requests_stay_local",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_playback_backpressure_preserves_peer_capture",
           "status": "deterministic"
         },
         {
@@ -11272,11 +11857,6 @@
         },
         {
           "file": "crates/translator-daemon/tests/api_security.rs",
-          "id": "translator-daemon::test::api_security::control_ownership_applies_provider_change_before_publishing_it",
-          "status": "deterministic"
-        },
-        {
-          "file": "crates/translator-daemon/tests/api_security.rs",
           "id": "translator-daemon::test::api_security::control_ownership_finishes_an_admitted_start_after_caller_cancellation",
           "status": "deterministic"
         },
@@ -11368,6 +11948,11 @@
         {
           "file": "crates/translator-daemon/tests/api_security.rs",
           "id": "translator-daemon::test::api_security::partially_consumed_sse_holds_permit_until_body_is_dropped",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/api_security.rs",
+          "id": "translator-daemon::test::api_security::provider_change_is_stopped_only_and_next_start_uses_acknowledged_provider",
           "status": "deterministic"
         },
         {
@@ -12147,6 +12732,11 @@
         },
         {
           "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
+          "id": "translator-daemon::test::provider_audio_watchdog::coordinator_accepts_streaming_audio_before_eou_but_not_a_premature_final",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
           "id": "translator-daemon::test::provider_audio_watchdog::coordinator_atomically_purges_and_marks_validator_before_cancel_action",
           "status": "deterministic"
         },
@@ -12167,12 +12757,12 @@
         },
         {
           "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
-          "id": "translator-daemon::test::provider_audio_watchdog::coordinator_rejects_provider_audio_and_final_before_eou",
+          "id": "translator-daemon::test::provider_audio_watchdog::coordinator_turns_expired_first_audio_into_scoped_cancellation",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
-          "id": "translator-daemon::test::provider_audio_watchdog::coordinator_turns_expired_first_audio_into_scoped_cancellation",
+          "id": "translator-daemon::test::provider_audio_watchdog::early_output_never_rejuvenates_the_input_deadline",
           "status": "deterministic"
         },
         {
@@ -12197,7 +12787,7 @@
         },
         {
           "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
-          "id": "translator-daemon::test::provider_audio_watchdog::provider_audio_before_eou_is_rejected",
+          "id": "translator-daemon::test::provider_audio_watchdog::provider_audio_before_eou_keeps_the_immutable_input_deadline",
           "status": "deterministic"
         },
         {
@@ -12503,6 +13093,11 @@
         {
           "file": "crates/translator-daemon/tests/round_trip_state.rs",
           "id": "translator-daemon::test::round_trip_state::virtual_peer_reinjection_requires_completed_english_monitor_tap",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/runtime_backpressure_properties.rs",
+          "id": "translator-daemon::test::runtime_backpressure_properties::runtime_backpressure_preserves_bounded_fifo_under_arbitrary_produce_consume",
           "status": "deterministic"
         },
         {
@@ -12887,7 +13482,7 @@
         },
         {
           "file": "apps/translator-ui/src-tauri/src/main.rs",
-          "id": "translator-ui::bin::translator-ui::tests::tray_state_marks_selected_controls_and_dims_inactive_actions",
+          "id": "translator-ui::bin::translator-ui::tests::tray_controls_project_only_acknowledged_translation_lifecycle",
           "status": "deterministic"
         },
         {
@@ -12926,7 +13521,7 @@
         "tests/test_task9_desktop_run_mode.py",
         "tests/test_translator_ui_compact_layout.py"
       ],
-      "node_count": 410,
+      "node_count": 414,
       "nodes": [
         {
           "file": "tests/test_aec_backend_check.py",
@@ -15084,6 +15679,24 @@
         },
         {
           "file": "tests/test_task11_openai_adapter_preflight.py",
+          "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_ga_preflight_does_not_reuse_dedicated_translation_evidence",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_task11_openai_adapter_preflight.py",
+          "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_ga_smoke_requires_completed_nonzero_pcm_and_closes_provider",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_task11_openai_adapter_preflight.py",
+          "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_ga_smoke_reuses_production_provider_and_rejects_old_receipt",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_task11_openai_adapter_preflight.py",
           "id": "test_task11_openai_adapter_preflight.Task11OpenAIAdapterPreflightTests.test_planning_notes_record_preflight_without_marking_task11_complete",
           "reason": "missing_external_prerequisite:private_human_evidence",
           "status": "external_skip"
@@ -15222,7 +15835,7 @@
         },
         {
           "file": "tests/test_task8_ui_controls.py",
-          "id": "test_task8_ui_controls.Task8UiControlsTests.test_audio_mix_sliders_apply_changes_from_input_events",
+          "id": "test_task8_ui_controls.Task8UiControlsTests.test_audio_mix_sliders_commit_changes_without_replacing_active_input",
           "reason": "",
           "status": "deterministic"
         },
@@ -15384,7 +15997,13 @@
         },
         {
           "file": "tests/test_translator_ui_compact_layout.py",
-          "id": "test_translator_ui_compact_layout.TranslatorUiCompactLayoutTests.test_direction_panels_do_not_render_low_value_detail_table",
+          "id": "test_translator_ui_compact_layout.TranslatorUiCompactLayoutTests.test_advanced_controls_are_collapsed_and_keep_open_state",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "tests/test_translator_ui_compact_layout.py",
+          "id": "test_translator_ui_compact_layout.TranslatorUiCompactLayoutTests.test_primary_surface_groups_volume_with_each_direction",
           "reason": "",
           "status": "deterministic"
         }
@@ -15512,6 +16131,7 @@
         "scripts/translator-task11-openai-synthetic-smoke",
         "scripts/translator-task12-zoom-diagnostic",
         "scripts/translator-native-ui-check",
+        "scripts/translator-provider-progress-check",
         "scripts/translator_duplex_overlap_check.py",
         "scripts/translator-publication-check",
         "scripts/translator-test-manifest",
@@ -15539,6 +16159,7 @@
         "scripts/translator-task11-openai-synthetic-smoke",
         "scripts/translator-task12-zoom-diagnostic",
         "scripts/translator-native-ui-check",
+        "scripts/translator-provider-progress-check",
         "scripts/translator_duplex_overlap_check.py",
         "scripts/translator-publication-check",
         "scripts/translator-test-manifest",
@@ -15765,6 +16386,11 @@
       "id": "translator-daemon::lib::translator_daemon::aec_backend_session::scope_tests::setsid_member_in_bound_scope_is_terminated_without_group_signal"
     },
     {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_live_duplex_progress"
+    },
+    {
       "code": "missing_external_prerequisite:isolated_native_pipewire",
       "framework": "rust",
       "id": "translator-daemon::test::aec_backend_session::isolated_native_exact_stream_yields_nonadmissible_result_after_cleanup"
@@ -15907,7 +16533,7 @@
   ],
   "runner": {
     "path": "scripts/translator-test-manifest",
-    "sha256": "f85ae2aff89333adb3709b72e86e337c85b3bf44a77a10b2d87df0ded2f59350"
+    "sha256": "b003f2a2c7c47fac7c1983ee930c9af51b49f194178b7fcbf42b4bc9e3054206"
   },
   "schema_version": 1,
   "validator": {

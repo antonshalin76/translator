@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Minimal capability set for the local status window",
   "windows": ["main"],
-  "permissions": []
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

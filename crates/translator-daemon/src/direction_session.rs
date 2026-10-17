@@ -184,6 +184,24 @@ impl DirectionSession {
         self.coordinator.next_phase_deadline_ns()
     }
 
+    pub(crate) fn defer_provider_receipt(&mut self, blocked_ns: u64) {
+        self.coordinator.defer_provider_receipt(blocked_ns);
+    }
+
+    pub(crate) fn credit_playable_audio(
+        &mut self,
+        utterance_id: Uuid,
+        now_ns: u64,
+        playable_until_ns: u64,
+    ) {
+        self.coordinator.credit_playable_audio(
+            self.contract.stream_id,
+            utterance_id,
+            now_ns,
+            playable_until_ns,
+        );
+    }
+
     pub fn open_request(&self) -> ProviderRequest {
         ProviderRequest {
             request: Some(provider_request::Request::OpenSession(

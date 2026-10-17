@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Runtime, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 
 const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:47681";
 const RUNTIME_DIRECTORY: &str = "translator";
@@ -164,8 +164,10 @@ fn main() {
 }
 
 #[tauri::command]
-fn translator_status() -> Result<Value, UiError> {
-    daemon_request(DaemonCommand::Status, None)
+fn translator_status(app: AppHandle) -> Result<Value, UiError> {
+    let snapshot = daemon_request(DaemonCommand::Status, None);
+    let _ = set_tray_menu_from_snapshot(&app, snapshot.as_ref().ok());
+    snapshot
 }
 
 #[tauri::command]
@@ -380,116 +382,22 @@ fn parse_aec_status(value: Value) -> Result<AecCalibrationStatus, UiError> {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TrayItemState {
-    enabled: bool,
-    checked: bool,
-}
-
-impl TrayItemState {
-    const fn new(enabled: bool, checked: bool) -> Self {
-        Self { enabled, checked }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct TrayDirectionState {
-    enabled: bool,
-    source_language: String,
-    target_language: String,
-}
-
-#[derive(Debug, Clone)]
-struct TrayMenuState {
-    translation_running: bool,
-    round_trip_active: bool,
-    provider_id: String,
-    debug_text_enabled: bool,
-    debug_capture_enabled: bool,
-    microphone: TrayDirectionState,
-    speaker: TrayDirectionState,
-    common_mode: Option<String>,
-}
-
-impl TrayMenuState {
-    fn from_snapshot(snapshot: Option<&Value>) -> Self {
-        let snapshot = snapshot.unwrap_or(&Value::Null);
-        Self {
-            translation_running: bool_field(snapshot, "translation_running", false),
-            round_trip_active: round_trip_active(snapshot),
-            provider_id: string_field(snapshot, "provider_id", "local"),
-            debug_text_enabled: bool_field(snapshot, "debug_text_enabled", false),
-            debug_capture_enabled: bool_field(snapshot, "debug_capture_enabled", false),
-            microphone: direction_state(snapshot, "microphone", "ru", "en"),
-            speaker: direction_state(snapshot, "speaker", "en", "ru"),
-            common_mode: common_latency_mode(snapshot),
-        }
-    }
-
-    fn item(&self, id: &str) -> TrayItemState {
-        let channel_controls_enabled = !self.translation_running;
-        match id {
-            "start" => TrayItemState::new(
-                !self.translation_running && (self.microphone.enabled || self.speaker.enabled),
-                false,
-            ),
-            "stop" => TrayItemState::new(self.translation_running, false),
-            "self_test_start" => {
-                TrayItemState::new(!self.translation_running && !self.round_trip_active, false)
-            }
-            "self_test_stop" => TrayItemState::new(self.round_trip_active, false),
-            "provider_local" => TrayItemState::new(
-                self.provider_id == "local" || channel_controls_enabled,
-                self.provider_id == "local",
-            ),
-            "provider_openai" => TrayItemState::new(
-                self.provider_id == "openai" || channel_controls_enabled,
-                self.provider_id == "openai",
-            ),
-            "debug_text_toggle" => TrayItemState::new(true, self.debug_text_enabled),
-            "debug_capture_toggle" => TrayItemState::new(true, self.debug_capture_enabled),
-            "mic_enabled_toggle" => TrayItemState::new(true, self.microphone.enabled),
-            "speaker_enabled_toggle" => TrayItemState::new(true, self.speaker.enabled),
-            "mic_ru_en" => {
-                self.direction_pair_item(&self.microphone, channel_controls_enabled, "ru", "en")
-            }
-            "mic_en_ru" => {
-                self.direction_pair_item(&self.microphone, channel_controls_enabled, "en", "ru")
-            }
-            "speaker_en_ru" => {
-                self.direction_pair_item(&self.speaker, channel_controls_enabled, "en", "ru")
-            }
-            "speaker_ru_en" => {
-                self.direction_pair_item(&self.speaker, channel_controls_enabled, "ru", "en")
-            }
-            "mode_quality_first" => self.mode_item("quality_first"),
-            "mode_balanced" => self.mode_item("balanced"),
-            "mode_streaming_first" => self.mode_item("streaming_first"),
-            _ => TrayItemState::new(true, false),
-        }
-    }
-
-    fn direction_pair_item(
-        &self,
-        direction: &TrayDirectionState,
-        controls_enabled: bool,
-        source_language: &str,
-        target_language: &str,
-    ) -> TrayItemState {
-        let checked = direction.source_language == source_language
-            && direction.target_language == target_language;
-        TrayItemState::new(checked || controls_enabled, checked)
-    }
-
-    fn mode_item(&self, mode: &str) -> TrayItemState {
-        let checked = self.common_mode.as_deref() == Some(mode);
-        TrayItemState::new(true, checked)
-    }
+fn tray_translation_controls(snapshot: Option<&Value>) -> (bool, bool) {
+    let Some(snapshot) = snapshot else {
+        return (false, false);
+    };
+    let running = snapshot.get("translation_running").and_then(Value::as_bool) == Some(true);
+    let status = snapshot.get("runtime_status").and_then(Value::as_str);
+    (
+        !running && status == Some("stopped"),
+        running || matches!(status, Some("running" | "failed" | "cleanup_pending")),
+    )
 }
 
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = daemon_request(DaemonCommand::Status, None).ok();
     let menu = tray_menu(app, snapshot.as_ref())?;
+    app.manage(menu.clone());
 
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
@@ -522,214 +430,43 @@ where
     M: Manager<R>,
     R: Runtime,
 {
-    let state = TrayMenuState::from_snapshot(snapshot);
-    let show = MenuItem::with_id(manager, "show", "Show Translator", true, None::<&str>)?;
-    let start = tray_menu_item(manager, "start", "Start Translation", state.item("start"))?;
-    let stop = tray_menu_item(manager, "stop", "Stop Translation", state.item("stop"))?;
-    let self_test_start = tray_menu_item(
+    let (can_start, can_stop) = tray_translation_controls(snapshot);
+    let show = MenuItem::with_id(manager, "show", "Показать Translator", true, None::<&str>)?;
+    let start = MenuItem::with_id(manager, "start", "Начать перевод", can_start, None::<&str>)?;
+    let stop = MenuItem::with_id(
         manager,
-        "self_test_start",
-        "Start Round-Trip Self-Test",
-        state.item("self_test_start"),
-    )?;
-    let self_test_stop = tray_menu_item(
-        manager,
-        "self_test_stop",
-        "Stop Round-Trip Self-Test",
-        state.item("self_test_stop"),
-    )?;
-    let provider_local = tray_check_item(
-        manager,
-        "provider_local",
-        "Local Provider",
-        state.item("provider_local"),
-    )?;
-    let provider_openai = tray_check_item(
-        manager,
-        "provider_openai",
-        "OpenAI Provider (cloud opt-in)",
-        state.item("provider_openai"),
-    )?;
-    let debug_text = tray_check_item(
-        manager,
-        "debug_text_toggle",
-        "Debug Text",
-        state.item("debug_text_toggle"),
-    )?;
-    let debug_capture = tray_check_item(
-        manager,
-        "debug_capture_toggle",
-        "Debug Capture",
-        state.item("debug_capture_toggle"),
-    )?;
-    let mic_enabled = tray_check_item(
-        manager,
-        "mic_enabled_toggle",
-        "Mic Channel",
-        state.item("mic_enabled_toggle"),
-    )?;
-    let speaker_enabled = tray_check_item(
-        manager,
-        "speaker_enabled_toggle",
-        "Speaker Channel",
-        state.item("speaker_enabled_toggle"),
-    )?;
-    let mic_ru_en = tray_check_item(
-        manager,
-        "mic_ru_en",
-        "Mic RU -> EN",
-        state.item("mic_ru_en"),
-    )?;
-    let mic_en_ru = tray_check_item(
-        manager,
-        "mic_en_ru",
-        "Mic EN -> RU",
-        state.item("mic_en_ru"),
-    )?;
-    let speaker_en_ru = tray_check_item(
-        manager,
-        "speaker_en_ru",
-        "Speaker EN -> RU",
-        state.item("speaker_en_ru"),
-    )?;
-    let speaker_ru_en = tray_check_item(
-        manager,
-        "speaker_ru_en",
-        "Speaker RU -> EN",
-        state.item("speaker_ru_en"),
-    )?;
-    let mode_quality = tray_check_item(
-        manager,
-        "mode_quality_first",
-        "Mode Quality First",
-        state.item("mode_quality_first"),
-    )?;
-    let mode_balanced = tray_check_item(
-        manager,
-        "mode_balanced",
-        "Mode Balanced",
-        state.item("mode_balanced"),
-    )?;
-    let mode_streaming = tray_check_item(
-        manager,
-        "mode_streaming_first",
-        "Mode Streaming First",
-        state.item("mode_streaming_first"),
-    )?;
-    let quit = MenuItem::with_id(manager, "quit", "Quit", true, None::<&str>)?;
-    let sep_runtime = PredefinedMenuItem::separator(manager)?;
-    let sep_provider = PredefinedMenuItem::separator(manager)?;
-    let sep_debug = PredefinedMenuItem::separator(manager)?;
-    let sep_channels = PredefinedMenuItem::separator(manager)?;
-    let sep_modes = PredefinedMenuItem::separator(manager)?;
-    let sep_quit = PredefinedMenuItem::separator(manager)?;
-
-    Menu::with_items(
-        manager,
-        &[
-            &show,
-            &sep_runtime,
-            &start,
-            &stop,
-            &self_test_start,
-            &self_test_stop,
-            &sep_provider,
-            &provider_local,
-            &provider_openai,
-            &sep_debug,
-            &debug_text,
-            &debug_capture,
-            &sep_channels,
-            &mic_enabled,
-            &speaker_enabled,
-            &mic_ru_en,
-            &mic_en_ru,
-            &speaker_en_ru,
-            &speaker_ru_en,
-            &sep_modes,
-            &mode_quality,
-            &mode_balanced,
-            &mode_streaming,
-            &sep_quit,
-            &quit,
-        ],
-    )
-}
-
-fn tray_menu_item<M, R>(
-    manager: &M,
-    id: &str,
-    text: &str,
-    state: TrayItemState,
-) -> tauri::Result<MenuItem<R>>
-where
-    M: Manager<R>,
-    R: Runtime,
-{
-    MenuItem::with_id(manager, id, text, state.enabled, None::<&str>)
-}
-
-fn tray_check_item<M, R>(
-    manager: &M,
-    id: &str,
-    text: &str,
-    state: TrayItemState,
-) -> tauri::Result<CheckMenuItem<R>>
-where
-    M: Manager<R>,
-    R: Runtime,
-{
-    CheckMenuItem::with_id(
-        manager,
-        id,
-        text,
-        state.enabled,
-        state.checked,
+        "stop",
+        "Остановить перевод",
+        can_stop,
         None::<&str>,
-    )
+    )?;
+    let separator = PredefinedMenuItem::separator(manager)?;
+    let quit = MenuItem::with_id(manager, "quit", "Закрыть интерфейс", true, None::<&str>)?;
+    Menu::with_items(manager, &[&show, &start, &stop, &separator, &quit])
 }
 
 fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
-    let _ = match id {
+    let result = match id {
         "show" => {
             show_main_window(app);
-            Ok(Value::Null)
+            return;
         }
         "start" => daemon_request(DaemonCommand::StartTranslation, None),
         "stop" => daemon_request(DaemonCommand::StopTranslation, None),
-        "self_test_start" => daemon_request(DaemonCommand::StartRoundTrip, None),
-        "self_test_stop" => daemon_request(DaemonCommand::StopRoundTrip, None),
-        "provider_local" => set_provider_from_tray("local", false),
-        "provider_openai" => set_provider_from_tray("openai", true),
-        "debug_text_toggle" => {
-            toggle_debug_flag("debug_text_enabled", DaemonCommand::PatchDebugText)
-        }
-        "debug_capture_toggle" => {
-            toggle_debug_flag("debug_capture_enabled", DaemonCommand::PatchDebugCapture)
-        }
-        "mic_enabled_toggle" => toggle_direction_enabled_from_tray("microphone"),
-        "speaker_enabled_toggle" => toggle_direction_enabled_from_tray("speaker"),
-        "mic_ru_en" => set_direction_from_tray("microphone", "ru", "en"),
-        "mic_en_ru" => set_direction_from_tray("microphone", "en", "ru"),
-        "speaker_en_ru" => set_direction_from_tray("speaker", "en", "ru"),
-        "speaker_ru_en" => set_direction_from_tray("speaker", "ru", "en"),
-        "mode_quality_first" => {
-            set_both_latency_modes_from_tray("quality_first").map(|()| Value::Null)
-        }
-        "mode_balanced" => set_both_latency_modes_from_tray("balanced").map(|()| Value::Null),
-        "mode_streaming_first" => {
-            set_both_latency_modes_from_tray("streaming_first").map(|()| Value::Null)
-        }
         "quit" => {
             let _ = daemon_request(
                 DaemonCommand::PatchDebugText,
                 Some(json!({ "enabled": false })),
             );
             app.exit(0);
-            Ok(Value::Null)
+            return;
         }
-        _ => Ok(Value::Null),
+        _ => return,
     };
+    if let Err(error) = result {
+        show_main_window(app);
+        let _ = app.emit("translator-control-error", error);
+    }
     let _ = refresh_tray_menu(app);
 }
 
@@ -759,15 +496,7 @@ fn refresh_status_from_webview<R: Runtime>(
 fn webview_command_refreshes_tray(command: DaemonCommand) -> bool {
     matches!(
         command,
-        DaemonCommand::StartTranslation
-            | DaemonCommand::StopTranslation
-            | DaemonCommand::PatchDebugText
-            | DaemonCommand::PatchDebugCapture
-            | DaemonCommand::PatchDirection
-            | DaemonCommand::PatchProvider
-            | DaemonCommand::PatchLatencyPolicy
-            | DaemonCommand::StartRoundTrip
-            | DaemonCommand::StopRoundTrip
+        DaemonCommand::StartTranslation | DaemonCommand::StopTranslation
     )
 }
 
@@ -780,81 +509,20 @@ fn set_tray_menu_from_snapshot<R: Runtime>(
     app: &AppHandle<R>,
     snapshot: Option<&Value>,
 ) -> Result<(), UiError> {
-    let menu = tray_menu(app, snapshot)
-        .map_err(|_| UiError::new("tray_menu_unavailable", "tray menu could not be rebuilt"))?;
-    let tray = app
-        .tray_by_id(TRAY_ID)
-        .ok_or_else(|| UiError::new("tray_unavailable", "tray icon is unavailable"))?;
-    tray.set_menu(Some(menu))
-        .map_err(|_| UiError::new("tray_menu_unavailable", "tray menu could not be set"))
-}
-
-fn bool_field(snapshot: &Value, field: &str, default: bool) -> bool {
-    snapshot
-        .get(field)
-        .and_then(Value::as_bool)
-        .unwrap_or(default)
-}
-
-fn string_field(snapshot: &Value, field: &str, default: &str) -> String {
-    snapshot
-        .get(field)
-        .and_then(Value::as_str)
-        .unwrap_or(default)
-        .to_owned()
-}
-
-fn direction_state(
-    snapshot: &Value,
-    direction_id: &str,
-    default_source: &str,
-    default_target: &str,
-) -> TrayDirectionState {
-    let direction = snapshot
-        .get("directions")
-        .and_then(Value::as_array)
-        .and_then(|directions| {
-            directions.iter().find(|direction| {
-                direction.get("direction_id").and_then(Value::as_str) == Some(direction_id)
-            })
-        });
-    TrayDirectionState {
-        enabled: direction
-            .and_then(|direction| direction.get("enabled"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        source_language: direction
-            .and_then(|direction| direction.get("source_language"))
-            .and_then(Value::as_str)
-            .unwrap_or(default_source)
-            .to_owned(),
-        target_language: direction
-            .and_then(|direction| direction.get("target_language"))
-            .and_then(Value::as_str)
-            .unwrap_or(default_target)
-            .to_owned(),
+    let menu = app
+        .try_state::<Menu<R>>()
+        .ok_or_else(|| UiError::new("tray_menu_unavailable", "tray menu is unavailable"))?;
+    let (can_start, can_stop) = tray_translation_controls(snapshot);
+    for (id, enabled) in [("start", can_start), ("stop", can_stop)] {
+        let item = menu
+            .get(id)
+            .ok_or_else(|| UiError::new("tray_menu_unavailable", "tray item is unavailable"))?;
+        item.as_menuitem()
+            .ok_or_else(|| UiError::new("tray_menu_unavailable", "tray item is invalid"))?
+            .set_enabled(enabled)
+            .map_err(|_| UiError::new("tray_menu_unavailable", "tray item could not be updated"))?;
     }
-}
-
-fn common_latency_mode(snapshot: &Value) -> Option<String> {
-    let mut modes = snapshot
-        .get("latency_policy")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|policy| policy.get("current_mode").and_then(Value::as_str));
-    let first = modes.next()?.to_owned();
-    if modes.all(|mode| mode == first) {
-        Some(first)
-    } else {
-        None
-    }
-}
-
-fn round_trip_active(snapshot: &Value) -> bool {
-    snapshot
-        .pointer("/self_test/status/checkpoint")
-        .and_then(Value::as_str)
-        .is_some_and(|checkpoint| !matches!(checkpoint, "completed" | "failed" | "stopped"))
+    Ok(())
 }
 
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
@@ -863,89 +531,6 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = window.show();
         let _ = window.set_focus();
     }
-}
-
-fn set_provider_from_tray(provider_id: &str, cloud_opt_in: bool) -> Result<Value, UiError> {
-    if provider_requires_cloud_opt_in(provider_id) && !cloud_opt_in {
-        return Err(UiError::new(
-            "cloud_provider_opt_in_required",
-            "cloud provider requires explicit opt-in",
-        ));
-    }
-    daemon_request(
-        DaemonCommand::PatchProvider,
-        Some(json!({ "provider_id": provider_id, "cloud_opt_in": cloud_opt_in })),
-    )
-}
-
-fn set_direction_from_tray(
-    direction_id: &str,
-    source_language: &str,
-    target_language: &str,
-) -> Result<Value, UiError> {
-    daemon_request(
-        DaemonCommand::PatchDirection,
-        Some(json!({
-            "direction_id": direction_id,
-            "source_language": source_language,
-            "target_language": target_language,
-        })),
-    )
-}
-
-fn toggle_direction_enabled_from_tray(direction_id: &str) -> Result<Value, UiError> {
-    let snapshot = daemon_request(DaemonCommand::Status, None)?;
-    let direction = direction_state(
-        &snapshot,
-        direction_id,
-        default_source_language(direction_id),
-        default_target_language(direction_id),
-    );
-    daemon_request(
-        DaemonCommand::PatchDirection,
-        Some(json!({
-            "direction_id": direction_id,
-            "enabled": !direction.enabled,
-        })),
-    )
-}
-
-fn default_source_language(direction_id: &str) -> &'static str {
-    if direction_id == "speaker" {
-        "en"
-    } else {
-        "ru"
-    }
-}
-
-fn default_target_language(direction_id: &str) -> &'static str {
-    if direction_id == "speaker" {
-        "ru"
-    } else {
-        "en"
-    }
-}
-
-fn set_both_latency_modes_from_tray(current_mode: &str) -> Result<(), UiError> {
-    for direction_id in ["microphone", "speaker"] {
-        daemon_request(
-            DaemonCommand::PatchLatencyPolicy,
-            Some(json!({
-                "direction_id": direction_id,
-                "current_mode": current_mode,
-            })),
-        )?;
-    }
-    Ok(())
-}
-
-fn toggle_debug_flag(field_name: &str, command: DaemonCommand) -> Result<Value, UiError> {
-    let snapshot = daemon_request(DaemonCommand::Status, None)?;
-    let enabled = snapshot
-        .get(field_name)
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    daemon_request(command, Some(json!({ "enabled": !enabled })))
 }
 
 fn daemon_request(command: DaemonCommand, body: Option<Value>) -> Result<Value, UiError> {
@@ -1099,6 +684,9 @@ fn problem_code(body: &str) -> Option<&'static str> {
         "translation_controller_unavailable" => Some("translation_controller_unavailable"),
         "translation_controller_failed" => Some("translation_controller_failed"),
         "translation_precondition_failed" => Some("translation_precondition_failed"),
+        "translation_start_failed" => Some("translation_start_failed"),
+        "provider_change_requires_stop" => Some("provider_change_requires_stop"),
+        "latency_change_requires_stop" => Some("latency_change_requires_stop"),
         "routing_controller_unavailable" => Some("routing_controller_unavailable"),
         "routing_controller_failed" => Some("routing_controller_failed"),
         "manual_route_failed" => Some("manual_route_failed"),
@@ -1197,6 +785,9 @@ mod tests {
     #[test]
     fn problem_code_preserves_known_mix_rejections_without_private_details() {
         for code in [
+            "translation_start_failed",
+            "provider_change_requires_stop",
+            "latency_change_requires_stop",
             "microphone_original_unavailable",
             "audio_mix_discovery_failed",
             "audio_mix_state_unknown",
@@ -1218,70 +809,20 @@ mod tests {
     }
 
     #[test]
-    fn tray_state_marks_selected_controls_and_dims_inactive_actions() {
-        let snapshot = json!({
-            "translation_running": true,
-            "debug_text_enabled": true,
-            "debug_capture_enabled": false,
-            "provider_id": "local",
-            "directions": [
-                {
-                    "direction_id": "microphone",
-                    "source_language": "ru",
-                    "target_language": "en",
-                    "enabled": true
-                },
-                {
-                    "direction_id": "speaker",
-                    "source_language": "en",
-                    "target_language": "ru",
-                    "enabled": false
-                }
-            ],
-            "latency_policy": [
-                { "direction_id": "microphone", "current_mode": "balanced" },
-                { "direction_id": "speaker", "current_mode": "balanced" }
-            ],
-            "self_test": {
-                "status": {
-                    "checkpoint": null
-                }
-            }
-        });
-
-        let state = TrayMenuState::from_snapshot(Some(&snapshot));
-
-        assert_eq!(state.item("start"), TrayItemState::new(false, false));
-        assert_eq!(state.item("stop"), TrayItemState::new(true, false));
-        assert_eq!(state.item("provider_local"), TrayItemState::new(true, true));
-        assert_eq!(
-            state.item("provider_openai"),
-            TrayItemState::new(false, false)
-        );
-        assert_eq!(
-            state.item("debug_text_toggle"),
-            TrayItemState::new(true, true)
-        );
-        assert_eq!(
-            state.item("debug_capture_toggle"),
-            TrayItemState::new(true, false)
-        );
-        assert_eq!(
-            state.item("mic_enabled_toggle"),
-            TrayItemState::new(true, true)
-        );
-        assert_eq!(
-            state.item("speaker_enabled_toggle"),
-            TrayItemState::new(true, false)
-        );
-        assert_eq!(state.item("mic_ru_en"), TrayItemState::new(true, true));
-        assert_eq!(state.item("mic_en_ru"), TrayItemState::new(false, false));
-        assert_eq!(state.item("speaker_en_ru"), TrayItemState::new(true, true));
-        assert_eq!(state.item("mode_balanced"), TrayItemState::new(true, true));
-        assert_eq!(
-            state.item("mode_quality_first"),
-            TrayItemState::new(true, false)
-        );
+    fn tray_controls_project_only_acknowledged_translation_lifecycle() {
+        assert_eq!(tray_translation_controls(None), (false, false));
+        assert_eq!(tray_translation_controls(Some(&json!({}))), (false, false));
+        for (status, running, expected) in [
+            ("stopped", false, (true, false)),
+            ("running", true, (false, true)),
+            ("failed", false, (false, true)),
+            ("cleanup_pending", false, (false, true)),
+            ("unknown", false, (false, false)),
+            ("stopped", true, (false, true)),
+        ] {
+            let snapshot = json!({"runtime_status": status, "translation_running": running});
+            assert_eq!(tray_translation_controls(Some(&snapshot)), expected);
+        }
     }
 
     #[test]
@@ -1293,6 +834,12 @@ mod tests {
         for command in [
             DaemonCommand::StartTranslation,
             DaemonCommand::StopTranslation,
+        ] {
+            assert!(webview_command_refreshes_tray(command), "{command:?}");
+        }
+
+        for command in [
+            DaemonCommand::Status,
             DaemonCommand::PatchDebugText,
             DaemonCommand::PatchDebugCapture,
             DaemonCommand::PatchDirection,
@@ -1300,12 +847,6 @@ mod tests {
             DaemonCommand::PatchLatencyPolicy,
             DaemonCommand::StartRoundTrip,
             DaemonCommand::StopRoundTrip,
-        ] {
-            assert!(webview_command_refreshes_tray(command), "{command:?}");
-        }
-
-        for command in [
-            DaemonCommand::Status,
             DaemonCommand::PatchAudioMix,
             DaemonCommand::PatchVoiceProfile,
             DaemonCommand::ManualRouteOverride,

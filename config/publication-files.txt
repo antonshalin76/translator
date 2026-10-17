@@ -132,6 +132,7 @@ crates/translator-daemon/tests/queue_policy.rs
 crates/translator-daemon/tests/round_trip_process.rs
 crates/translator-daemon/tests/round_trip_runtime.rs
 crates/translator-daemon/tests/round_trip_state.rs
+crates/translator-daemon/tests/runtime_backpressure_properties.rs
 crates/translator-daemon/tests/sidecar_supervisor.rs
 crates/translator-daemon/tests/stale_sidecar_socket.rs
 crates/translator-daemon/tests/support/audio_facts.rs
@@ -167,6 +168,7 @@ docs/stabilization/piper-bounded-20260927.md
 docs/stabilization/preview-install.md
 docs/stabilization/product-audio-paired-20260927.md
 docs/stabilization/product-closure-one-pass-20260927.md
+docs/stabilization/product-recovery-20261017.md
 docs/stabilization/stage-a-evidence.md
 docs/stabilization/stage-b1-evidence.md
 docs/stabilization/stage-b2-evidence.md
@@ -198,6 +200,7 @@ scripts/translator-native-pcm-check
 scripts/translator-native-ui-check
 scripts/translator-podcast-quality-debug
 scripts/translator-preview-package
+scripts/translator-provider-progress-check
 scripts/translator-publication-check
 scripts/translator-publication-check.bash
 scripts/translator-sca
@@ -265,6 +268,7 @@ sidecar/tests/test_product_freeze.py
 sidecar/tests/test_product_release_coverage.py
 sidecar/tests/test_provider_contract.py
 sidecar/tests/test_provider_engine.py
+sidecar/tests/test_provider_progress_check.py
 sidecar/tests/test_provider_registry.py
 sidecar/tests/test_quality_model_matrix.py
 sidecar/tests/test_secure_ipc.py

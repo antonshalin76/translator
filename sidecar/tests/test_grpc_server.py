@@ -14,8 +14,11 @@ from uuid import UUID, uuid4
 import grpc
 import pytest
 from engine_runtime_provider import EngineRuntimeProvider, MockInjection, ProviderEngine
-from test_openai_runtime import FakeRealtimeWebSocket
+from test_openai_runtime import FailingSendWebSocket, FakeRealtimeWebSocket
 from test_provider_contract import VOICE_OVERRIDE_CASES
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 import translator_sidecar.__main__ as main_module
 from translator_sidecar.cleanup import finish_cleanup
@@ -72,6 +75,159 @@ from translator_sidecar.provider_contract import (
 from translator_sidecar.provider_registry import SessionDrainReceipt
 
 TOKEN = "ab" * 32
+
+
+@pytest.mark.parametrize(
+    "event_type,delayed",
+    [
+        ("input_audio_buffer.append", False),
+        ("input_audio_buffer.commit", False),
+        ("response.create", False),
+        ("input_audio_buffer.append", True),
+    ],
+)
+def test_cloud_accepted_send_failure_delivers_terminal_pair_then_unavailable(
+    tmp_path, event_type, delayed
+):
+    async def scenario():
+        config = secure_config(tmp_path)
+        socket = FailingSendWebSocket(event_type, delayed=delayed)
+
+        async def connect(_uri, **_options):
+            return socket
+
+        provider = OpenAIRealtimeProvider(
+            environ={"OPENAI_API_KEY": "synthetic-secret"},
+            websocket_factory=connect,
+        )
+        server = ProviderGrpcServer(config, openai_provider=provider)
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"unix://{config.socket_path}")
+        source = InteractiveRequests()
+        identity = uuid4()
+        opened = open_request(
+            identity,
+            provider_id=provider_pb2.PROVIDER_ID_OPENAI,
+            voice_engine=provider_pb2.VOICE_ENGINE_OPENAI,
+        )
+        opened.open_session.requested_input_format.frame_duration_ms = 20
+        opened.open_session.requested_output_format.frame_duration_ms = 20
+        frame = frame_request(identity, pcm=bytes(640))
+        frame.input_frame.frame_duration_ms = 20
+        call = provider_pb2_grpc.ProviderTransportStub(channel).Stream(
+            source, metadata=((AUTH_METADATA_KEY, f"Bearer {TOKEN}"),), timeout=6
+        )
+        events = []
+        try:
+            await source.send(opened)
+            assert (await call.read()).HasField("session_opened")
+            assert (await call.read()).HasField("health")
+            await source.send(frame)
+            with pytest.raises(grpc.aio.AioRpcError) as failure:
+                while True:
+                    item = await call.read()
+                    if item is grpc.aio.EOF:
+                        break
+                    events.append(item)
+            assert failure.value.code() is grpc.StatusCode.UNAVAILABLE
+            assert failure.value.details() == "provider_unavailable"
+            assert [item.WhichOneof("event") for item in events] == [
+                "error",
+                "utterance_final",
+            ]
+            assert events[0].error.retryable
+            assert (
+                events[1].utterance_final.outcome
+                == provider_pb2.UTTERANCE_OUTCOME_DROPPED
+            )
+            await server.retry_stream_cleanup()
+            assert (
+                not provider._sessions
+                and not provider._failed_opens
+                and not server._streams
+            )
+            assert socket.closed and socket.readers == 0
+            assert server.providers._entries[id(provider)].leases == 0
+        finally:
+            call.cancel()
+            await source.close()
+            await channel.close()
+            await server.stop()
+
+    run(asyncio.wait_for(scenario(), timeout=8))
+
+
+@pytest.mark.parametrize(
+    "fault,status,detail",
+    [
+        ("missing_key", grpc.StatusCode.UNAUTHENTICATED, "provider_auth_failed"),
+        (401, grpc.StatusCode.UNAUTHENTICATED, "provider_auth_failed"),
+        (429, grpc.StatusCode.RESOURCE_EXHAUSTED, "provider_unavailable"),
+        ("quota", grpc.StatusCode.RESOURCE_EXHAUSTED, "provider_unavailable"),
+    ],
+)
+def test_cloud_open_failure_has_safe_status_and_drains_without_false_open(
+    tmp_path, caplog, fault, status, detail
+):
+    async def scenario():
+        config = secure_config(tmp_path)
+        sockets = []
+
+        async def connect(_uri, **_options):
+            if isinstance(fault, int):
+                raise InvalidStatus(
+                    Response(fault, "private provider message", Headers())
+                )
+            socket = FakeRealtimeWebSocket()
+            socket.incoming.get_nowait()
+            socket.push(
+                {
+                    "type": "error",
+                    "event_id": "synthetic-event",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "insufficient_quota",
+                        "message": "private provider message",
+                    },
+                }
+            )
+            sockets.append(socket)
+            return socket
+
+        provider = OpenAIRealtimeProvider(
+            OpenAIRealtimeConfig(cloud_opt_in=True),
+            environ={}
+            if fault == "missing_key"
+            else {"OPENAI_API_KEY": "synthetic-secret"},
+            websocket_factory=connect,
+        )
+        server = ProviderGrpcServer(config, openai_provider=provider)
+        await server.start()
+        value = open_request(
+            uuid4(),
+            provider_id=provider_pb2.PROVIDER_ID_OPENAI,
+            voice_engine=provider_pb2.VOICE_ENGINE_OPENAI,
+        )
+        value.open_session.requested_input_format.frame_duration_ms = 20
+        value.open_session.requested_output_format.frame_duration_ms = 20
+        try:
+            with pytest.raises(grpc.aio.AioRpcError) as failure:
+                await collect_stream(config, value)
+            assert failure.value.code() is status
+            assert failure.value.details() == detail
+            async with asyncio.timeout(1):
+                while any(not state.ending for state in server._streams):
+                    await asyncio.sleep(0)
+            await server.retry_stream_cleanup()
+            assert not provider._sessions and not provider._failed_opens
+            assert not provider._opening and not server._streams
+            assert all(socket.closed and socket.readers == 0 for socket in sockets)
+            assert "private provider message" not in caplog.text
+            assert "synthetic-secret" not in caplog.text
+        finally:
+            await server.stop()
+
+    run(asyncio.wait_for(scenario(), timeout=5))
 
 
 @pytest.mark.parametrize("provider_id", [ProviderId.LOCAL, ProviderId.OPENAI])
@@ -1477,10 +1633,13 @@ def test_provider_swap_keeps_existing_session_on_original_backend(
     run(scenario())
 
 
+@pytest.mark.parametrize("provider_id", ["local", "openai"])
 def test_production_bootstrap_injects_local_provider(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider_id: str,
 ) -> None:
+    monkeypatch.setenv("TRANSLATOR_PROVIDER_ID", provider_id)
     assert callable(main_module.build_unavailable_local_provider)
     assert callable(main_module._build_server)
     config = secure_config(tmp_path)
@@ -1530,8 +1689,60 @@ def test_production_bootstrap_injects_local_provider(
         "config": config,
         "local_provider": local_provider,
         "openai_provider": openai_provider,
-        "provider_ready": False,
+        "provider_ready": provider_id == "openai",
     }
+
+
+@pytest.mark.parametrize("provider_id", ["", "OPENAI", "unknown"])
+def test_bootstrap_rejects_invalid_selected_provider(monkeypatch, provider_id):
+    monkeypatch.setenv("TRANSLATOR_PROVIDER_ID", provider_id)
+    with pytest.raises(ValueError, match="invalid_selected_provider"):
+        run(main_module._serve())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_cloud_bootstrap_skips_local_models_and_cleans_up(monkeypatch, cancelled):
+    async def scenario():
+        started = asyncio.Event()
+        callbacks = []
+        order = []
+
+        class LoopProxy:
+            def add_signal_handler(self, caught_signal, callback):
+                callbacks.append(callback)
+
+        class FakeServer:
+            async def start(self):
+                order.append("start")
+                started.set()
+
+            async def stop(self):
+                order.append("stop")
+
+        def load(**kwargs):
+            raise AssertionError("cloud generation loaded local models")
+
+        monkeypatch.setenv("TRANSLATOR_PROVIDER_ID", "openai")
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_SOCKET", "/tmp/not-bound.sock")
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_TOKEN", "0" * 64)
+        monkeypatch.setenv("TRANSLATOR_SIDECAR_GENERATION", str(uuid4()))
+        monkeypatch.setattr(
+            main_module.asyncio, "get_running_loop", lambda: LoopProxy()
+        )
+        monkeypatch.setattr(main_module, "_build_server", lambda _: FakeServer())
+        monkeypatch.setattr(main_module, "build_local_provider", load)
+        serving = asyncio.create_task(main_module._serve())
+        await started.wait()
+        if cancelled:
+            serving.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await serving
+        else:
+            callbacks[0]()
+            await serving
+        assert order == ["start", "stop"]
+
+    run(asyncio.wait_for(scenario(), timeout=1))
 
 
 def test_serve_delegates_to_production_server_builder(
@@ -2032,7 +2243,7 @@ class FakeOpenAIGrpcProvider:
             models=(
                 ModelHealth(
                     kind=ModelKind.SPEECH_TO_SPEECH,
-                    id="gpt-realtime-translate",
+                    id="gpt-realtime-2.1",
                     state=ModelState.READY,
                     device=ComputeDevice.CLOUD,
                 ),
@@ -2674,9 +2885,11 @@ class FailedOpenCleanupSocket:
 
     async def close(self):
         self.closes += 1
-        if self.cleanup_fails:
-            raise OSError("synthetic close failure")
-        self.closed = True
+        raise AssertionError("retirement must not wait for a remote handshake")
+
+    async def wait_closed(self):
+        if not self.closed:
+            raise OSError("synthetic local close failure")
 
     def abort(self):
         self.aborts += 1
@@ -2757,9 +2970,9 @@ def test_grpc_failed_open_pins_actual_openai_backend_until_resource_drain(
 
         assert rpc_code in (grpc.StatusCode.INTERNAL, grpc.StatusCode.INVALID_ARGUMENT)
         assert after_open[:2] == (1, 1), "the real OpenAI handshake must be entered"
-        assert after_open[2] >= 1 and after_open[3] >= 1
+        assert after_open[2] == 0 and after_open[3] >= 1
         assert after_open[4:] == (False, 1, True), (
-            "failed close AND abort leave an actual live failed-open owner and its lease",
+            "failed abort retains the actual failed-open owner and its lease",
             after_open,
         )
         assert after_collect == (1, 0, 0, False, None), (
@@ -3545,14 +3758,9 @@ def test_grpc_retained_retry_cycles_preserve_healthy_peer_and_original_disposal_
             frame.input_frame.end_of_utterance = False
             await healthy_source.send(frame)
             async with asyncio.timeout(1):
-                while (
-                    healthy_socket.sent[-1]["type"]
-                    != "session.input_audio_buffer.append"
-                ):
+                while healthy_socket.sent[-1]["type"] != "input_audio_buffer.append":
                     await asyncio.sleep(0)
-            assert (
-                healthy_socket.sent[-1]["type"] == "session.input_audio_buffer.append"
-            )
+            assert healthy_socket.sent[-1]["type"] == "input_audio_buffer.append"
             fail_disposal = True
             await healthy_source.send(close_request(healthy_id))
             ending_events = []

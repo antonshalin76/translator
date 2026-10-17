@@ -1,4 +1,4 @@
-# Translator private preview, 2026-10-03
+# Translator private preview, 2026-10-17
 
 This is a personal, host-specific Linux x86-64 preview, not a stable release.
 It uses Whisper large-v3-turbo, Hy-MT2-1.8B Q4_K_M and four Piper medium voices.
@@ -20,7 +20,7 @@ Included vendor libraries are `nvidia-cudnn-cu12==9.10.2.21` and
 
 Verify the archive against its SHA256SUMS, then extract it to a permanent
 private directory, preferably directly under `$HOME/.local/state` with the
-archive's `translator-preview-20261002` directory name. Keep that directory:
+archive's `translator-preview-20261017` directory name. Keep that directory:
 the installed command refers to it. The pinned Piper native phonemizer rejects
 some long installation paths; installation checks EN/RU phonemization in an
 isolated subprocess before creating the preview command/unit and refuses a
@@ -82,7 +82,18 @@ Filesystem writes are not additionally confined by systemd in this preview.
 
 ## First real-call trial
 
-Select `quality_first` in the existing UI. With physical headphones, leave both
+OpenAI remains experimental in this candidate. The full `gpt-realtime-2.1`
+provider passed a short duplex check, but the sustained delivery check failed
+after a request received no acknowledgement or response. Cancellation and
+cleanup are bounded; this is not evidence of reliable cloud delivery. The mini
+alternative also timed out on one of six fixed phrases and was not promoted.
+Use the local provider for the qualified sustained path. No stable cloud or
+real-call quality claim is made by this package.
+
+Local processing uses the quality-first policy by default. Advanced diagnostics
+shows its status; policy changes are available through the API only while stopped.
+Stop translation before changing the provider.
+With physical headphones, leave both
 directions enabled for RU-to-EN microphone and EN-to-RU incoming translation.
 This preview deliberately has no AEC calibration backend: microphone/full-duplex
 with speakers is rejected by the existing acoustic admission. It does not
@@ -148,11 +159,21 @@ the packaged daemon rechecks physical identities/ports and acoustic admission.
 An in-flight cold Start currently serializes other controls; stopping the
 preview systemd unit remains the bounded process-group cancellation boundary.
 
-The private `translator-preview/environment` file under the systemd user
-configuration root accepts the same guarded keys as the ordinary service,
+The private `translator-preview/environment` file under the user configuration
+root (`systemd-path user-configuration`, not its `systemd/user` subdirectory)
+accepts the same guarded keys as the ordinary service,
 including `TRANSLATOR_MT_MODEL_ID`. NLLB is not included in this preview model
 payload; selecting it needs a separately verified cache and explicit cache root.
 Do not print/source environment files or put tokens on command lines.
+
+For OpenAI, put only the authorized `OPENAI_API_KEY` in that mode-0600 service
+environment file, then restart the preview daemon. A repository `.env` is not
+read by the installed service. While stopped, explicitly enable cloud processing
+in the UI, then select OpenAI and press Start. This sends both enabled speech
+directions to OpenAI; local mode does not. The current cloud provider is
+`gpt-realtime-2.1`, with strict translation instructions and the fixed `marin`
+voice, so local gender selectors are unavailable in cloud mode. Cloud quality and sustained operation remain
+unqualified until the recovery plan's separate gates pass.
 
 ## Stop and rollback
 

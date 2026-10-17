@@ -448,9 +448,8 @@ async fn patch_audio_mix(
 async fn patch_latency_policy(
     State(state): State<ApiState>,
     Json(patch): Json<LatencyPolicyPatch>,
-) -> Json<RuntimeSnapshot> {
-    state.store.set_latency_policy(patch);
-    Json(state.store.snapshot())
+) -> axum::response::Response {
+    execute_translation(state.translation, ControlCommand::PatchLatencyPolicy(patch)).await
 }
 
 async fn patch_voice_profile(

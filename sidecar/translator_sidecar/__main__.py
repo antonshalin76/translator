@@ -17,6 +17,7 @@ from .local.runtime import (
 )
 from .openai_provider import OpenAIRealtimeConfig
 from .openai_runtime import OpenAIRealtimeProvider
+from .provider_contract import ProviderId
 
 
 def _required_environment(name: str) -> str:
@@ -34,11 +35,19 @@ def _build_server(config: SidecarServerConfig) -> ProviderGrpcServer:
             OpenAIRealtimeConfig(cloud_opt_in=True),
             now_ns=config.now_ns,
         ),
-        provider_ready=False,
+        provider_ready=_selected_provider() is ProviderId.OPENAI,
     )
 
 
+def _selected_provider() -> ProviderId:
+    try:
+        return ProviderId(os.environ.get("TRANSLATOR_PROVIDER_ID", "local"))
+    except ValueError:
+        raise ValueError("invalid_selected_provider") from None
+
+
 async def _serve() -> None:
+    selected_provider = _selected_provider()
     config = SidecarServerConfig(
         socket_path=Path(_required_environment("TRANSLATOR_SIDECAR_SOCKET")),
         token=_required_environment("TRANSLATOR_SIDECAR_TOKEN"),
@@ -53,6 +62,9 @@ async def _serve() -> None:
     server = _build_server(config)
     try:
         await server.start()
+        if selected_provider is ProviderId.OPENAI:
+            await stopped.wait()
+            return
         loading = asyncio.create_task(
             asyncio.to_thread(
                 build_local_provider,

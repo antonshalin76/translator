@@ -13,7 +13,8 @@ from translator_sidecar.openai_provider import (
     OpenAIRealtimeAdapter,
     OpenAIRealtimeConfig,
     build_input_audio_append_event,
-    build_session_close_event,
+    build_input_audio_commit_event,
+    build_response_create_event,
     build_session_update_event,
     openai_pcm_format,
 )
@@ -117,7 +118,7 @@ def test_preflight_refuses_voice_override_without_open_or_connect_plan(
         (ProviderId.LOCAL, True, True, SafeErrorCode.PROVIDER_UNAVAILABLE, False),
         (ProviderId.OPENAI, False, False, SafeErrorCode.CLOUD_NOT_ENABLED, False),
         (ProviderId.OPENAI, False, True, SafeErrorCode.CLOUD_NOT_ENABLED, False),
-        (ProviderId.OPENAI, True, False, SafeErrorCode.PROVIDER_AUTH_FAILED, True),
+        (ProviderId.OPENAI, True, False, SafeErrorCode.PROVIDER_AUTH_FAILED, False),
     ],
 )
 def test_preflight_voice_override_keeps_existing_auth_error_precedence(
@@ -165,7 +166,8 @@ def test_preflight_builtin_profiles_preserve_existing_translation_negotiation(
     assert result.can_start and result.opened is not None and result.error is None
     assert result.connect_plan["target_language"] == language.value
     assert build_session_update_event(value)["session"]["audio"]["output"] == {
-        "language": language.value
+        "format": {"type": "audio/pcm", "rate": 24000},
+        "voice": "marin",
     }
     assert result.opened.negotiated_output_format == openai_pcm_format()
 
@@ -231,6 +233,7 @@ def test_openai_preflight_blocks_missing_credentials_without_network_session() -
     assert result.network_session_started is False
     assert result.error is not None
     assert result.error.code is SafeErrorCode.PROVIDER_AUTH_FAILED
+    assert result.error.retryable is False
     assert result.health.safe_error is not None
     assert result.health.safe_error.code is SafeErrorCode.PROVIDER_AUTH_FAILED
     assert result.health.models[0].state.value == "failed"
@@ -296,17 +299,28 @@ def test_websocket_event_builders_match_translation_session_contract() -> None:
     session = request(AudioDirection.SPEAKER)
     pcm = b"\x00\x01\x02\x03"
 
-    assert build_session_update_event(session) == {
-        "type": "session.update",
-        "session": {
-            "audio": {"input": {"transcription": None}, "output": {"language": "ru"}}
+    settings = build_session_update_event(session)
+    assert settings["type"] == "session.update"
+    assert settings["session"]["type"] == "realtime"
+    assert settings["session"]["model"] == "gpt-realtime-2.1"
+    assert "from en into ru" in settings["session"]["instructions"]
+    assert settings["session"]["audio"] == {
+        "input": {
+            "format": {"type": "audio/pcm", "rate": 24000},
+            "turn_detection": None,
+            "transcription": None,
         },
+        "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin"},
     }
     assert build_input_audio_append_event(pcm) == {
-        "type": "session.input_audio_buffer.append",
+        "type": "input_audio_buffer.append",
         "audio": "AAECAw==",
     }
-    assert build_session_close_event() == {"type": "session.close"}
+    assert build_input_audio_commit_event() == {"type": "input_audio_buffer.commit"}
+    assert build_response_create_event() == {
+        "type": "response.create",
+        "response": {"output_modalities": ["audio"], "max_output_tokens": 4096},
+    }
 
 
 def test_openai_event_mapping_respects_debug_text_gate_and_audio_contract() -> None:
@@ -322,7 +336,7 @@ def test_openai_event_mapping_respects_debug_text_gate_and_audio_contract() -> N
     audio_events = adapter.map_realtime_events(
         session,
         {
-            "type": "session.output_audio.delta",
+            "type": "response.output_audio.delta",
             "delta": build_input_audio_append_event(pcm)["audio"],
         },
         stream_id=stream_id,
@@ -339,7 +353,10 @@ def test_openai_event_mapping_respects_debug_text_gate_and_audio_contract() -> N
     assert (
         adapter.map_realtime_events(
             session,
-            {"type": "session.output_transcript.delta", "delta": "private target"},
+            {
+                "type": "response.output_audio_transcript.delta",
+                "delta": "private target",
+            },
             stream_id=stream_id,
             utterance_id=utterance_id,
             now_ns=123_000_000,
@@ -350,14 +367,17 @@ def test_openai_event_mapping_respects_debug_text_gate_and_audio_contract() -> N
     debug_session = session.model_copy(update={"debug_text_enabled": True})
     translation = adapter.map_realtime_events(
         debug_session,
-        {"type": "session.output_transcript.delta", "delta": "private target"},
+        {"type": "response.output_audio_transcript.delta", "delta": "private target"},
         stream_id=stream_id,
         utterance_id=utterance_id,
         now_ns=123_000_000,
     )
     transcript = adapter.map_realtime_events(
         debug_session,
-        {"type": "session.input_transcript.delta", "delta": "private source"},
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "delta": "private source",
+        },
         stream_id=stream_id,
         utterance_id=utterance_id,
         now_ns=123_000_000,

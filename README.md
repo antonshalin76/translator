@@ -12,7 +12,7 @@ It is not a general cross-platform release yet. The default target is Linux with
 
 - Duplex Ru <-> En translation with independent microphone and speaker channels.
 - Per-channel enable/disable controls, direction selection, and separate original/translation volume mixing.
-- Local provider as the default path; OpenAI Realtime Translation is available only after explicit cloud opt-in.
+- Local provider as the default path; OpenAI Realtime (`gpt-realtime-2.1`, fixed `marin` voice) is available only after explicit cloud opt-in. Cloud translation preserves the existing local speech boundaries and uses strict translation instructions; it is not an unconstrained voice assistant.
 - PipeWire/Pulse virtual endpoints for `Translator_Virtual_Mic`, `Translator_Mic_Out`, and `Translator_Remote_In`.
 - App routing watcher for call-like streams from Zoom, Telegram Desktop, and browser meetings.
 - Tauri tray/status UI plus a user-level `translator` lifecycle command.

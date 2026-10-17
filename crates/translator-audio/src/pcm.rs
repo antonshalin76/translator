@@ -126,9 +126,15 @@ pub struct BoundedPcmQueue {
 pub struct PcmQueueOverflow(pub PcmFrame);
 
 impl BoundedPcmQueue {
+    pub fn has_capacity_for(&self, format: StreamPcmFormat) -> bool {
+        self.buffered_ms
+            .saturating_add(u32::from(format.frame_duration_ms()))
+            <= MAX_BUFFERED_MS
+    }
+
     pub fn push(&mut self, frame: PcmFrame) -> Result<(), PcmQueueOverflow> {
         let duration_ms = u32::from(frame.format.frame_duration_ms);
-        if self.buffered_ms.saturating_add(duration_ms) > MAX_BUFFERED_MS {
+        if !self.has_capacity_for(frame.format) {
             self.dropped_frames = self.dropped_frames.saturating_add(1);
             return Err(PcmQueueOverflow(frame));
         }

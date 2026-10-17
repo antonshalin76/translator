@@ -596,7 +596,7 @@ ensure_ui_running() {
 
 cleanup_audio_graph() {
   if [ "${profile}" = translator-preview ]; then
-    PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR:?}/pulse/native}" \
+    /usr/bin/env PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR:?}/pulse/native}" \
       XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}/translator-preview" \
       "${daemon_binary_target}" --audio-graph-cleanup >/dev/null
     return

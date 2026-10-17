@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   aecCalibrationControlState,
   aecCalibrationPendingCancel,
+  AudioMixIntentQueue,
   audioMixPatchIntent,
   buildUiModel,
   classifyTask7LatencyDebt,
@@ -11,6 +12,7 @@ import {
   DebugTextRing,
   debugToggleIntent,
   directionToggleIntent,
+  directionRuntimeLabel,
   headphoneConfirmationIntent,
   lifecycleEventClearsDebugText,
   providerPatchIntent,
@@ -19,7 +21,41 @@ import {
   type AecCalibrationStatus,
   type AecProofStatus,
   type RuntimeSnapshot,
+  type DirectionState,
 } from "./uiModel";
+
+describe("direction runtime projection", () => {
+test("direction labels distinguish a live channel, recovery and failure without claiming translated speech", () => {
+  const direction: DirectionState = { direction_id: "microphone", source_language: "ru", target_language: "en", enabled: true, voice_profile: { language: "en", gender: "male", engine: "piper" } };
+  expect(directionRuntimeLabel(direction, true)).toBe("Статус неизвестен");
+  for (const [runtime_status, label] of [["stopped", "Готов"], ["running", "Канал открыт"], ["recovering", "Восстановление"], ["failed", "Сбой — Stop/Start"]] as const) {
+    expect(directionRuntimeLabel({ ...direction, runtime_status }, true)).toBe(label);
+  }
+  expect(directionRuntimeLabel({ ...direction, enabled: false }, true)).toBe("Отключен");
+  expect(directionRuntimeLabel({ ...direction, runtime_status: "running" }, false)).toBe("Нет связи");
+});
+});
+
+describe("committed audio gains", () => {
+  test("retains the latest committed gain while another request is in flight", () => {
+    const queue = new AudioMixIntentQueue();
+    queue.set("microphone_original_percent", 35);
+    expect(queue.take()).toEqual(["microphone_original_percent", 35]);
+    queue.set("microphone_original_percent", 60);
+    queue.set("speaker_original_percent", 20);
+    queue.set("microphone_original_percent", 100);
+    expect(queue.take()).toEqual(["microphone_original_percent", 100]);
+    expect(queue.take()).toEqual(["speaker_original_percent", 20]);
+    expect(queue.take()).toBeUndefined();
+  });
+
+  test("lifecycle or failure discards unsent gains rather than retrying them", () => {
+    const queue = new AudioMixIntentQueue();
+    queue.set("microphone_original_percent", 100);
+    queue.clear();
+    expect(queue.take()).toBeUndefined();
+  });
+});
 
 const snapshotWithRawDebugText: RuntimeSnapshot = {
   translation_running: false,

@@ -14,10 +14,12 @@ if str(SIDECAR) not in sys.path:
     sys.path.insert(0, str(SIDECAR))
 
 from translator_sidecar.openai_provider import (  # noqa: E402
+    OPENAI_REALTIME_TRANSLATION_MODEL,
     OpenAIRealtimeAdapter,
     OpenAIRealtimeConfig,
     build_input_audio_append_event,
-    build_session_close_event,
+    build_input_audio_commit_event,
+    build_response_create_event,
     build_session_update_event,
 )
 from translator_sidecar.provider_contract import (  # noqa: E402
@@ -33,8 +35,8 @@ from translator_sidecar.provider_contract import (  # noqa: E402
     VoiceProfile,
 )
 
-DEFAULT_REPORT = ROOT / "docs/benchmarks/task11-openai-adapter-preflight.json"
-SCHEMA_VERSION = "translator.task11-openai-adapter-preflight.v1"
+DEFAULT_REPORT = ROOT / "docs/benchmarks/task11-openai-ga-preflight.json"
+SCHEMA_VERSION = "translator.task11-openai-ga-preflight.v2"
 SYNTHETIC_COMPARISON_STATUSES = {
     "pending_after_websocket_smoke",
     "passed",
@@ -103,7 +105,7 @@ def default_synthetic_speech_comparison(websocket_passed: bool) -> dict[str, Any
     return {
         "status": "pending_after_websocket_smoke",
         "provider_id": "openai",
-        "model": "gpt-realtime-translate",
+        "model": OPENAI_REALTIME_TRANSLATION_MODEL,
         "blocker": (
             "credential and realtime websocket smoke passed; synthetic speech comparison is pending"
             if websocket_passed
@@ -125,14 +127,14 @@ def preserved_synthetic_speech_comparison(
     websocket_passed: bool,
 ) -> dict[str, Any]:
     synthetic = default_synthetic_speech_comparison(websocket_passed)
-    if not previous_report:
+    if not previous_report or previous_report.get("schema_version") != SCHEMA_VERSION:
         return synthetic
     previous = previous_report.get("synthetic_speech_comparison")
     if not isinstance(previous, dict):
         return synthetic
     if (
         previous.get("provider_id") == "openai"
-        and previous.get("model") == "gpt-realtime-translate"
+        and previous.get("model") == OPENAI_REALTIME_TRANSLATION_MODEL
         and previous.get("status") in SYNTHETIC_COMPARISON_STATUSES
         and previous.get("stored_audio") is False
         and previous.get("stored_transcript_or_translation") is False
@@ -165,7 +167,8 @@ def build_report() -> dict[str, Any]:
     event_shapes = (
         build_session_update_event(session)["type"],
         build_input_audio_append_event(b"")["type"],
-        build_session_close_event()["type"],
+        build_input_audio_commit_event()["type"],
+        build_response_create_event()["type"],
     )
     preflight_cases = [
         safe_case("cloud_opt_in_required", cloud_opt_in_required),
@@ -189,28 +192,33 @@ def build_report() -> dict[str, Any]:
     )
     credential_model_probe = {
         "status": "pending",
-        "model": "gpt-realtime-translate",
+        "model": OPENAI_REALTIME_TRANSLATION_MODEL,
         "plaintext_credential_persisted": False,
         "safe_error_code": None,
     }
     realtime_websocket_smoke = {
         "status": "pending",
+        "model": OPENAI_REALTIME_TRANSLATION_MODEL,
         "audio_input": "not_started",
         "stored_audio": False,
         "stored_transcript_or_translation": False,
         "safe_error_code": None,
     }
-    if previous_report:
+    if previous_report and previous_report.get("schema_version") == SCHEMA_VERSION:
         previous_credential_probe = previous_report.get("credential_model_probe")
         if (
             previous_credential_probe
             and previous_credential_probe.get("status") == "passed"
+            and previous_credential_probe.get("model")
+            == OPENAI_REALTIME_TRANSLATION_MODEL
         ):
             credential_model_probe = previous_credential_probe
         previous_websocket_smoke = previous_report.get("realtime_websocket_smoke")
         if (
             previous_websocket_smoke
             and previous_websocket_smoke.get("status") == "passed"
+            and previous_websocket_smoke.get("model")
+            == OPENAI_REALTIME_TRANSLATION_MODEL
         ):
             realtime_websocket_smoke = previous_websocket_smoke
     websocket_passed = realtime_websocket_smoke["status"] == "passed"
@@ -291,13 +299,14 @@ def build_report() -> dict[str, Any]:
         "preflight_cases": preflight_cases,
         "event_shapes_checked": event_shapes,
         "openai_docs_basis": {
-            "transport": "websocket_realtime_translations_24khz_pcm16",
-            "endpoint_family": "v1_realtime_translations",
-            "model": "gpt-realtime-translate",
-            "session_update_target_language": True,
+            "transport": "websocket_realtime_ga_manual_turn_24khz_pcm16",
+            "endpoint_family": "v1_realtime",
+            "model": OPENAI_REALTIME_TRANSLATION_MODEL,
+            "voice": "marin",
+            "session_update_strict_translation_instructions": True,
             "source_transcription_configured": False,
-            "source_transcript_events_auto": True,
-            "close_event": "session.close",
+            "source_transcript_events_auto": False,
+            "completion_event": "response.done",
         },
         "live_openai_comparison": live_openai_comparison,
         "credential_model_probe": credential_model_probe,
@@ -314,7 +323,7 @@ def build_report() -> dict[str, Any]:
             "openai_wire_pcm_format": "24000hz_mono_s16le",
             "resamples_daemon_input_to_openai_wire": True,
             "resamples_openai_output_to_daemon_contract": True,
-            "utterance_final_strategy": "idle_final_heuristic_pending_real_app_validation",
+            "utterance_final_strategy": "matching_completed_response_with_pcm",
         },
         "real_app_openai_smoke": real_app_openai_smoke,
         "combined_latency_gate": combined_latency_gate,

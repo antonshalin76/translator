@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""Bounded production-provider progress check; synthetic audio stays in memory."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import stat
+import sys
+import time
+from pathlib import Path
+from uuid import uuid4
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "sidecar"))
+
+from translator_sidecar.cleanup import finish_cleanup  # noqa: E402
+from translator_sidecar.local.model_lease import VerifiedModelSource  # noqa: E402
+from translator_sidecar.local.model_manifest import load_manifest  # noqa: E402
+from translator_sidecar.local.runtime import build_local_provider  # noqa: E402
+from translator_sidecar.local.tts import PiperTts, PiperVoiceRegistry  # noqa: E402
+from translator_sidecar.openai_runtime import OpenAIRealtimeProvider  # noqa: E402
+from translator_sidecar.provider_contract import (  # noqa: E402
+    AudioDirection,
+    CloseRequestReason,
+    Language,
+    OpenProviderSession,
+    PcmFormat,
+    PrivacySafeProviderError,
+    ProviderAudioDelta,
+    ProviderId,
+    ProviderInputFrame,
+    ProviderState,
+    ProviderUtteranceFinal,
+    SafeErrorCode,
+    SampleFormat,
+    TranslationMode,
+    UtteranceOutcome,
+    VoiceEngine,
+    VoiceGender,
+    VoiceProfile,
+)
+
+FRAME_MS = 20
+FRAME_BYTES = 640
+CASES = (
+    (
+        AudioDirection.MICROPHONE,
+        Language.RU,
+        Language.EN,
+        "Анна не отправила двадцать три файла.",
+    ),
+    (
+        AudioDirection.SPEAKER,
+        Language.EN,
+        Language.RU,
+        "Anna did not send twenty three files.",
+    ),
+)
+
+
+def credential(path: Path) -> str:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("unsafe_credential_file")
+        with os.fdopen(descriptor, encoding="utf-8", closefd=False) as source:
+            lines = source.read(65537)
+        if len(lines) > 65536:
+            raise ValueError("oversized_credential_file")
+        matches = [
+            line.split("=", 1)[1].strip()
+            for line in lines.splitlines()
+            if line.startswith("OPENAI_API_KEY=")
+        ]
+        if (
+            len(matches) != 1
+            or not matches[0]
+            or any(char.isspace() for char in matches[0])
+        ):
+            raise ValueError("invalid_credential_file")
+        return matches[0]
+    finally:
+        os.close(descriptor)
+
+
+def speech_fixtures() -> dict[AudioDirection, list[bytes]]:
+    manifest = load_manifest(ROOT / "models/manifest.json")
+    registry = PiperVoiceRegistry(
+        {
+            (Language.RU, VoiceGender.MALE): VerifiedModelSource(
+                manifest, "piper-ru-dmitri-medium"
+            ),
+            (Language.EN, VoiceGender.MALE): VerifiedModelSource(
+                manifest, "piper-en-ryan-medium"
+            ),
+        }
+    )
+    tts = PiperTts(registry)
+    try:
+        result = {}
+        for direction, source, _target, text in CASES:
+            frames = list(
+                tts.synthesize_frames(
+                    text,
+                    target_language=source,
+                    voice_profile=VoiceProfile(
+                        language=source,
+                        gender=VoiceGender.MALE,
+                        engine=VoiceEngine.PIPER,
+                    ),
+                    mode=TranslationMode.QUALITY_FIRST,
+                    output_sample_rate_hz=16000,
+                    output_channels=1,
+                    frame_duration_ms=FRAME_MS,
+                )
+            )
+            if (
+                not frames
+                or len(frames) > 500
+                or not any(any(frame) for frame in frames)
+            ):
+                raise ValueError("invalid_synthetic_fixture")
+            if any(len(frame) != FRAME_BYTES for frame in frames):
+                raise ValueError("invalid_synthetic_frame")
+            result[direction] = frames + [bytes(FRAME_BYTES)] * 25
+        return result
+    finally:
+        tts.close()
+
+
+class Budget:
+    def __init__(self, calls: int, audio_ms: int) -> None:
+        self.max_calls, self.max_audio_ms = calls, audio_ms
+        self.calls = self.audio_ms = 0
+
+    def claim(self, frame_count: int) -> None:
+        if (
+            self.calls >= self.max_calls
+            or self.audio_ms + frame_count * FRAME_MS > self.max_audio_ms
+        ):
+            raise ValueError("live_budget_exhausted")
+        self.calls += 1
+        self.audio_ms += frame_count * FRAME_MS
+
+
+async def direction_check(
+    provider,
+    provider_id,
+    case,
+    frames,
+    deadline,
+    budget,
+    timeout,
+    metrics,
+    *,
+    pace=True,
+):
+    direction, source, target, _text = case
+    pcm_format = PcmFormat(
+        sample_rate_hz=16000,
+        channels=1,
+        sample_format=SampleFormat.S16LE,
+        frame_duration_ms=FRAME_MS,
+    )
+    request = OpenProviderSession(
+        session_id=uuid4(),
+        provider_id=provider_id,
+        direction_id=direction,
+        source_language=source,
+        target_language=target,
+        mode=TranslationMode.QUALITY_FIRST,
+        requested_input_format=pcm_format,
+        requested_output_format=pcm_format,
+        debug_text_enabled=False,
+        voice_profile=VoiceProfile(
+            language=target,
+            gender=VoiceGender.MALE,
+            engine=VoiceEngine.OPENAI
+            if provider_id is ProviderId.OPENAI
+            else VoiceEngine.PIPER,
+        ),
+    )
+    pending = None
+    terminal = asyncio.Event()
+    failure = None
+    started_ns = None
+
+    async def publish(batch, commit):
+        nonlocal failure
+        for event in batch:
+            if (
+                event.session_id != request.session_id
+                or event.direction_id is not direction
+            ):
+                raise ValueError("unexpected_session_identity")
+            if isinstance(event, PrivacySafeProviderError):
+                failure = event.code.value
+                metrics["safe_error"] = failure
+                terminal.set()
+            elif isinstance(event, ProviderAudioDelta):
+                if pending != event.utterance_id:
+                    raise ValueError("unexpected_output_identity")
+                if len(event.pcm) != FRAME_BYTES or event.sample_rate_hz != 16000:
+                    raise ValueError("unexpected_output_format")
+                metrics["output_frames"] += 1
+                metrics["nonzero_output_frames"] += int(any(event.pcm))
+                if metrics["first_audio_ms"] is None:
+                    metrics["first_audio_ms"] = round(
+                        (time.monotonic_ns() - started_ns) / 1e6, 2
+                    )
+            elif isinstance(event, ProviderUtteranceFinal):
+                metrics["last_outcome"] = event.outcome.value
+                if (
+                    pending != event.utterance_id
+                    or event.outcome is not UtteranceOutcome.COMPLETED
+                ):
+                    failure = failure or "utterance_not_completed"
+                terminal.set()
+        commit()
+
+    reservation = provider.reserve_session(request, publish)
+    sequence = 0
+    try:
+        budget.claim(len(frames))
+        async with asyncio.timeout(timeout):
+            _opened, health = await reservation.open()
+        if health.state not in {ProviderState.READY, ProviderState.DEGRADED}:
+            raise ValueError("provider_not_ready")
+        metrics["models"] = [model.id for model in health.models]
+        while True:
+            pending = uuid4()
+            terminal.clear()
+            before_nonzero = metrics["nonzero_output_frames"]
+            started_ns = time.monotonic_ns()
+            async with asyncio.timeout(timeout):
+                for index, pcm in enumerate(frames):
+                    if failure:
+                        raise ValueError(failure)
+                    await provider.submit_frame(
+                        ProviderInputFrame(
+                            session_id=request.session_id,
+                            direction_id=direction,
+                            stream_id=request.session_id,
+                            utterance_id=pending,
+                            sequence=sequence,
+                            capture_monotonic_ns=time.monotonic_ns(),
+                            sample_rate_hz=16000,
+                            channels=1,
+                            sample_format=SampleFormat.S16LE,
+                            frame_duration_ms=FRAME_MS,
+                            source_language=source,
+                            target_language=target,
+                            mode=request.mode,
+                            pcm=pcm,
+                            end_of_utterance=index == len(frames) - 1,
+                        )
+                    )
+                    sequence += 1
+                    metrics["input_frames"] += 1
+                    if pace:
+                        await asyncio.sleep(FRAME_MS / 1000)
+                await terminal.wait()
+            if failure or metrics["nonzero_output_frames"] == before_nonzero:
+                raise ValueError(failure or "no_nonzero_output")
+            metrics["completed"] += 1
+            metrics["last_completion_ms"] = round(
+                (time.monotonic_ns() - started_ns) / 1e6, 2
+            )
+            if time.monotonic() >= deadline:
+                break
+            budget.claim(len(frames))
+    finally:
+        async with asyncio.timeout(35):
+            receipt = await finish_cleanup(
+                reservation.drain(CloseRequestReason.USER_STOP)
+            )
+            if getattr(receipt, "delivery_error", None) is not None:
+                raise ValueError("provider_drain_failed")
+
+
+async def run_check(
+    provider,
+    provider_id,
+    fixtures,
+    *,
+    duration,
+    max_calls,
+    max_audio_ms,
+    timeout,
+    pace=True,
+):
+    began = time.monotonic()
+    budget = Budget(max_calls, max_audio_ms)
+    metrics = {
+        case[0].value: {
+            "completed": 0,
+            "input_frames": 0,
+            "output_frames": 0,
+            "nonzero_output_frames": 0,
+            "first_audio_ms": None,
+        }
+        for case in CASES
+    }
+    tasks = []
+    result, error = "FAIL", None
+    try:
+        tasks = [
+            asyncio.create_task(
+                direction_check(
+                    provider,
+                    provider_id,
+                    case,
+                    fixtures[case[0]],
+                    began + duration,
+                    budget,
+                    timeout,
+                    metrics[case[0].value],
+                    pace=pace,
+                )
+            )
+            for case in CASES
+        ]
+        async with asyncio.timeout(duration + timeout + 40):
+            await asyncio.gather(*tasks)
+        result = "PASS"
+    except (Exception, asyncio.CancelledError) as failure:
+        error = (
+            "cancelled"
+            if isinstance(failure, asyncio.CancelledError)
+            else failure.code.value
+            if isinstance(getattr(failure, "code", None), SafeErrorCode)
+            else type(failure).__name__
+        )
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            async with asyncio.timeout(35):
+                await finish_cleanup(provider.shutdown())
+        except (Exception, asyncio.CancelledError):
+            result, error = "FAIL", "cleanup_failed"
+    return {
+        "result": result,
+        "safe_failure": error,
+        "provider": provider_id.value,
+        "elapsed_seconds": round(time.monotonic() - began, 3),
+        "requested_seconds": duration,
+        "reserved_input_audio_ms": budget.audio_ms,
+        "input_audio_ms": sum(item["input_frames"] for item in metrics.values())
+        * FRAME_MS,
+        "calls": budget.calls,
+        "directions": metrics,
+        "stored_audio": False,
+        "stored_text": False,
+        "scope": "provider progress, not daemon routing or translation quality",
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider", choices=["local", "openai"], required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--duration-seconds", type=int, default=1200)
+    parser.add_argument("--max-calls", type=int, default=400)
+    parser.add_argument("--max-input-audio-seconds", type=int, default=2400)
+    parser.add_argument("--utterance-timeout", type=int, default=45)
+    args = parser.parse_args()
+    if not (
+        1 <= args.duration_seconds <= 1200
+        and 2 <= args.max_calls <= 500
+        and 1 <= args.max_input_audio_seconds <= 2400
+        and 1 <= args.utterance_timeout <= 60
+    ):
+        parser.error("invalid bounded run configuration")
+    descriptor = os.open(
+        args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    report = {"result": "FAIL", "safe_failure": "bootstrap_failed"}
+    try:
+        fixtures = speech_fixtures()
+        provider_id = ProviderId(args.provider)
+        provider = (
+            OpenAIRealtimeProvider(
+                environ={"OPENAI_API_KEY": credential(ROOT / ".env")}
+            )
+            if provider_id is ProviderId.OPENAI
+            else build_local_provider(now_ns=time.monotonic_ns)
+        )
+        report = asyncio.run(
+            run_check(
+                provider,
+                provider_id,
+                fixtures,
+                duration=args.duration_seconds,
+                max_calls=args.max_calls,
+                max_audio_ms=args.max_input_audio_seconds * 1000,
+                timeout=args.utterance_timeout,
+            )
+        )
+    except (Exception, KeyboardInterrupt) as failure:
+        report["safe_failure"] = type(failure).__name__
+    finally:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(report, output, sort_keys=True, indent=2)
+            output.write("\n")
+    print(
+        json.dumps({"result": report["result"], "safe_failure": report["safe_failure"]})
+    )
+    return 0 if report["result"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

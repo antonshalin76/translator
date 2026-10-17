@@ -12,6 +12,14 @@ export type VoiceEngine = "piper" | "silero" | "openai";
 export type VoiceGender = "male" | "female";
 export type AudioMixField = keyof AudioMixVolumes;
 
+export class AudioMixIntentQueue extends Map<AudioMixField, number> {
+  take(): [AudioMixField, number] | undefined {
+    const next = this.entries().next().value;
+    if (next) this.delete(next[0]);
+    return next;
+  }
+}
+
 export interface DebugTextEvent {
   transcript: string;
   translation: string;
@@ -22,7 +30,20 @@ export interface DirectionState {
   source_language: Language;
   target_language: Language;
   enabled: boolean;
+  runtime_status?: "stopped" | "running" | "recovering" | "failed";
   voice_profile: VoiceProfile;
+}
+
+export function directionRuntimeLabel(direction: DirectionState, connected: boolean): string {
+  if (!connected) return "Нет связи";
+  if (!direction.enabled) return "Отключен";
+  switch (direction.runtime_status) {
+    case "running": return "Канал открыт";
+    case "recovering": return "Восстановление";
+    case "failed": return "Сбой — Stop/Start";
+    case "stopped": return "Готов";
+    default: return "Статус неизвестен";
+  }
 }
 
 export interface AudioMixVolumes {
