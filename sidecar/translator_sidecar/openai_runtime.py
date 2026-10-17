@@ -385,6 +385,28 @@ class OpenAIRealtimeProvider:
                 ) from None
             if isinstance(error, InvalidStatus):
                 status = error.response.status_code
+                if status == 429:
+                    try:
+                        event = TranslationError.model_validate(
+                            {
+                                "type": "error",
+                                "event_id": "http_handshake",
+                                "error": json.loads(error.response.body)["error"],
+                            }
+                        )
+                    except (ValueError, TypeError, KeyError, RecursionError):
+                        pass
+                    else:
+                        failure = _wire_failure(event)
+                        raise OpenAIProviderFailure(
+                            failure.code,
+                            retryable=failure.retryable
+                            and (
+                                event.error.type == "rate_limit_error"
+                                or event.error.code == "rate_limit_exceeded"
+                            ),
+                            resource_exhausted=True,
+                        ) from None
                 raise OpenAIProviderFailure(
                     SafeErrorCode.PROVIDER_AUTH_FAILED
                     if status in {401, 403}

@@ -306,6 +306,20 @@ systemd/installer — секреты окружения, процессная г
   Поставка/установка/pre-push имеют отдельные receipts; итоговый delivery
   checklist хранится приватно вне Git, чтобы не менять проверенный коммит
   после проверки и не выдавать незавершённую поставку за завершённую.
+- Native pre-push проверил все 47 путей. Исправлен подтверждённый дефект:
+  handshake HTTP429 теперь использует существующую typed rate-limit политику;
+  только известный временный лимит допускает recovery, auth/quota/malformed
+  остаются fatal. Причинный RED 5 FAIL → GREEN 20 PASS; targeted architecture
+  audit PASS. Актуальный affected pytest: 1303 PASS / 5 external SKIP.
+  Остальные Rust/UI/lock inputs не менялись; дорогие проверки повторно не нужны.
+  Результаты завершающих unittest/manifest/publication и поставки — в отдельном
+  delivery receipt, а не новая серия изменений проверенного кода.
+- Уточнение review intent: измеренный media-starvation guard 250→500 ms
+  соответствует согласованному quality-first подходу. Response 6 s, input
+  12 s, cancel 250 ms, source-age 3 s и hot-I/O 1 s не увеличены. Это не
+  разрешение продлевать deadlines ради прохождения тестов. Source-string
+  guards остаются дополнительными; продуктовые выводы основаны на причинных
+  behavioral/native/PBT проверках, не на наличии строк в исходниках.
 
 ### Охват и оставшиеся риски
 
@@ -321,7 +335,7 @@ recovery receipts; `local/local_provider.py` — fatal retryability;
 после Stop; `runtime_state.rs` — voice engine при переключении; UI/Tauri —
 простая проекция состояния и подтверждённые команды; installer остаётся прежним.
 
-Открыты: качество/непрерывность фактической OpenAI цепочки, полный source aggregate,
+Открыты: качество/непрерывность фактической OpenAI цепочки,
 пакет/установка/откат, автоматическая оценка смысла чисел/имён/отрицаний. Успешный
 provider smoke или native fixture не закрывает эти пункты. Новая модель не
 объявляется лучшей по одному примеру; текущие ключи и реальные устройства не

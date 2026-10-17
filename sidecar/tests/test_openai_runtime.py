@@ -13,7 +13,9 @@ import pytest
 from test_provider_contract import VOICE_OVERRIDE_CASES
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
-from websockets.exceptions import ConnectionClosed
+from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.http11 import Response
 
 from translator_sidecar.openai_provider import OpenAIRealtimeConfig
 from translator_sidecar.openai_runtime import (
@@ -551,6 +553,178 @@ def test_genuine_connect_failure_is_retryable_not_invalid_input(cause):
         assert failure.value.retryable
         assert not h.provider._sessions and not h.provider._failed_opens
         await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+def http_handshake_error(status, payload):
+    body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    return InvalidStatus(Response(status, "synthetic status", Headers(), body))
+
+
+@pytest.mark.parametrize(
+    "status,error_type,error_code,expected,retryable",
+    [
+        (
+            429,
+            "invalid_request_error",
+            "rate_limit_exceeded",
+            SafeErrorCode.PROVIDER_UNAVAILABLE,
+            True,
+        ),
+        (429, "rate_limit_error", None, SafeErrorCode.PROVIDER_UNAVAILABLE, True),
+        (
+            429,
+            "rate_limit_error",
+            "insufficient_quota",
+            SafeErrorCode.PROVIDER_UNAVAILABLE,
+            False,
+        ),
+        (
+            429,
+            "rate_limit_error",
+            "billing_hard_limit_reached",
+            SafeErrorCode.PROVIDER_UNAVAILABLE,
+            False,
+        ),
+        (
+            429,
+            "authentication_error",
+            "invalid_api_key",
+            SafeErrorCode.PROVIDER_AUTH_FAILED,
+            False,
+        ),
+        (
+            429,
+            "invalid_request_error",
+            "unknown",
+            SafeErrorCode.PROVIDER_UNAVAILABLE,
+            False,
+        ),
+        (
+            429,
+            "server_error",
+            "server_error",
+            SafeErrorCode.PROVIDER_UNAVAILABLE,
+            False,
+        ),
+        (401, "rate_limit_error", None, SafeErrorCode.PROVIDER_AUTH_FAILED, False),
+        (403, "rate_limit_error", None, SafeErrorCode.PROVIDER_AUTH_FAILED, False),
+        (400, "rate_limit_error", None, SafeErrorCode.PROVIDER_UNAVAILABLE, False),
+        (500, "server_error", "server_error", SafeErrorCode.PROVIDER_UNAVAILABLE, True),
+        (
+            503,
+            "invalid_request_error",
+            "unknown",
+            SafeErrorCode.PROVIDER_UNAVAILABLE,
+            True,
+        ),
+    ],
+)
+def test_http_handshake_status_preserves_safe_retry_policy(
+    status, error_type, error_code, expected, retryable
+):
+    async def scenario():
+        h = Harness()
+
+        async def fail(_uri, **_options):
+            raise http_handshake_error(
+                status,
+                {
+                    "error": {
+                        "type": error_type,
+                        "code": error_code,
+                        "message": "private upstream detail",
+                    }
+                },
+            )
+
+        h.provider._connect = fail
+        with pytest.raises(OpenAIProviderFailure) as raised:
+            await h.open()
+        assert raised.value.code is expected and raised.value.retryable is retryable
+        assert raised.value.resource_exhausted is (status == 429)
+        assert "private upstream detail" not in str(raised.value)
+        assert not h.provider._sessions and not h.provider._failed_opens
+        await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "payload", [b"not-json", b"[]", b"{}", b'{"error":{"type":"rate_limit_error"}}']
+)
+def test_http_429_untrusted_body_is_fatal_without_blind_retry(payload):
+    async def scenario():
+        h = Harness()
+
+        async def fail(_uri, **_options):
+            raise http_handshake_error(429, payload)
+
+        h.provider._connect = fail
+        with pytest.raises(OpenAIProviderFailure) as raised:
+            await h.open()
+        assert raised.value.code is SafeErrorCode.PROVIDER_UNAVAILABLE
+        assert not raised.value.retryable and raised.value.resource_exhausted
+        assert not h.provider._sessions and not h.provider._failed_opens
+        await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["idle", "input"])
+@pytest.mark.parametrize("hard_quota", [False, True])
+def test_http_429_prepare_policy_reaches_idle_and_on_input_callers(phase, hard_quota):
+    async def scenario():
+        h = Harness()
+        request = await h.open()
+        attempts = 0
+
+        async def fail(_uri, **_options):
+            nonlocal attempts
+            attempts += 1
+            raise http_handshake_error(
+                429,
+                {
+                    "error": {
+                        "type": "rate_limit_error",
+                        "code": "insufficient_quota"
+                        if hard_quota
+                        else "rate_limit_exceeded",
+                        "message": "synthetic HTTP limit",
+                    }
+                },
+            )
+
+        h.provider._connect = fail
+        try:
+            await h.provider.submit_frame(frame(request))
+            if phase == "idle":
+                h.sockets[0].push(audio())
+            h.sockets[0].push(wire("response.done"))
+            await h.settled()
+            owner = h.provider._sessions[request.session_id]
+            if phase == "idle" and hard_quota:
+                assert owner.failed
+                error = next(
+                    e for e in h.events if isinstance(e, PrivacySafeProviderError)
+                )
+                assert (
+                    error.code is SafeErrorCode.PROVIDER_UNAVAILABLE
+                    and not error.retryable
+                )
+            else:
+                with pytest.raises(OpenAIProviderFailure) as raised:
+                    await h.provider.submit_frame(frame(request, sequence=1))
+                assert raised.value.retryable is not hard_quota
+                assert raised.value.resource_exhausted
+                if phase == "idle":
+                    assert owner.prefetch_failure is None and not owner.failed
+            assert attempts == 1
+            h.provider._connect = h.connect
+        finally:
+            await h.provider.shutdown()
+            h.assert_retired_generations()
 
     asyncio.run(scenario())
 

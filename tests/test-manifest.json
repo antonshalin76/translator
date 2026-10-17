@@ -225,7 +225,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1288,
+      "node_count": 1308,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -4754,6 +4754,126 @@
         {
           "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_genuine_connect_failure_is_retryable_not_invalid_input[timeout]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_prepare_policy_reaches_idle_and_on_input_callers[False-idle]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_prepare_policy_reaches_idle_and_on_input_callers[False-input]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_prepare_policy_reaches_idle_and_on_input_callers[True-idle]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_prepare_policy_reaches_idle_and_on_input_callers[True-input]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_untrusted_body_is_fatal_without_blind_retry[[]]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_untrusted_body_is_fatal_without_blind_retry[not-json]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_untrusted_body_is_fatal_without_blind_retry[{\"error\":{\"type\":\"rate_limit_error\"}}]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_429_untrusted_body_is_fatal_without_blind_retry[{}]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[400-rate_limit_error-None-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[401-rate_limit_error-None-provider_auth_failed-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[403-rate_limit_error-None-provider_auth_failed-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[429-authentication_error-invalid_api_key-provider_auth_failed-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[429-invalid_request_error-rate_limit_exceeded-provider_unavailable-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[429-invalid_request_error-unknown-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[429-rate_limit_error-None-provider_unavailable-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[429-rate_limit_error-billing_hard_limit_reached-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[429-rate_limit_error-insufficient_quota-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[429-server_error-server_error-provider_unavailable-False]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[500-server_error-server_error-provider_unavailable-True]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_http_handshake_status_preserves_safe_retry_policy[503-invalid_request_error-unknown-provider_unavailable-True]",
           "reason": "",
           "status": "deterministic"
         },
