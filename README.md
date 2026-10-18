@@ -12,7 +12,7 @@ It is not a general cross-platform release yet. The default target is Linux with
 
 - Duplex Ru <-> En translation with independent microphone and speaker channels.
 - Per-channel enable/disable controls, direction selection, and separate original/translation volume mixing.
-- Local provider as the default path; opt-in OpenAI uses HTTPS `gpt-transcribe` → `gpt-4.1` → `gpt-4o-mini-tts` with the fixed `marin` voice. Cloud translation preserves local speech boundaries and translates rather than answering the speaker. Cloud DNS and connections require the `amn0` VPN interface; there is no direct-network fallback. OpenAI Quality-first allows up to five seconds from end of speech to first playable audio; local and other modes retain their limits. This new path still requires sustained and installed-package qualification.
+- Local provider as the default path; opt-in OpenAI uses HTTPS `gpt-transcribe` → `gpt-4.1` → `gpt-4o-mini-tts` with the fixed `marin` voice. Cloud translation preserves local speech boundaries and translates rather than answering the speaker. Cloud DNS and connections require the `amn0` VPN interface; there is no direct-network fallback. OpenAI Quality-first prepares a complete, bounded speech response before playback to isolate it from TTS chunk gaps, within five seconds from end of speech to first playable audio; local and other modes retain their limits. This new path still requires sustained and installed-package qualification.
 - PipeWire/Pulse virtual endpoints for `Translator_Virtual_Mic`, `Translator_Mic_Out`, and `Translator_Remote_In`.
 - App routing watcher for call-like streams from Zoom, Telegram Desktop, and browser meetings.
 - Tauri tray/status UI plus a user-level `translator` lifecycle command.

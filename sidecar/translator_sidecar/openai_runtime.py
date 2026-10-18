@@ -45,6 +45,7 @@ from .provider_contract import (
     SafeErrorSummary,
     SampleFormat,
     SessionCloseReason,
+    TranslationMode,
     UpdateDebugText,
     UtteranceOutcome,
     make_provider_error,
@@ -398,7 +399,11 @@ class OpenAIRealtimeProvider:
                                 )
                             )
                             del wire_pending[:complete]
-                            await self._audio(session, generation, pending)
+                            if (
+                                session.request.mode
+                                is not TranslationMode.QUALITY_FIRST
+                            ):
+                                await self._audio(session, generation, pending)
                     if wire_pending or not total:
                         raise OpenAIProviderProtocolError("empty_output_pcm")
                     if resampler is not None:

@@ -226,7 +226,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1293,
+      "node_count": 1320,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -411,6 +411,12 @@
         {
           "file": "sidecar/tests/test_grpc_server.py",
           "id": "sidecar/tests/test_grpc_server.py::test_actual_cloud_grpc_no_speech_emits_native_required_latency_error_final_batch",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_grpc_server.py",
+          "id": "sidecar/tests/test_grpc_server.py::test_actual_cloud_quality_first_grpc_exposes_no_partial_tts_before_eof",
           "reason": "",
           "status": "deterministic"
         },
@@ -4922,7 +4928,55 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_only_quality_first_prepares_whole_speech_before_pcm_publication[balanced]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_only_quality_first_prepares_whole_speech_before_pcm_publication[quality_first]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_only_quality_first_prepares_whole_speech_before_pcm_publication[streaming_first]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_output_progress_stall_still_times_out_and_closes_stream",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_cancel_before_eof_purges_buffer_and_next_phrase_completes",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_invalid_response_never_publishes_prepared_partial_audio[odd-eof]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_invalid_response_never_publishes_prepared_partial_audio[over-cap]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_invalid_response_never_publishes_prepared_partial_audio[stream-error]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline",
           "reason": "",
           "status": "deterministic"
         },
@@ -4994,109 +5048,217 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[1-16000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-1-16000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[1-24000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-1-24000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[1-48000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-1-48000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[2-16000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-2-16000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[2-24000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-2-24000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[2-48000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-2-48000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[319-16000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-319-16000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[319-24000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-319-24000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[319-48000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-319-48000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[640-16000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-640-16000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[640-24000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-640-24000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[640-48000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-640-48000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[959-16000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-959-16000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[959-24000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-959-24000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[959-48000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-959-48000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[960-16000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-960-16000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[960-24000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-960-24000]",
           "reason": "",
           "status": "deterministic"
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[960-48000]",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[quality_first-960-48000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-1-16000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-1-24000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-1-48000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-2-16000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-2-24000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-2-48000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-319-16000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-319-24000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-319-48000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-640-16000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-640-24000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-640-48000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-959-16000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-959-24000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-959-48000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-960-16000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-960-24000]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_stateful_resampling_and_framing_are_independent_of_http_fragmentation[streaming_first-960-48000]",
           "reason": "",
           "status": "deterministic"
         },

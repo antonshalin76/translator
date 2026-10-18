@@ -2434,6 +2434,81 @@ def test_actual_cloud_grpc_no_speech_emits_native_required_latency_error_final_b
     run(asyncio.wait_for(scenario(), timeout=5))
 
 
+def test_actual_cloud_quality_first_grpc_exposes_no_partial_tts_before_eof(tmp_path):
+    async def scenario():
+        config = secure_config(tmp_path)
+        pipeline = FakePipeline()
+        prepared, eof = asyncio.Event(), asyncio.Event()
+
+        async def gated_speech(_text, _language):
+            for _ in range(9):
+                yield b"\x01\x00" * 480
+            prepared.set()
+            await eof.wait()
+
+        pipeline.speech = gated_speech
+        provider = OpenAIRealtimeProvider(
+            environ={"OPENAI_API_KEY": "synthetic"},
+            pipeline_factory=lambda *_args, **_kwargs: pipeline,
+        )
+        server = ProviderGrpcServer(config, openai_provider=provider)
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"unix://{config.socket_path}")
+        source = InteractiveRequests()
+        identity = uuid4()
+        value = open_request(
+            identity,
+            provider_id=provider_pb2.PROVIDER_ID_OPENAI,
+            voice_engine=provider_pb2.VOICE_ENGINE_OPENAI,
+        )
+        value.open_session.requested_input_format.frame_duration_ms = 20
+        value.open_session.requested_output_format.frame_duration_ms = 20
+        value.open_session.requested_output_format.sample_rate_hz = 24_000
+        first = frame_request(identity, pcm=bytes(640))
+        first.input_frame.frame_duration_ms = 20
+        call = provider_pb2_grpc.ProviderTransportStub(channel).Stream(
+            source, metadata=((AUTH_METADATA_KEY, f"Bearer {TOKEN}"),), timeout=4
+        )
+        pending = None
+        try:
+            await source.send(value)
+            assert (await call.read()).HasField("session_opened")
+            assert (await call.read()).HasField("health")
+            await source.send(first)
+            await prepared.wait()
+            pending = asyncio.create_task(call.read())
+            done, _ = await asyncio.wait((pending,), timeout=0.03)
+            assert not done, (
+                "QualityFirst published a partial network response before EOF"
+            )
+            eof.set()
+            events = [await pending] + [await call.read() for _ in range(9)]
+            assert [event.WhichOneof("event") for event in events] == [
+                "audio_delta"
+            ] * 9 + ["utterance_final"]
+            assert [event.audio_delta.sequence for event in events[:-1]] == list(
+                range(9)
+            )
+            assert (
+                events[-1].utterance_final.outcome
+                == provider_pb2.UTTERANCE_OUTCOME_COMPLETED
+            )
+            await source.send(close_request(identity))
+            assert (await call.read()).HasField("session_closed")
+            await source.close()
+            assert await call.read() is grpc.aio.EOF
+        finally:
+            eof.set()
+            call.cancel()
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+            await source.close()
+            await channel.close()
+            await server.stop()
+
+    run(asyncio.wait_for(scenario(), timeout=5))
+
+
 class RetryHealthEngine(ProviderEngine):
     def health(self, session_id, *, now_ns):
         return (

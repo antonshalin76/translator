@@ -97,7 +97,7 @@ class FakePipeline:
         self.closed = True
 
 
-def open_request(*, debug=False, rate=16_000):
+def open_request(*, debug=False, rate=16_000, mode=TranslationMode.STREAMING_FIRST):
     pcm = PcmFormat(
         sample_rate_hz=rate,
         channels=1,
@@ -110,7 +110,7 @@ def open_request(*, debug=False, rate=16_000):
         direction_id=AudioDirection.MICROPHONE,
         source_language=Language.RU,
         target_language=Language.EN,
-        mode=TranslationMode.STREAMING_FIRST,
+        mode=mode,
         requested_input_format=pcm,
         requested_output_format=pcm,
         voice_profile=VoiceProfile(
@@ -171,8 +171,10 @@ class Harness:
         self.events.extend(batch)
         commit()
 
-    async def open(self, *, debug=False, rate=16_000):
-        request = open_request(debug=debug, rate=rate)
+    async def open(
+        self, *, debug=False, rate=16_000, mode=TranslationMode.STREAMING_FIRST
+    ):
+        request = open_request(debug=debug, rate=rate, mode=mode)
         await self.provider.reserve_session(request, self.publish).open()
         return request
 
@@ -221,15 +223,18 @@ def test_http_pipeline_waits_for_eou_and_reuses_warm_session(debug):
 
 @pytest.mark.parametrize("rate", [16_000, 24_000, 48_000])
 @pytest.mark.parametrize("chunk_size", [1, 2, 319, 640, 959, 960])
+@pytest.mark.parametrize(
+    "mode", [TranslationMode.STREAMING_FIRST, TranslationMode.QUALITY_FIRST]
+)
 def test_stateful_resampling_and_framing_are_independent_of_http_fragmentation(
-    rate, chunk_size
+    rate, chunk_size, mode
 ):
     async def scenario():
         payload = np.arange(-1900, 1901, dtype="<i2").tobytes()
 
         async def render(chunks):
             h = Harness()
-            request = await h.open(rate=rate)
+            request = await h.open(rate=rate, mode=mode)
             h.pipelines[0].chunks = chunks
             await h.provider.submit_frame(frame(request))
             await h.settled()
@@ -1265,5 +1270,140 @@ def test_failed_close_keeps_exact_session_custody_after_every_queued_task_is_dra
         assert len(h.events) == count + 1 and isinstance(
             h.events[-1], ProviderSessionClosed
         )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        TranslationMode.QUALITY_FIRST,
+        TranslationMode.BALANCED,
+        TranslationMode.STREAMING_FIRST,
+    ],
+)
+def test_only_quality_first_prepares_whole_speech_before_pcm_publication(mode):
+    async def scenario():
+        h = Harness()
+        request = await h.open(rate=24_000, mode=mode)
+        prepared, eof = asyncio.Event(), asyncio.Event()
+
+        async def gated_speech(_text, _language):
+            for _ in range(9):
+                yield b"\x01\x00" * 480
+            prepared.set()
+            await eof.wait()
+
+        h.pipelines[0].speech = gated_speech
+        try:
+            await h.provider.submit_frame(frame(request))
+            await prepared.wait()
+            before_eof = [
+                event for event in h.events if isinstance(event, ProviderAudioDelta)
+            ]
+            assert len(before_eof) == (
+                0 if mode is TranslationMode.QUALITY_FIRST else 9
+            )
+            eof.set()
+            await h.settled()
+            assert sum(isinstance(event, ProviderAudioDelta) for event in h.events) == 9
+            assert h.events[-1].outcome is UtteranceOutcome.COMPLETED
+        finally:
+            eof.set()
+            await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_quality_first_cancel_before_eof_purges_buffer_and_next_phrase_completes():
+    async def scenario():
+        h = Harness()
+        request = await h.open(mode=TranslationMode.QUALITY_FIRST)
+        prepared, eof, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_speech = h.pipelines[0].speech
+
+        async def gated_speech(_text, _language):
+            try:
+                for _ in range(9):
+                    yield b"\x01\x00" * 480
+                prepared.set()
+                await eof.wait()
+            finally:
+                closed.set()
+
+        h.pipelines[0].speech = gated_speech
+        value = frame(request)
+        try:
+            await h.provider.submit_frame(value)
+            await prepared.wait()
+            await asyncio.wait_for(
+                h.provider.cancel_utterance(cancel(value)), timeout=0.25
+            )
+            assert closed.is_set()
+            assert len(h.events) == 1 and isinstance(
+                h.events[0], ProviderUtteranceFinal
+            )
+            assert h.events[0].outcome is UtteranceOutcome.CANCELLED
+            assert h.events[0].final_audio_sequence is None
+            h.pipelines[0].speech = original_speech
+            await h.provider.submit_frame(frame(request, sequence=1))
+            await h.settled()
+            assert h.events[-1].outcome is UtteranceOutcome.COMPLETED
+        finally:
+            eof.set()
+            await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fault", ["odd-eof", "over-cap", "stream-error"])
+def test_quality_first_invalid_response_never_publishes_prepared_partial_audio(fault):
+    async def scenario():
+        h = Harness()
+        request = await h.open(mode=TranslationMode.QUALITY_FIRST)
+
+        async def bad_speech(_text, _language):
+            yield b"\x01\x00" * 480
+            if fault == "odd-eof":
+                yield b"x"
+            elif fault == "over-cap":
+                yield b"\x01\x00" * (openai_runtime.MAX_PCM // 2)
+            else:
+                raise OpenAIHttpFailure(retryable=True, transport=True)
+
+        h.pipelines[0].speech = bad_speech
+        await h.provider.submit_frame(frame(request))
+        await h.settled()
+        assert [type(event) for event in h.events] == [
+            PrivacySafeProviderError,
+            ProviderUtteranceFinal,
+        ]
+        assert h.events[-1].outcome is UtteranceOutcome.DROPPED
+        assert h.events[-1].final_audio_sequence is None
+        await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline():
+    async def scenario():
+        h = Harness(timeout=0.03)
+        request = await h.open(mode=TranslationMode.QUALITY_FIRST)
+
+        async def slow_speech(_text, _language):
+            for _ in range(9):
+                yield b"\x01\x00" * 480
+                await asyncio.sleep(0.01)
+
+        h.pipelines[0].speech = slow_speech
+        await h.provider.submit_frame(frame(request))
+        await h.settled()
+        assert [type(event) for event in h.events] == [
+            PrivacySafeProviderError,
+            ProviderUtteranceFinal,
+        ]
+        assert h.events[-1].outcome is UtteranceOutcome.DROPPED
+        assert h.events[-1].final_audio_sequence is None
+        await h.provider.shutdown()
 
     asyncio.run(scenario())
