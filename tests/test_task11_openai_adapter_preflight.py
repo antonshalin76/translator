@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import io
 import json
 import re
 import stat
@@ -122,13 +123,13 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         script = script_path.read_text()
 
         for token in (
-            "translator.task11-openai-ga-preflight.v2",
+            "translator.task11-openai-https-preflight.v3",
             "cloud_opt_in_required",
             "missing_credentials_safe_error",
             "audio_leaves_machine_visible_before_session",
             "does_not_satisfy_task11_live_comparison",
-            "task7_debt_carried",
-            "task10_debt_carried",
+            "task7-live-human-round-trip.json",
+            "task10-validation-report.json",
             "openai_sidecar_runtime",
         ):
             self.assertIn(token, script)
@@ -163,36 +164,84 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
         self.assertNotRegex(script, re.compile(r"sk-[A-Za-z0-9_-]+"))
         self.assertNotIn("print(os.environ", script)
 
-    def test_ga_preflight_does_not_reuse_dedicated_translation_evidence(self):
+    def test_https_preflight_is_offline_and_never_reuses_live_evidence(self):
         module = load_preflight_module()
-        self.assertEqual(module.DEFAULT_REPORT.name, "task11-openai-ga-preflight.json")
-        previous = {
-            "schema_version": "translator.task11-openai-adapter-preflight.v1",
-            "synthetic_speech_comparison": {
-                "provider_id": "openai",
-                "model": "gpt-realtime-translate",
-                "status": "passed",
-                "stored_audio": False,
-                "stored_transcript_or_translation": False,
-                "debug_text_enabled": False,
-                "plaintext_credential_persisted": False,
-            },
-        }
-        current = module.preserved_synthetic_speech_comparison(previous, False)
-        self.assertEqual(current["model"], "gpt-realtime-2.1")
-        self.assertNotEqual(current["status"], "passed")
+        self.assertEqual(
+            module.DEFAULT_REPORT.name, "task11-openai-https-preflight.json"
+        )
+        self.assertFalse(module.DEFAULT_REPORT.resolve().is_relative_to(ROOT))
+        with (
+            patch("socket.socket", side_effect=AssertionError("network forbidden")),
+            patch("socket.getaddrinfo", side_effect=AssertionError("DNS forbidden")),
+            patch.object(
+                Path, "read_text", side_effect=AssertionError("no receipt reuse")
+            ),
+        ):
+            report = module.build_report()
+        self.assertTrue(report["preflight_contract_passed"])
+        self.assertEqual(
+            report["models"],
+            {"asr": "gpt-transcribe", "mt": "gpt-4.1", "tts": "gpt-4o-mini-tts"},
+        )
+        self.assertEqual(report["transport"], "https_asr_mt_streaming_tts")
+        self.assertEqual(report["network_probe"]["status"], "not_run")
+        self.assertEqual(report["synthetic_speech_comparison"]["status"], "pending")
+        self.assertEqual(report["combined_latency_gate"]["status"], "not_measured")
+        self.assertFalse(report["task11_completed"])
+        self.assertFalse(report["release_ready"])
+        rendered = json.dumps(report)
+        for stale in ("gpt-realtime", "websocket", "event_shapes_checked"):
+            self.assertNotIn(stale, rendered)
+        for private in ("credential-present", "api_key", "authorization", "pcm"):
+            self.assertNotIn(private, walk_keys(report))
+        self.assertNotIn("credential-present", rendered)
 
-    def test_ga_smoke_reuses_production_provider_and_rejects_old_receipt(self):
+    def test_https_receipts_cannot_overwrite_repository_benchmarks(self):
+        for script in (
+            "translator-task11-openai-preflight",
+            "translator-task11-openai-synthetic-smoke",
+        ):
+            module = load_preflight_module(script)
+            with (
+                self.subTest(script=script),
+                patch.object(
+                    module.sys,
+                    "argv",
+                    [script, "--report", str(ROOT / "docs/benchmarks/forbidden.json")],
+                ),
+                patch.object(module.sys, "stderr", new_callable=io.StringIO),
+                patch.object(
+                    Path, "write_text", side_effect=AssertionError("no write")
+                ),
+            ):
+                with self.assertRaises(SystemExit) as exit_:
+                    module.main()
+                self.assertEqual(exit_.exception.code, 2)
+
+    def test_https_smoke_reuses_provider_and_rejects_old_or_mismatched_receipt(self):
         module = load_preflight_module("translator-task11-openai-synthetic-smoke")
-        self.assertEqual(module.REPORT_PATH.name, "task11-openai-ga-preflight.json")
+        self.assertEqual(module.REPORT_PATH.name, "task11-openai-https-preflight.json")
+        current = load_preflight_module().build_report()
         with patch.object(module, "REPORT_PATH") as report:
-            report.read_text.return_value = json.dumps(
-                {"schema_version": "translator.task11-openai-adapter-preflight.v1"}
-            )
-            with self.assertRaisesRegex(ValueError, "current_ga_preflight_required"):
-                module.read_report()
+            report.read_text.return_value = json.dumps(current)
+            self.assertEqual(module.read_report(), json.loads(json.dumps(current)))
+            for changed in (
+                {"schema_version": "translator.task11-openai-adapter-preflight.v1"},
+                {"schema_version": "translator.task11-openai-ga-preflight.v2"},
+                {"models": {"asr": "gpt-realtime-2.1"}},
+                {"voice": "cedar"},
+                {"api_origin": "https://example.invalid/v1"},
+                {"transport": "websocket"},
+                {"preflight_contract_passed": False},
+            ):
+                with self.subTest(changed=changed):
+                    report.read_text.return_value = json.dumps({**current, **changed})
+                    with self.assertRaisesRegex(
+                        ValueError, "current_https_preflight_required"
+                    ):
+                        module.read_report()
 
-    def test_ga_smoke_requires_completed_nonzero_pcm_and_closes_provider(self):
+    def test_https_smoke_requires_completed_nonzero_pcm_and_closes_provider(self):
         module = load_preflight_module("translator-task11-openai-synthetic-smoke")
         cases = [(False, False, None), (True, False, None), (True, True, None)]
         cases.extend(
@@ -326,7 +375,44 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
                 )
                 self.assertTrue(provider.closed)
                 self.assertTrue(provider.shutdown_called)
+                if result["status"] == "passed":
+                    self.assertIsInstance(result["first_output_after_eou_ms"], int)
+                    self.assertGreaterEqual(result["first_output_after_eou_ms"], 0)
                 self.assertNotIn("synthetic-key", json.dumps(result))
+
+    def test_https_smoke_never_promotes_single_delivery_to_product_or_release_pass(
+        self,
+    ):
+        module = load_preflight_module("translator-task11-openai-synthetic-smoke")
+        report = load_preflight_module().build_report()
+        comparison = {
+            "status": "passed",
+            "models": module.MODEL_IDENTITIES,
+            "directions": {
+                "ru_to_en": {"first_output_audio_delta_ms": 4000},
+                "en_to_ru": {"first_output_audio_delta_ms": 5000},
+            },
+        }
+        report = module.apply_comparison(report, comparison)
+        self.assertFalse(report["task11_completed"])
+        self.assertFalse(report["release_ready"])
+        self.assertTrue(report["does_not_satisfy_task11_live_comparison"])
+        self.assertIsNone(
+            report["combined_latency_gate"][
+                "at_least_one_provider_meets_usable_release_gate"
+            ]
+        )
+        self.assertEqual(
+            report["real_app_openai_smoke"]["status"],
+            "pending_after_synthetic_speech_comparison",
+        )
+        report = module.apply_comparison(report, {"status": "failed"})
+        self.assertEqual(report["real_app_openai_smoke"]["status"], "not_run")
+        self.assertEqual(report["combined_latency_gate"]["status"], "not_measured")
+        self.assertNotIn(
+            "openai_synthetic_first_output_audio_delta_ms_max",
+            report["combined_latency_gate"],
+        )
 
     @requires_local_artifacts("docs/benchmarks/task11-openai-adapter-preflight.json")
     def test_report_shape_carries_debts_and_keeps_task11_open(self) -> None:
@@ -516,17 +602,18 @@ class Task11OpenAIAdapterPreflightTests(unittest.TestCase):
     def test_preflight_module_builds_report_from_current_task_debt(self) -> None:
         module = load_preflight_module()
         report = module.build_report()
-        task7 = read_json("docs/benchmarks/task7-live-human-round-trip.json")
-        task10 = read_json("docs/benchmarks/task10-validation-report.json")
-
         self.assertEqual(
-            report["task7_debt_carried"]["local_provider_latency_classification"],
-            task7["classification"],
+            report["task7_debt_carried"]["canonical_evidence"],
+            "docs/benchmarks/task7-live-human-round-trip.json",
         )
         self.assertEqual(
-            report["task10_debt_carried"]["mvp_a_gate_satisfied"],
-            task10["mvp_a_gate_satisfied"],
+            report["task10_debt_carried"]["canonical_evidence"],
+            "docs/benchmarks/task10-validation-report.json",
         )
+        for task in ("task7", "task10"):
+            self.assertEqual(
+                report[f"{task}_debt_carried"]["status"], "historical_evidence_only"
+            )
         self.assertFalse(report["task11_completed"])
         self.assertIn("synthetic_speech_comparison", report)
 

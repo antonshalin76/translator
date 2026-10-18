@@ -260,6 +260,7 @@ sidecar/tests/test_local_tts.py
 sidecar/tests/test_model_fetch.py
 sidecar/tests/test_model_lease.py
 sidecar/tests/test_model_manifest.py
+sidecar/tests/test_openai_http.py
 sidecar/tests/test_openai_provider.py
 sidecar/tests/test_openai_runtime.py
 sidecar/tests/test_podcast_quality.py
@@ -311,6 +312,7 @@ sidecar/translator_sidecar/local/mt.py
 sidecar/translator_sidecar/local/runtime.py
 sidecar/translator_sidecar/local/source_commit.py
 sidecar/translator_sidecar/local/tts.py
+sidecar/translator_sidecar/openai_http.py
 sidecar/translator_sidecar/openai_provider.py
 sidecar/translator_sidecar/openai_runtime.py
 sidecar/translator_sidecar/provider_contract.py

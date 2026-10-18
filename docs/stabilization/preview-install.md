@@ -82,13 +82,12 @@ Filesystem writes are not additionally confined by systemd in this preview.
 
 ## First real-call trial
 
-OpenAI remains experimental in this candidate. The full `gpt-realtime-2.1`
-provider passed a short duplex check, but the sustained delivery check failed
-after a request received no acknowledgement or response. Cancellation and
-cleanup are bounded; this is not evidence of reliable cloud delivery. The mini
-alternative also timed out on one of six fixed phrases and was not promoted.
-Use the local provider for the qualified sustained path. No stable cloud or
-real-call quality claim is made by this package.
+OpenAI remains experimental. The previous installed `gpt-realtime-2.1` preview
+failed sustained delivery. The replacement source uses an HTTPS ASR/translation/
+speech cascade; its first frozen twelve-recording transport test delivered all
+twelve, but that is not a sustained runtime or installed-package gate. Keep the
+previous package for rollback. No stable cloud or real-call quality claim is
+made before the recovery plan's remaining gates pass.
 
 Local processing uses the quality-first policy by default. Advanced diagnostics
 shows its status; policy changes are available through the API only while stopped.
@@ -172,10 +171,16 @@ For OpenAI, put only the authorized `OPENAI_API_KEY` in that mode-0600 service
 environment file, then restart the preview daemon. A repository `.env` is not
 read by the installed service. While stopped, explicitly enable cloud processing
 in the UI, then select OpenAI and press Start. This sends both enabled speech
-directions to OpenAI; local mode does not. The current cloud provider is
-`gpt-realtime-2.1`, with strict translation instructions and the fixed `marin`
-voice, so local gender selectors are unavailable in cloud mode. Cloud quality and sustained operation remain
-unqualified until the recovery plan's separate gates pass.
+directions to OpenAI; local mode does not. New source uses `gpt-transcribe` →
+`gpt-4.1` → `gpt-4o-mini-tts`, with strict translation instructions and the fixed
+`marin` voice, so local gender selectors are unavailable in cloud mode. It
+requires active `amn0`, Linux `SO_BINDTODEVICE`, and systemd-resolved via
+`busctl`: DNS is explicitly scoped to that interface and sockets are bound
+before connecting. Missing VPN/DNS prerequisites, configured HTTP proxies,
+redirects and binding failures fail closed; the service never changes VPN,
+routes, DNS or offload settings. Cloud quality and sustained operation remain
+unqualified until the recovery plan's separate gates pass. Existing installed
+archives retain their own source identity; these instructions do not update them.
 
 ## Stop and rollback
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import asyncio
 import datetime as dt
 import json
@@ -30,8 +31,12 @@ from translator_sidecar.local.tts import (  # noqa: E402
     TtsUnavailable,
     TtsUnsupported,
 )
-from translator_sidecar.openai_provider import (  # noqa: E402
-    OPENAI_REALTIME_TRANSLATION_MODEL,
+from translator_sidecar.openai_http import (  # noqa: E402
+    API_ORIGIN,
+    ASR_MODEL,
+    MT_MODEL,
+    TTS_MODEL,
+    VOICE,
 )
 from translator_sidecar.openai_runtime import OpenAIRealtimeProvider  # noqa: E402
 from translator_sidecar.provider_contract import (  # noqa: E402
@@ -53,7 +58,12 @@ from translator_sidecar.provider_contract import (  # noqa: E402
     VoiceProfile,
 )
 
-REPORT_PATH = ROOT / "docs/benchmarks/task11-openai-ga-preflight.json"
+REPORT_PATH = (
+    Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    / "translator/openai/task11-openai-https-preflight.json"
+)
+SCHEMA_VERSION = "translator.task11-openai-https-preflight.v3"
+MODEL_IDENTITIES = {"asr": ASR_MODEL, "mt": MT_MODEL, "tts": TTS_MODEL}
 MANIFEST_PATH = ROOT / "models/manifest.json"
 FRAME_DURATION_MS = 20
 SAMPLE_RATE_HZ = 24_000
@@ -89,8 +99,15 @@ def utc_now() -> str:
 
 def read_report() -> dict[str, Any]:
     report = json.loads(REPORT_PATH.read_text())
-    if report.get("schema_version") != "translator.task11-openai-ga-preflight.v2":
-        raise ValueError("current_ga_preflight_required")
+    if (
+        report.get("schema_version") != SCHEMA_VERSION
+        or report.get("models") != MODEL_IDENTITIES
+        or report.get("voice") != VOICE
+        or report.get("api_origin") != API_ORIGIN
+        or report.get("transport") != "https_asr_mt_streaming_tts"
+        or report.get("preflight_contract_passed") is not True
+    ):
+        raise ValueError("current_https_preflight_required")
     return report
 
 
@@ -184,13 +201,12 @@ def direction_metrics(
         "planned_frame_count": len(frames),
         "sent_frame_count": 0,
         "sent_duration_ms": 0,
-        "stopped_after_first_output_audio_delta": False,
-        "connected": False,
-        "session_updated": False,
+        "provider_session_opened": False,
         "response_completed": False,
         "nonzero_output_frames": 0,
         "output_audio_delta_count": 0,
         "first_output_audio_delta_ms": None,
+        "first_output_after_eou_ms": None,
         "last_output_audio_delta_ms": None,
         "event_type_counts": Counter(),
         "safe_error_code": None,
@@ -210,6 +226,7 @@ def run_direction(
         session_request = request(config)
         finished = asyncio.Event()
         first_input_ns = None
+        end_of_utterance_ns = None
         stream_id, utterance_id = uuid4(), uuid4()
         next_audio_sequence, last_event_sequence, terminal = 0, -1, False
 
@@ -271,6 +288,10 @@ def run_direction(
                     elapsed_ms = (time.perf_counter_ns() - first_input_ns) // 1_000_000
                     if metrics["first_output_audio_delta_ms"] is None:
                         metrics["first_output_audio_delta_ms"] = elapsed_ms
+                        if end_of_utterance_ns is not None:
+                            metrics["first_output_after_eou_ms"] = (
+                                time.perf_counter_ns() - end_of_utterance_ns
+                            ) // 1_000_000
                     metrics["last_output_audio_delta_ms"] = elapsed_ms
                     metrics["output_audio_delta_count"] += 1
                 elif isinstance(event, PrivacySafeProviderError):
@@ -289,11 +310,12 @@ def run_direction(
                 CONNECT_TIMEOUT_SECONDS + OUTPUT_WAIT_SECONDS + 15
             ):
                 await owner.open()
-                metrics["connected"] = True
-                metrics["session_updated"] = True
+                metrics["provider_session_opened"] = True
                 await asyncio.to_thread(start_barrier.wait, CONNECT_TIMEOUT_SECONDS)
                 first_input_ns = time.perf_counter_ns()
                 for sequence, pcm in enumerate(frames):
+                    if sequence == len(frames) - 1:
+                        end_of_utterance_ns = time.perf_counter_ns()
                     await provider.submit_frame(
                         ProviderInputFrame(
                             session_id=session_request.session_id,
@@ -354,7 +376,10 @@ def blocked_comparison(status: str, safe_error_code: str) -> dict[str, Any]:
         "status": status,
         "attempted_at": utc_now(),
         "provider_id": "openai",
-        "model": OPENAI_REALTIME_TRANSLATION_MODEL,
+        "models": MODEL_IDENTITIES,
+        "voice": VOICE,
+        "transport": "https_asr_mt_streaming_tts",
+        "api_origin": API_ORIGIN,
         "sample_count_per_direction": 0,
         "simultaneous": False,
         "directions": {},
@@ -423,7 +448,10 @@ def build_comparison(api_key: str) -> dict[str, Any]:
         "status": status,
         "attempted_at": utc_now(),
         "provider_id": "openai",
-        "model": OPENAI_REALTIME_TRANSLATION_MODEL,
+        "models": MODEL_IDENTITIES,
+        "voice": VOICE,
+        "transport": "https_asr_mt_streaming_tts",
+        "api_origin": API_ORIGIN,
         "sample_count_per_direction": 1,
         "simultaneous": True,
         "input_fixture": {
@@ -448,8 +476,15 @@ def apply_comparison(
 ) -> dict[str, Any]:
     report["generated_at"] = utc_now()
     report["task11_completed"] = False
+    report["release_ready"] = False
     report["does_not_satisfy_task11_live_comparison"] = True
     report["synthetic_speech_comparison"] = comparison
+    report["real_app_openai_smoke"] = {"status": "not_run"}
+    report["combined_latency_gate"] = {
+        "status": "not_measured",
+        "at_least_one_provider_meets_usable_release_gate": None,
+        "synthetic_single_sample_not_release_gate": True,
+    }
     if comparison["status"] == "passed":
         report["live_openai_comparison"] = {
             "status": "passed_synthetic_speech_comparison",
@@ -466,9 +501,6 @@ def apply_comparison(
         ]
         report["combined_latency_gate"] = {
             "status": "pending_real_app_openai_smoke",
-            "local_provider_latency_classification": report["combined_latency_gate"][
-                "local_provider_latency_classification"
-            ],
             "at_least_one_provider_meets_usable_release_gate": None,
             "openai_synthetic_first_output_audio_delta_ms_max": (
                 max(first_outputs) if first_outputs else None
@@ -484,6 +516,15 @@ def apply_comparison(
 
 
 def main() -> int:
+    global REPORT_PATH
+    parser = argparse.ArgumentParser(
+        description="Two-direction synthetic HTTPS smoke, not a release/quality gate."
+    )
+    parser.add_argument("--report", type=Path, default=REPORT_PATH)
+    args = parser.parse_args()
+    REPORT_PATH = args.report
+    if REPORT_PATH.resolve().is_relative_to(ROOT):
+        parser.error("report must be outside the source repository")
     report = read_report()
     comparison = build_comparison(os.environ.get("OPENAI_API_KEY", "").strip())
     report = apply_comparison(report, comparison)
@@ -491,7 +532,7 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "report": str(REPORT_PATH.relative_to(ROOT)),
+                "report": str(REPORT_PATH),
                 "synthetic_speech_comparison_status": comparison["status"],
                 "directions": {
                     name: {

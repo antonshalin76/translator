@@ -1,51 +1,32 @@
-"""One Realtime Translation connection per local utterance."""
+"""Session-owned HTTPS ASR, translation and streaming speech, without WS fallback."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import UUID
 
 import numpy as np
 import soxr
-from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from .cleanup import finish_cleanup
+from .openai_http import MAX_PCM, OpenAIHttpFailure, OpenAIHttpPipeline
 from .openai_provider import (
     OPENAI_PROVIDER_NAME,
-    OPENAI_REALTIME_VOICE,
-    OPENAI_TRANSCRIPTION_MODEL,
-    InputCommitted,
     OpenAIRealtimeAdapter,
     OpenAIRealtimeConfig,
-    SourceTranscript,
-    SourceTranscriptCompleted,
-    TranslationDelta,
-    TranslationError,
-    TranslationResponse,
-    TranslationSessionEvent,
-    build_input_audio_append_event,
-    build_input_audio_commit_event,
-    build_response_create_event,
-    build_session_update_event,
-    parse_translation_event,
+    model_health,
 )
 from .provider_contract import (
     MAX_TERMINAL_UTTERANCES_PER_SESSION,
     SAFE_ERROR_MESSAGES,
     CancelUtterance,
     CloseRequestReason,
-    ComputeDevice,
-    ModelHealth,
-    ModelKind,
-    ModelState,
     OpenProviderSession,
     PcmFormat,
     ProviderAudioDelta,
@@ -56,6 +37,8 @@ from .provider_contract import (
     ProviderSessionClosed,
     ProviderSessionOpened,
     ProviderState,
+    ProviderTranscriptDelta,
+    ProviderTranslationDelta,
     ProviderUtteranceFinal,
     SafeErrorCode,
     SafeErrorSummary,
@@ -68,17 +51,18 @@ from .provider_contract import (
 from .provider_registry import SessionDrainReceipt
 
 PublishEvents = Callable[[tuple[object, ...], Callable[[], None]], Awaitable[None]]
+_MAX_OUTPUT_SECONDS = 30
+_MAX_READY_UTTERANCES = 3
 
 
-class WebSocket(Protocol):
-    transport: asyncio.Transport
-
-    async def send(self, message: str) -> None: ...
-    async def recv(self) -> str | bytes: ...
-    async def wait_closed(self) -> None: ...
-
-
-WebSocketFactory = Callable[..., Awaitable[WebSocket]]
+class Pipeline(Protocol):
+    async def warmup(self) -> None: ...
+    async def transcribe(
+        self, pcm: bytes, sample_rate: int, source_language: str
+    ) -> str: ...
+    async def translate(self, text: str, target_language: str) -> str: ...
+    def speech(self, text: str, target_language: str) -> AsyncIterator[bytes]: ...
+    async def close(self) -> None: ...
 
 
 class OpenAIProviderProtocolError(ValueError):
@@ -87,11 +71,7 @@ class OpenAIProviderProtocolError(ValueError):
 
 class OpenAIProviderFailure(OpenAIProviderProtocolError):
     def __init__(
-        self,
-        code: SafeErrorCode,
-        *,
-        retryable: bool,
-        resource_exhausted: bool = False,
+        self, code: SafeErrorCode, *, retryable: bool, resource_exhausted: bool = False
     ) -> None:
         super().__init__(code.value)
         self.code = code
@@ -103,28 +83,20 @@ class OpenAIProviderTransportFailure(OpenAIProviderFailure):
     pass
 
 
-def _wire_failure(event: TranslationError) -> OpenAIProviderFailure:
-    authentication = event.error.type == "authentication_error" or event.error.code in {
-        "invalid_api_key",
-        "invalid_authentication",
-        "permission_denied",
-    }
-    hard_quota = event.error.code in {
-        "insufficient_quota",
-        "billing_hard_limit_reached",
-    }
-    rate_limited = (
-        event.error.code == "rate_limit_exceeded"
-        or event.error.type == "rate_limit_error"
-    )
-    return OpenAIProviderFailure(
-        SafeErrorCode.PROVIDER_AUTH_FAILED
-        if authentication
-        else SafeErrorCode.PROVIDER_UNAVAILABLE,
-        retryable=(event.error.type == "server_error" or rate_limited)
-        and not authentication
-        and not hard_quota,
-        resource_exhausted=hard_quota or rate_limited,
+def _failure(error: Exception) -> OpenAIProviderFailure:
+    if isinstance(error, OpenAIProviderFailure):
+        return error
+    if isinstance(error, OpenAIHttpFailure):
+        failure_type = (
+            OpenAIProviderTransportFailure if error.transport else OpenAIProviderFailure
+        )
+        return failure_type(
+            error.code,
+            retryable=error.retryable,
+            resource_exhausted=error.resource_exhausted,
+        )
+    return OpenAIProviderTransportFailure(
+        SafeErrorCode.PROVIDER_UNAVAILABLE, retryable=True
     )
 
 
@@ -136,21 +108,18 @@ class _Binding:
 
 @dataclass(slots=True)
 class _Generation:
-    ws: WebSocket
-    adapter: OpenAIRealtimeAdapter
-    source_transcript: bool
-    binding: _Binding | None = None
-    receiver: asyncio.Task[None] | None = None
-    timeout: asyncio.Timeout | None = None
-    deadline: float | None = None
-    input_complete: bool = False
+    binding: _Binding
+    pcm: bytearray = field(default_factory=bytearray)
+    task: asyncio.Task[None] | None = None
+    retirement: asyncio.Task[None] | None = None
     revoked: bool = False
-    disposed: bool = False
+    input_complete: bool = False
+    discarding: bool = False
     last_audio_sequence: int | None = None
-    response_id: str | None = None
-    input_item_id: str | None = None
-    output_item_id: str | None = None
-    source_transcript_seen: bool = False
+    finalized: bool = False
+    deadline: float | None = None
+    output_deadline: float | None = None
+    timeout: asyncio.Timeout | None = None
 
 
 @dataclass(slots=True)
@@ -158,19 +127,22 @@ class _Session:
     owner: OpenAIRealtimeProvider
     request: OpenProviderSession
     publish: PublishEvents
-    generation: _Generation | None = None
+    pipeline: Pipeline | None = None
+    utterances: dict[UUID, _Generation] = field(default_factory=dict)
+    collecting_id: UUID | None = None
+    processing_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    publication_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     debug_text_enabled: bool = False
     event_sequence: int = 0
     closed: bool = False
     failed: bool = False
+    opened: bool = False
+    draining: bool = False
     stream_id: UUID | None = None
     last_input_sequence: int | None = None
     terminal_ids: set[UUID] = field(default_factory=set)
     opening_task: asyncio.Task | None = None
-    prefetch_failure: OpenAIProviderFailure | None = None
-    opened: bool = False
-    draining: bool = False
     drain_task: asyncio.Task[SessionDrainReceipt] | None = None
     delivery_error: SafeErrorCode | None = None
 
@@ -199,22 +171,20 @@ class OpenAIRealtimeProvider:
         config: OpenAIRealtimeConfig | None = None,
         *,
         environ: Mapping[str, str] | None = None,
-        websocket_factory: WebSocketFactory | None = None,
+        pipeline_factory: Callable[..., Pipeline] | None = None,
         now_ns: Callable[[], int] = time.monotonic_ns,
-        drain_timeout_seconds: float = 10,
+        drain_timeout_seconds: float = 6,
     ) -> None:
         if not 0 < drain_timeout_seconds <= 30:
             raise ValueError("invalid_drain_timeout")
         self._config = config or OpenAIRealtimeConfig(cloud_opt_in=True)
         self._environ = environ if environ is not None else os.environ
-        self._connect = websocket_factory or connect
+        self._pipeline_factory = pipeline_factory or OpenAIHttpPipeline
         self._now_ns = now_ns
         self._drain_timeout = drain_timeout_seconds
         self._sessions: dict[UUID, _Session] = {}
         self._failed_opens: dict[UUID, _Session] = {}
         self._closed = False
-        self._logger = logging.Logger("translator.openai.transport")
-        self._logger.disabled = True
 
     @property
     def _opening(self) -> dict[UUID, asyncio.Task]:
@@ -225,9 +195,7 @@ class OpenAIRealtimeProvider:
         }
 
     def reserve_session(
-        self,
-        request: OpenProviderSession,
-        publish: PublishEvents,
+        self, request: OpenProviderSession, publish: PublishEvents
     ) -> _Session:
         if self._closed:
             raise OpenAIProviderProtocolError("provider_closed")
@@ -251,9 +219,7 @@ class OpenAIRealtimeProvider:
         self._sessions[request.session_id] = session
         return session
 
-    def _open_session(
-        self, session: _Session
-    ) -> asyncio.Task[tuple[ProviderSessionOpened, ProviderHealth]]:
+    def _open_session(self, session: _Session) -> asyncio.Task:
         if (
             self._closed
             or session.closed
@@ -269,22 +235,29 @@ class OpenAIRealtimeProvider:
         except BaseException:
             coroutine.close()
             session.closed = True
-            if self._sessions.get(session.request.session_id) is session:
-                self._sessions.pop(session.request.session_id)
+            self._sessions.pop(session.request.session_id, None)
             raise
         return session.opening_task
 
-    async def _run_open_session(
-        self, session: _Session
-    ) -> tuple[ProviderSessionOpened, ProviderHealth]:
+    async def _run_open_session(self, session: _Session):
         request = session.request
         try:
-            session.generation = await self._prepare(session)
-            session.generation.receiver = self._start_receiver(
-                session, session.generation
+            preflight = OpenAIRealtimeAdapter(
+                self._config, environ=self._environ
+            ).preflight_open_session(request)
+            if not preflight.can_start:
+                assert preflight.error is not None
+                raise OpenAIProviderFailure(preflight.error.code, retryable=False)
+            session.pipeline = self._pipeline_factory(
+                self._environ[self._config.credential_env_name].strip(),
+                vpn_interface=self._config.vpn_interface,
             )
+            async with asyncio.timeout(10):
+                await session.pipeline.warmup()
+            if session.draining or session.closed:
+                raise asyncio.CancelledError
             session.opened = True
-            opened = ProviderSessionOpened(
+            return ProviderSessionOpened(
                 session_id=request.session_id,
                 direction_id=request.direction_id,
                 event_sequence=session.next_sequence(),
@@ -292,341 +265,353 @@ class OpenAIRealtimeProvider:
                 negotiated_output_format=request.requested_output_format,
                 capabilities=ProviderCapabilities(
                     transcript_delta=request.debug_text_enabled,
-                    translation_delta=True,
+                    translation_delta=request.debug_text_enabled,
                     cancellation=True,
                     cloud_egress=True,
                 ),
-            )
-            return opened, self._health(session)
+            ), self._health(session)
         except BaseException as error:
             session.closed = True
             try:
-                if session.generation is not None and not session.generation.revoked:
-                    await self._retire(session, session.generation)
+                await finish_cleanup(self._close_pipeline(session))
             finally:
                 self._sessions.pop(request.session_id, None)
-                if session.generation is not None:
+                if session.pipeline is not None:
                     self._failed_opens[request.session_id] = session
             if isinstance(error, asyncio.CancelledError):
                 raise
-            if isinstance(error, OpenAIProviderFailure):
-                raise
-            raise OpenAIProviderProtocolError("openai_connection_failed") from None
+            raise _failure(error) from None
         finally:
             session.opening_task = None
-
-    async def _prepare(self, session: _Session) -> _Generation:
-        request = session.request.model_copy(
-            update={"debug_text_enabled": session.debug_text_enabled}
-        )
-        adapter = OpenAIRealtimeAdapter(self._config, environ=self._environ)
-        preflight = adapter.preflight_open_session(request)
-        if not preflight.can_start or preflight.connect_plan is None:
-            assert preflight.error is not None
-            raise OpenAIProviderFailure(preflight.error.code, retryable=False)
-        ws = None
-        try:
-            async with asyncio.timeout(10):
-                ws = await self._connect(
-                    preflight.connect_plan["uri"],
-                    additional_headers={
-                        "Authorization": "Bearer "
-                        + self._environ[self._config.credential_env_name].strip(),
-                        "OpenAI-Safety-Identifier": "translator-sidecar-openai-runtime",
-                    },
-                    open_timeout=10,
-                    close_timeout=1,
-                    max_size=1_048_576,
-                    max_queue=16,
-                    logger=self._logger,
-                )
-                session.generation = _Generation(
-                    ws, adapter, request.debug_text_enabled
-                )
-                created = await self._handshake_event(ws, "session.created")
-                settings = build_session_update_event(request)
-                await ws.send(json.dumps(settings))
-                updated = await self._handshake_event(ws, "session.updated")
-                audio = updated.session.audio
-                transcription = (
-                    audio.input.transcription if audio and audio.input else None
-                )
-                if (
-                    created.session.id != updated.session.id
-                    or updated.session.instructions
-                    != settings["session"]["instructions"]
-                    or updated.session.output_modalities != ["audio"]
-                    or audio is None
-                    or audio.input is None
-                    or audio.input.turn_detection is not None
-                    or audio.output is None
-                    or audio.output.voice != OPENAI_REALTIME_VOICE
-                    or (transcription.model if transcription else None)
-                    != (
-                        OPENAI_TRANSCRIPTION_MODEL
-                        if request.debug_text_enabled
-                        else None
-                    )
-                ):
-                    raise OpenAIProviderProtocolError("translation_handshake_mismatch")
-            return session.generation
-        except BaseException as error:
-            try:
-                if ws is not None:
-                    await self._retire(session, session.generation)
-            finally:
-                if isinstance(error, asyncio.CancelledError):
-                    raise error
-            if isinstance(error, OpenAIProviderFailure):
-                raise error
-            if isinstance(error, (OSError, TimeoutError, ConnectionClosed)):
-                raise OpenAIProviderTransportFailure(
-                    SafeErrorCode.PROVIDER_UNAVAILABLE, retryable=True
-                ) from None
-            if isinstance(error, InvalidStatus):
-                status = error.response.status_code
-                if status == 429:
-                    try:
-                        event = TranslationError.model_validate(
-                            {
-                                "type": "error",
-                                "event_id": "http_handshake",
-                                "error": json.loads(error.response.body)["error"],
-                            }
-                        )
-                    except (ValueError, TypeError, KeyError, RecursionError):
-                        pass
-                    else:
-                        failure = _wire_failure(event)
-                        raise OpenAIProviderFailure(
-                            failure.code,
-                            retryable=failure.retryable
-                            and (
-                                event.error.type == "rate_limit_error"
-                                or event.error.code == "rate_limit_exceeded"
-                            ),
-                            resource_exhausted=True,
-                        ) from None
-                raise OpenAIProviderFailure(
-                    SafeErrorCode.PROVIDER_AUTH_FAILED
-                    if status in {401, 403}
-                    else SafeErrorCode.PROVIDER_UNAVAILABLE,
-                    retryable=status >= 500,
-                    resource_exhausted=status == 429,
-                ) from None
-            raise OpenAIProviderProtocolError("openai_connection_failed") from None
-
-    async def _handshake_event(
-        self, ws: WebSocket, expected: str
-    ) -> TranslationSessionEvent:
-        while True:
-            event = parse_translation_event(await ws.recv())
-            if event is None:
-                continue
-            if isinstance(event, TranslationError):
-                raise _wire_failure(event)
-            if (
-                not isinstance(event, TranslationSessionEvent)
-                or event.type != expected
-                or event.session.model != self._config.model
-            ):
-                raise OpenAIProviderProtocolError("translation_handshake_mismatch")
-            return event
-
-    def _start_receiver(
-        self, session: _Session, generation: _Generation
-    ) -> asyncio.Task[None]:
-        coroutine = self._receive(session, generation)
-        try:
-            return asyncio.create_task(coroutine, name="openai-generation-receiver")
-        except BaseException:
-            coroutine.close()
-            raise
-
-    def _start_prefetch(self, session: _Session) -> None:
-        if (
-            self._closed
-            or self._failed_opens
-            or any(
-                owner.closed or owner.draining or owner.failed
-                for owner in self._sessions.values()
-            )
-            or session.opening_task is not None
-        ):
-            return
-        coroutine = self._prefetch(session)
-        try:
-            session.opening_task = asyncio.create_task(
-                coroutine, name="openai-idle-prepare"
-            )
-            session.prefetch_failure = None
-        except BaseException:
-            coroutine.close()
-            raise
-
-    async def _prefetch(self, session: _Session) -> None:
-        try:
-            async with session.lock:
-                if session.closed or session.draining or session.generation is not None:
-                    return
-                try:
-                    generation = await self._prepare(session)
-                    generation.receiver = self._start_receiver(session, generation)
-                except Exception as error:
-                    failure = (
-                        error
-                        if isinstance(error, OpenAIProviderFailure)
-                        else OpenAIProviderFailure(
-                            SafeErrorCode.PROVIDER_UNAVAILABLE, retryable=False
-                        )
-                    )
-                    try:
-                        if (
-                            session.generation is not None
-                            and not session.generation.revoked
-                        ):
-                            await self._retire(session, session.generation)
-                    except Exception:
-                        session.failed = True
-                    session.prefetch_failure = failure
-                    if session.failed or not failure.retryable:
-                        session.failed = True
-                        try:
-                            await self._publish(
-                                session,
-                                (
-                                    self._error(session, None, failure),
-                                    self._health(session, failure),
-                                ),
-                            )
-                        except Exception:
-                            pass  # _publish retains delivery failure for the drain receipt.
-        finally:
-            session.opening_task = None
-
-    async def _cancel_opening(self, session: _Session) -> None:
-        opening = session.opening_task
-        if opening is not None and opening is not asyncio.current_task():
-            opening.cancel()
-            await asyncio.gather(opening, return_exceptions=True)
 
     async def submit_frame(self, frame: ProviderInputFrame) -> None:
         session = self._active_session(frame.session_id)
+        overflow = None
         async with session.lock:
             self._active_session(frame.session_id)
             self._validate_frame(session, frame)
-            if session.prefetch_failure is not None:
-                failure, session.prefetch_failure = session.prefetch_failure, None
-                raise failure
-            generation = session.generation
-            binding = _Binding(frame.stream_id, frame.utterance_id)
-            if (
-                generation
-                and generation.binding
-                and (
-                    generation.binding.utterance_id == frame.utterance_id
-                    and generation.binding.stream_id != frame.stream_id
-                )
-            ):
-                raise OpenAIProviderProtocolError("stream_identity_mismatch")
-            if generation is not None and generation.binding not in (None, binding):
-                await self._retire(session, generation, UtteranceOutcome.CANCELLED)
-                generation = None
+            if session.collecting_id not in (None, frame.utterance_id):
+                raise OpenAIProviderProtocolError("input_utterance_mismatch")
+            generation = session.utterances.get(frame.utterance_id)
             if generation is None:
-                generation = await self._prepare(session)
-                session.generation = generation
-                try:
-                    generation.receiver = self._start_receiver(session, generation)
-                except BaseException:
-                    await self._retire(session, generation)
-                    raise
-            if generation.input_complete:
-                raise OpenAIProviderProtocolError("input_sequence_mismatch")
+                generation = _Generation(_Binding(frame.stream_id, frame.utterance_id))
+                session.utterances[frame.utterance_id] = generation
+                session.collecting_id = frame.utterance_id
             if generation.revoked:
                 raise OpenAIProviderProtocolError("openai_retirement_failed")
-            if generation.binding is None:
-                generation.binding = binding
+            if generation.input_complete:
+                raise OpenAIProviderProtocolError("input_sequence_mismatch")
             session.stream_id = frame.stream_id
             session.last_input_sequence = frame.sequence
-            try:
-                async with asyncio.timeout(2):
-                    await generation.ws.send(
-                        json.dumps(
-                            build_input_audio_append_event(
-                                self._resample_pcm(
-                                    frame.pcm, frame.sample_rate_hz, 24_000
+            if len(generation.pcm) + len(frame.pcm) > frame.sample_rate_hz * 2 * 12:
+                generation.discarding = True
+                generation.pcm.clear()
+            if not generation.discarding:
+                generation.pcm.extend(frame.pcm)
+            if frame.end_of_utterance:
+                session.collecting_id = None
+                ready = sum(
+                    item.input_complete and not item.revoked
+                    for item in session.utterances.values()
+                )
+                generation.input_complete = True
+                generation.deadline = (
+                    asyncio.get_running_loop().time() + self._drain_timeout
+                )
+                if generation.discarding or ready >= _MAX_READY_UTTERANCES:
+                    overflow = generation
+                else:
+                    generation.task = asyncio.create_task(
+                        self._process(session, generation)
+                    )
+        if overflow is not None:
+            await self._retire(
+                session,
+                overflow,
+                UtteranceOutcome.DROPPED,
+                OpenAIProviderFailure(SafeErrorCode.QUEUE_OVERFLOW, retryable=True),
+            )
+
+    async def _process(self, session: _Session, generation: _Generation) -> None:
+        try:
+            assert session.pipeline is not None
+            if (
+                generation.deadline is not None
+                and asyncio.get_running_loop().time() > generation.deadline
+            ):
+                raise TimeoutError
+            async with asyncio.timeout_at(generation.deadline) as deadline:
+                generation.timeout = deadline
+                async with session.processing_lock:
+                    if generation.revoked:
+                        return
+                    if session.failed:
+                        raise OpenAIProviderFailure(
+                            SafeErrorCode.PROVIDER_UNAVAILABLE, retryable=False
+                        )
+                    source = await session.pipeline.transcribe(
+                        bytes(generation.pcm),
+                        session.request.requested_input_format.sample_rate_hz,
+                        session.request.source_language.value,
+                    )
+                    generation.pcm.clear()
+                    await self._debug(session, generation, source, translation=False)
+                    translated = await session.pipeline.translate(
+                        source, session.request.target_language.value
+                    )
+                    await self._debug(session, generation, translated, translation=True)
+                    target_rate = session.request.requested_output_format.sample_rate_hz
+                    resampler = (
+                        soxr.ResampleStream(
+                            24_000, target_rate, 1, dtype="float32", quality="QQ"
+                        )
+                        if target_rate != 24_000
+                        else None
+                    )
+                    pending = bytearray()
+                    wire_pending = bytearray()
+                    total = 0
+                    async with aclosing(
+                        session.pipeline.speech(
+                            translated, session.request.target_language.value
+                        )
+                    ) as speech:
+                        async for pcm in speech:
+                            if not pcm:
+                                raise OpenAIProviderProtocolError("invalid_output_pcm")
+                            total += len(pcm)
+                            if total > MAX_PCM:
+                                raise OpenAIProviderProtocolError(
+                                    "output_audio_capacity_exhausted"
+                                )
+                            wire_pending.extend(pcm)
+                            complete = len(wire_pending) - len(wire_pending) % 2
+                            pending.extend(
+                                self._resample(
+                                    bytes(wire_pending[:complete]), resampler
                                 )
                             )
+                            del wire_pending[:complete]
+                            await self._audio(session, generation, pending)
+                    if wire_pending or not total:
+                        raise OpenAIProviderProtocolError("empty_output_pcm")
+                    if resampler is not None:
+                        pending.extend(self._resample(b"", resampler, last=True))
+                    await self._audio(session, generation, pending, final=True)
+                    if not generation.revoked:
+                        await self._retire(
+                            session, generation, UtteranceOutcome.COMPLETED
                         )
-                    )
-                    if frame.end_of_utterance:
-                        generation.input_complete = True
-                        await generation.ws.send(
-                            json.dumps(build_input_audio_commit_event())
-                        )
-                        await generation.ws.send(
-                            json.dumps(build_response_create_event())
-                        )
-                        generation.deadline = (
-                            asyncio.get_running_loop().time() + self._drain_timeout
-                        )
-                        if generation.timeout is not None:
-                            generation.timeout.reschedule(generation.deadline)
-            except BaseException as error:
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if generation.revoked:
+                return
+            failure = _failure(error)
+            session.failed = session.failed or (
+                not failure.retryable and failure.code is not SafeErrorCode.NO_SPEECH
+            )
+            try:
                 await self._retire(
-                    session, generation, UtteranceOutcome.DROPPED, error=True
+                    session, generation, UtteranceOutcome.DROPPED, failure
                 )
-                if isinstance(error, asyncio.CancelledError):
-                    raise
-                if isinstance(error, (OSError, TimeoutError, ConnectionClosed)):
-                    raise OpenAIProviderTransportFailure(
-                        SafeErrorCode.PROVIDER_UNAVAILABLE, retryable=True
-                    ) from None
-                raise OpenAIProviderProtocolError("openai_send_failed") from None
+            except Exception:
+                session.failed = True
+        finally:
+            generation.timeout = None
+
+    async def _debug(self, session, generation, text, *, translation):
+        async with session.publication_lock:
+            if generation.revoked or not session.debug_text_enabled:
+                return
+            event_type = (
+                ProviderTranslationDelta if translation else ProviderTranscriptDelta
+            )
+            extra = {"stable_prefix": True} if translation else {}
+            await self._publish(
+                session,
+                (
+                    event_type(
+                        session_id=session.request.session_id,
+                        direction_id=session.request.direction_id,
+                        stream_id=generation.binding.stream_id,
+                        utterance_id=generation.binding.utterance_id,
+                        event_sequence=session.next_sequence(),
+                        text=text,
+                        is_final=True,
+                        **extra,
+                    ),
+                ),
+            )
+
+    async def _audio(self, session, generation, pending: bytearray, *, final=False):
+        rate = session.request.requested_output_format.sample_rate_hz
+        size = rate * 2 // 50
+        if final and len(pending) % size:
+            pending.extend(bytes(size - len(pending) % size))
+        while len(pending) >= size:
+            pcm = bytes(pending[:size])
+            del pending[:size]
+            async with session.publication_lock:
+                if generation.revoked:
+                    return
+                sequence = (
+                    0
+                    if generation.last_audio_sequence is None
+                    else generation.last_audio_sequence + 1
+                )
+                await self._publish(
+                    session,
+                    (
+                        ProviderAudioDelta(
+                            session_id=session.request.session_id,
+                            direction_id=session.request.direction_id,
+                            stream_id=generation.binding.stream_id,
+                            utterance_id=generation.binding.utterance_id,
+                            sequence=sequence,
+                            event_sequence=session.next_sequence(),
+                            provider_monotonic_ns=self._now_ns(),
+                            sample_rate_hz=rate,
+                            channels=1,
+                            sample_format=SampleFormat.S16LE,
+                            frame_duration_ms=20,
+                            pcm=pcm,
+                        ),
+                    ),
+                    on_commit=lambda sequence=sequence: self._audio_committed(
+                        generation, sequence
+                    ),
+                )
+
+    def _audio_committed(self, generation, sequence):
+        generation.last_audio_sequence = sequence
+        now = asyncio.get_running_loop().time()
+        if generation.output_deadline is None:
+            generation.output_deadline = now + _MAX_OUTPUT_SECONDS + self._drain_timeout
+        generation.deadline = min(now + self._drain_timeout, generation.output_deadline)
+        if generation.timeout is not None and not generation.timeout.expired():
+            generation.timeout.reschedule(generation.deadline)
+
+    @staticmethod
+    def _resample(pcm, resampler, *, last=False):
+        if resampler is None:
+            return pcm
+        return (
+            np.rint(
+                resampler.resample_chunk(
+                    np.frombuffer(pcm, dtype="<i2").astype(np.float32), last=last
+                )
+            )
+            .clip(-32768, 32767)
+            .astype("<i2", copy=False)
+            .tobytes()
+        )
+
+    @staticmethod
+    def _revoke(session, generation):
+        generation.revoked = True
+        session.terminal_ids.add(generation.binding.utterance_id)
+        generation.pcm.clear()
+        if session.collecting_id == generation.binding.utterance_id:
+            session.collecting_id = None
+
+    async def _retire(self, session, generation, outcome, failure=None):
+        self._revoke(session, generation)
+        if generation.retirement is None or (
+            generation.retirement.done()
+            and (
+                generation.retirement.cancelled()
+                or generation.retirement.exception() is not None
+            )
+        ):
+            generation.retirement = asyncio.create_task(
+                self._dispose_generation(
+                    session, generation, asyncio.current_task(), outcome, failure
+                )
+            )
+        await finish_cleanup(generation.retirement)
+        if (
+            generation.task is not None
+            and generation.task is not asyncio.current_task()
+            and not generation.task.done()
+        ):
+            done, _ = await asyncio.wait((generation.task,), timeout=1.8)
+            if not done:
+                session.failed = True
+                raise OpenAIProviderProtocolError("openai_retirement_failed")
+
+    async def _dispose_generation(self, session, generation, owner, outcome, failure):
+        task = generation.task
+        if task is not None and task is not owner and not task.done():
+            task.cancel()
+            done, _ = await asyncio.wait((task,), timeout=1.8)
+            if not done:
+                session.failed = True
+                raise OpenAIProviderProtocolError("openai_retirement_failed")
+        async with session.publication_lock:
+            if not generation.finalized:
+                batch = []
+                if failure:
+                    batch.append(self._error(session, generation, failure))
+                batch.append(
+                    ProviderUtteranceFinal(
+                        session_id=session.request.session_id,
+                        direction_id=session.request.direction_id,
+                        stream_id=generation.binding.stream_id,
+                        utterance_id=generation.binding.utterance_id,
+                        event_sequence=session.next_sequence(),
+                        final_audio_sequence=generation.last_audio_sequence,
+                        outcome=outcome,
+                    )
+                )
+                generation.finalized = True
+                await self._publish(session, tuple(batch))
+        if session.utterances.get(generation.binding.utterance_id) is generation:
+            session.utterances.pop(generation.binding.utterance_id)
 
     async def cancel_utterance(self, request: CancelUtterance) -> None:
         session = self._active_session(request.session_id)
         if request.direction_id != session.request.direction_id:
             raise OpenAIProviderProtocolError("direction_identity_mismatch")
-        if session.generation is None or session.generation.binding is None:
-            return
-        async with session.lock:
-            generation = session.generation
-            if (
-                generation
-                and generation.binding
-                and generation.binding.utterance_id == request.utterance_id
-            ):
-                await self._retire(session, generation, UtteranceOutcome.CANCELLED)
-                self._start_prefetch(session)
+        generation = session.utterances.get(request.utterance_id)
+        if generation is not None:
+            await self._retire(session, generation, UtteranceOutcome.CANCELLED)
 
     async def update_debug_text(self, request: UpdateDebugText) -> None:
         session = self._active_session(request.session_id)
-        await self._cancel_opening(session)
-        async with session.lock:
+        async with session.publication_lock:
             session.debug_text_enabled = request.enabled
-            if session.generation is None or session.generation.binding is None:
-                if session.generation is not None:
-                    await self._retire(session, session.generation)
-                self._start_prefetch(session)
 
-    async def _drain_session(
-        self, session: _Session, reason: CloseRequestReason
-    ) -> SessionDrainReceipt:
-        await self._cancel_opening(session)
-        async with session.lock:
-            session.closed = True
+    async def _close_pipeline(self, session):
+        if session.pipeline is not None:
             try:
-                if session.generation:
-                    await self._retire(
-                        session,
-                        session.generation,
-                        None if not session.opened else UtteranceOutcome.CANCELLED,
-                    )
+                async with asyncio.timeout(1.8):
+                    await session.pipeline.close()
             except Exception:
-                if session.generation is not None:
-                    raise
-            if session.opened and session.delivery_error is None:
+                raise OpenAIProviderProtocolError("openai_retirement_failed") from None
+            session.pipeline = None
+
+    async def _drain_session(self, session, reason):
+        opening = session.opening_task
+        if opening is not None and opening is not asyncio.current_task():
+            opening.cancel()
+            await asyncio.gather(opening, return_exceptions=True)
+        session.closed = True
+        owned = tuple(session.utterances.values())
+        for generation in owned:
+            self._revoke(session, generation)
+        results = await asyncio.gather(
+            *(
+                self._retire(session, generation, UtteranceOutcome.CANCELLED)
+                for generation in owned
+            ),
+            return_exceptions=True,
+        )
+        if any(isinstance(result, BaseException) for result in results):
+            raise OpenAIProviderProtocolError("openai_retirement_failed")
+        await self._close_pipeline(session)
+        if session.opened and session.delivery_error is None:
+            async with session.publication_lock:
                 try:
                     await self._publish(
                         session,
@@ -635,18 +620,16 @@ class OpenAIRealtimeProvider:
                                 session_id=session.request.session_id,
                                 direction_id=session.request.direction_id,
                                 event_sequence=session.next_sequence(),
-                                reason=_close_reason(reason),
+                                reason=SessionCloseReason(reason.value),
                             ),
                         ),
                     )
                 except Exception:
-                    pass  # _publish retained the bounded delivery error; resources are drained.
-            for sessions in (self._sessions, self._failed_opens):
-                if sessions.get(session.request.session_id) is session:
-                    sessions.pop(session.request.session_id)
-            return SessionDrainReceipt(
-                session.request.session_id, session.delivery_error
-            )
+                    pass  # The receipt retains failed delivery after resources are drained.
+        for sessions in (self._sessions, self._failed_opens):
+            if sessions.get(session.request.session_id) is session:
+                sessions.pop(session.request.session_id)
+        return SessionDrainReceipt(session.request.session_id, session.delivery_error)
 
     async def shutdown(self) -> None:
         self._closed = True
@@ -660,285 +643,17 @@ class OpenAIRealtimeProvider:
         if any(isinstance(result, BaseException) for result in results):
             raise OpenAIProviderProtocolError("openai_shutdown_failed")
 
-    async def _receive(self, session: _Session, generation: _Generation) -> None:
-        try:
-            while not generation.revoked:
-                async with asyncio.timeout_at(generation.deadline) as deadline:
-                    generation.timeout = deadline
-                    raw = await generation.ws.recv()
-                generation.timeout = None
-                binding = generation.binding
-                event = parse_translation_event(raw)
-                async with session.lock:
-                    if generation.revoked:
-                        return
-                    if event is None:
-                        continue
-                    if isinstance(event, TranslationError):
-                        failure = _wire_failure(event)
-                        session.failed = not failure.retryable
-                        await self._retire(
-                            session,
-                            generation,
-                            UtteranceOutcome.DROPPED,
-                            error=True,
-                            failure=failure,
-                        )
-                        if failure.retryable and binding is not None:
-                            self._start_prefetch(session)
-                        return
-                    elif isinstance(event, InputCommitted):
-                        if (
-                            not generation.input_complete
-                            or generation.input_item_id is not None
-                        ):
-                            raise OpenAIProviderProtocolError(
-                                "input_commit_identity_mismatch"
-                            )
-                        generation.input_item_id = event.item_id
-                    elif (
-                        isinstance(event, TranslationResponse)
-                        and event.type == "response.created"
-                    ):
-                        if (
-                            not generation.input_complete
-                            or generation.response_id is not None
-                            or event.response.status != "in_progress"
-                        ):
-                            raise OpenAIProviderProtocolError(
-                                "response_identity_mismatch"
-                            )
-                        generation.response_id = event.response.id
-                    elif (
-                        isinstance(event, TranslationResponse)
-                        and event.type == "response.done"
-                    ):
-                        if (
-                            not generation.input_complete
-                            or event.response.id != generation.response_id
-                        ):
-                            raise OpenAIProviderProtocolError(
-                                "response_identity_mismatch"
-                            )
-                        if event.response.status != "completed":
-                            failure = None
-                            if (
-                                event.response.status == "failed"
-                                and event.response.status_details
-                            ):
-                                failure = _wire_failure(
-                                    TranslationError.model_validate(
-                                        {
-                                            "type": "error",
-                                            "event_id": event.event_id,
-                                            "error": event.response.status_details.get(
-                                                "error"
-                                            ),
-                                        }
-                                    )
-                                )
-                                session.failed = not failure.retryable
-                            await self._retire(
-                                session,
-                                generation,
-                                UtteranceOutcome.CANCELLED
-                                if event.response.status == "cancelled"
-                                else UtteranceOutcome.DROPPED,
-                                error=event.response.status != "cancelled",
-                                failure=failure,
-                            )
-                            if event.response.status == "cancelled" or (
-                                failure is not None and failure.retryable
-                            ):
-                                self._start_prefetch(session)
-                            return
-                        await self._flush_audio(session, generation)
-                        await self._retire(
-                            session,
-                            generation,
-                            (
-                                UtteranceOutcome.COMPLETED
-                                if generation.last_audio_sequence is not None
-                                else UtteranceOutcome.DROPPED
-                            ),
-                        )
-                        if generation.last_audio_sequence is not None:
-                            self._start_prefetch(session)
-                        return
-                    elif isinstance(event, TranslationDelta) and binding is not None:
-                        if (
-                            event.response_id != generation.response_id
-                            or generation.response_id is None
-                        ):
-                            raise OpenAIProviderProtocolError(
-                                "response_identity_mismatch"
-                            )
-                        if (
-                            event.output_index != 0
-                            or event.content_index != 0
-                            or generation.output_item_id not in (None, event.item_id)
-                        ):
-                            raise OpenAIProviderProtocolError(
-                                "response_item_identity_mismatch"
-                            )
-                        generation.output_item_id = event.item_id
-                        await self._map_delta(session, generation, event.model_dump())
-                    elif (
-                        isinstance(event, (SourceTranscript, SourceTranscriptCompleted))
-                        and binding is not None
-                    ):
-                        if not generation.source_transcript:
-                            raise OpenAIProviderProtocolError(
-                                "source_transcription_not_configured"
-                            )
-                        if (
-                            event.item_id != generation.input_item_id
-                            or generation.input_item_id is None
-                            or event.content_index != 0
-                        ):
-                            raise OpenAIProviderProtocolError(
-                                "input_commit_identity_mismatch"
-                            )
-                        payload = event.model_dump()
-                        if (
-                            isinstance(event, SourceTranscriptCompleted)
-                            and generation.source_transcript_seen
-                        ):
-                            payload["transcript"] = ""
-                        await self._map_delta(session, generation, payload)
-                        generation.source_transcript_seen = True
-                    else:
-                        raise OpenAIProviderProtocolError(
-                            "unexpected_translation_event"
-                        )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            async with session.lock:
-                if generation.revoked:
-                    session.failed = True
-                else:
-                    try:
-                        await self._retire(
-                            session, generation, UtteranceOutcome.DROPPED, error=True
-                        )
-                    except Exception:
-                        session.failed = True
-
-    async def _map_delta(
-        self, session: _Session, generation: _Generation, event: dict
-    ) -> None:
-        binding = generation.binding
-        assert binding is not None
-        mapped = generation.adapter.map_realtime_events(
-            session.request.model_copy(
-                update={"debug_text_enabled": session.debug_text_enabled}
-            ),
-            event,
-            stream_id=binding.stream_id,
-            utterance_id=binding.utterance_id,
-            now_ns=self._now_ns(),
-        )
-        converted = []
-        for item in mapped:
-            updates: dict[str, Any] = {"event_sequence": session.next_sequence()}
-            if isinstance(item, ProviderAudioDelta):
-                target = session.request.requested_output_format
-                updates.update(
-                    sample_rate_hz=target.sample_rate_hz,
-                    pcm=self._resample_pcm(item.pcm, 24_000, target.sample_rate_hz),
-                )
-                generation.last_audio_sequence = item.sequence
-            converted.append(item.model_copy(update=updates))
-        if converted:
-            await self._publish(session, tuple(converted))
-
-    async def _flush_audio(self, session: _Session, generation: _Generation) -> None:
-        if generation.binding is None:
-            return
-        key = (session.request.session_id, generation.binding.utterance_id)
-        remainder = generation.adapter._audio_remainders.get(key, b"")
-        if len(remainder) % 2:
-            raise OpenAIProviderProtocolError("incomplete_pcm_sample")
-        if remainder:
-            await self._map_delta(
-                session,
-                generation,
-                {
-                    "type": "response.output_audio.delta",
-                    "delta": build_input_audio_append_event(
-                        bytes(960 - len(remainder))
-                    )["audio"],
-                },
-            )
-
-    async def _retire(
-        self,
-        session: _Session,
-        generation: _Generation,
-        outcome: UtteranceOutcome | None = None,
-        *,
-        error: bool = False,
-        failure: OpenAIProviderFailure | None = None,
-    ) -> None:
-        generation.revoked = True
-        binding = generation.binding
-        if binding is not None:
-            session.terminal_ids.add(binding.utterance_id)
-        batch = [self._error(session, generation, failure)] if error else []
-        if outcome is not None and binding is not None:
-            batch.append(
-                ProviderUtteranceFinal(
-                    session_id=session.request.session_id,
-                    direction_id=session.request.direction_id,
-                    stream_id=binding.stream_id,
-                    utterance_id=binding.utterance_id,
-                    event_sequence=session.next_sequence(),
-                    final_audio_sequence=generation.last_audio_sequence,
-                    outcome=outcome,
-                )
-            )
-        try:
-            await finish_cleanup(self._dispose(generation, asyncio.current_task()))
-        finally:
-            generation.adapter.release_session(session.request.session_id)
-            if generation.disposed:
-                if session.generation is generation:
-                    session.generation = None
-                generation.binding = None
-            else:
-                session.failed = True
-            generation.timeout = None
-            generation.receiver = None
-        if batch:
-            await self._publish(session, tuple(batch))
-
-    async def _dispose(
-        self, generation: _Generation, owner: asyncio.Task | None
-    ) -> None:
-        if generation.receiver is not None and generation.receiver is not owner:
-            generation.receiver.cancel()
-            await asyncio.gather(generation.receiver, return_exceptions=True)
-        await self._close_socket(generation.ws)
-        generation.disposed = True
-
     @staticmethod
-    async def _close_socket(ws: WebSocket) -> None:
-        try:
-            # Retired generations cannot wait for the remote closing handshake.
-            ws.transport.abort()
-            async with asyncio.timeout(1.8):
-                await ws.wait_closed()
-        except Exception:
-            raise OpenAIProviderProtocolError("openai_retirement_failed") from None
-
-    @staticmethod
-    async def _publish(session: _Session, batch: tuple[object, ...]) -> None:
+    async def _publish(session, batch, *, on_commit=None):
         committed = False
 
-        def commit() -> None:
+        def commit():
             nonlocal committed
+            if committed:
+                return
             committed = True
+            if on_commit is not None:
+                on_commit()
 
         try:
             async with asyncio.timeout(2):
@@ -947,28 +662,23 @@ class OpenAIRealtimeProvider:
                 raise RuntimeError("provider_publication_not_committed")
         except Exception:
             session.delivery_error = SafeErrorCode.PROVIDER_UNAVAILABLE
+            session.failed = True
             raise
 
     @staticmethod
-    def _error(
-        session: _Session,
-        generation: _Generation | None,
-        failure: OpenAIProviderFailure | None = None,
-    ):
-        binding = generation.binding if generation else None
+    def _error(session, generation, failure):
         return make_provider_error(
             session_id=session.request.session_id,
             direction_id=session.request.direction_id,
-            stream_id=binding.stream_id if binding else None,
-            utterance_id=binding.utterance_id if binding else None,
+            stream_id=generation.binding.stream_id,
+            utterance_id=generation.binding.utterance_id,
             event_sequence=session.next_sequence(),
-            code=failure.code if failure else SafeErrorCode.PROVIDER_UNAVAILABLE,
-            retryable=failure.retryable if failure else True,
+            code=failure.code,
+            retryable=failure.retryable,
         )
 
-    def _health(
-        self, session: _Session, failure: OpenAIProviderFailure | None = None
-    ) -> ProviderHealth:
+    @staticmethod
+    def _health(session, failure=None):
         return ProviderHealth(
             session_id=session.request.session_id,
             direction_id=session.request.direction_id,
@@ -976,15 +686,7 @@ class OpenAIRealtimeProvider:
             provider_id=session.request.provider_id,
             provider_name=OPENAI_PROVIDER_NAME,
             state=ProviderState.UNAVAILABLE if failure else ProviderState.READY,
-            models=(
-                ModelHealth(
-                    kind=ModelKind.SPEECH_TO_SPEECH,
-                    id=self._config.model,
-                    state=ModelState.FAILED if failure else ModelState.READY,
-                    device=ComputeDevice.CLOUD,
-                    safe_error_code=failure.code.value if failure else None,
-                ),
-            ),
+            models=model_health(failure.code if failure else None),
             queues=ProviderQueues(
                 provider_input_buffered_ms=0,
                 provider_output_buffered_ms=0,
@@ -999,7 +701,7 @@ class OpenAIRealtimeProvider:
             else None,
         )
 
-    def _active_session(self, session_id: UUID) -> _Session:
+    def _active_session(self, session_id):
         session = self._sessions.get(session_id)
         if (
             session is None
@@ -1012,7 +714,7 @@ class OpenAIRealtimeProvider:
         return session
 
     @staticmethod
-    def _validate_format(value: PcmFormat) -> None:
+    def _validate_format(value: PcmFormat):
         if (
             value.channels != 1
             or value.sample_format is not SampleFormat.S16LE
@@ -1022,7 +724,7 @@ class OpenAIRealtimeProvider:
             raise OpenAIProviderProtocolError("unsupported_pcm_format")
 
     @staticmethod
-    def _validate_frame(session: _Session, frame: ProviderInputFrame) -> None:
+    def _validate_frame(session, frame):
         expected = session.request.requested_input_format
         if (
             frame.direction_id != session.request.direction_id
@@ -1041,9 +743,8 @@ class OpenAIRealtimeProvider:
             raise OpenAIProviderProtocolError("stream_identity_mismatch")
         if frame.utterance_id in session.terminal_ids:
             raise OpenAIProviderProtocolError("utterance_already_terminal")
-        active = session.generation.binding if session.generation else None
-        if (active is None or active.utterance_id != frame.utterance_id) and (
-            len(session.terminal_ids) + (active is not None)
+        if frame.utterance_id not in session.utterances and (
+            len(session.terminal_ids) + len(session.utterances)
             >= MAX_TERMINAL_UTTERANCES_PER_SESSION
         ):
             raise OpenAIProviderProtocolError("terminal_identity_capacity_exhausted")
@@ -1052,19 +753,3 @@ class OpenAIRealtimeProvider:
             and frame.sequence <= session.last_input_sequence
         ):
             raise OpenAIProviderProtocolError("input_sequence_mismatch")
-
-    @staticmethod
-    def _resample_pcm(pcm: bytes, source_rate: int, target_rate: int) -> bytes:
-        if source_rate == target_rate:
-            return pcm
-        return (
-            soxr.resample(
-                np.frombuffer(pcm, dtype="<i2"), source_rate, target_rate, quality="QQ"
-            )
-            .astype("<i2", copy=False)
-            .tobytes()
-        )
-
-
-def _close_reason(reason: CloseRequestReason) -> SessionCloseReason:
-    return SessionCloseReason(reason.value)
