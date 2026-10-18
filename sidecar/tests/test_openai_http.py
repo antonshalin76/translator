@@ -23,8 +23,10 @@ class Content:
 
 
 class Response:
-    def __init__(self, body=b"", status=200):
+    def __init__(self, body=b"", status=200, *, content_type="audio/pcm"):
         self.status = status
+        self.headers = {} if content_type is None else {"Content-Type": content_type}
+        self.content_type = content_type or "application/octet-stream"
         self.content = Content(
             body if isinstance(body, bytes) else json.dumps(body).encode()
         )
@@ -183,7 +185,9 @@ def test_failures_do_not_retry_redirect_or_expose_response(
 
 
 @pytest.mark.parametrize(
-    "body", [b"", b"\0" * 960, b"\1" * 961, b"\1" * (http.MAX_PCM + 2)]
+    "body",
+    [b"", b"\0" * 960, b"\1" * 961, b"\1" * (http.MAX_PCM + 2)],
+    ids=["empty", "silent", "odd", "over-capacity"],
 )
 def test_invalid_or_excess_speech_fails_and_closes(client, body):
     async def scenario():
@@ -208,6 +212,16 @@ def test_invalid_or_excess_speech_fails_and_closes(client, body):
         {"text": "ok", "model": "other"},
         b"malformed",
         b" " * (http._MAX_JSON + 1),
+    ],
+    ids=[
+        "missing",
+        "list",
+        "empty",
+        "long",
+        "long-blank",
+        "model",
+        "invalid-json",
+        "large-json",
     ],
 )
 def test_invalid_asr_never_reaches_mt(client, reply):
@@ -395,7 +409,17 @@ def test_missing_native_resolver_fails_without_dns_fallback(client, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "mutation", ["model", "finish_reason", "refusal", "content", "choices"]
+    "mutation",
+    [
+        "model",
+        "finish_reason",
+        "refusal",
+        "content",
+        "choices",
+        "null-message",
+        "list-message",
+        "string-message",
+    ],
 )
 def test_mt_rejects_mismatched_model_truncation_refusal_or_empty(client, mutation):
     async def scenario():
@@ -409,14 +433,52 @@ def test_mt_rejects_mismatched_model_truncation_refusal_or_empty(client, mutatio
             reply["choices"] = []
         elif mutation == "finish_reason":
             reply["choices"][0]["finish_reason"] = "length"
+        elif mutation.endswith("-message"):
+            reply["choices"][0]["message"] = {
+                "null-message": None,
+                "list-message": [],
+                "string-message": "invalid",
+            }[mutation]
         else:
             reply["choices"][0]["message"][mutation] = (
                 "refused" if mutation == "refusal" else ""
             )
         response = Response(reply)
         client._client.replies = [response]
-        with pytest.raises(http.OpenAIHttpFailure):
+        with pytest.raises(http.OpenAIHttpFailure) as raised:
             await client.translate("unchanged source", "ru")
+        assert not raised.value.retryable and not raised.value.transport
+        assert response.closed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "content_type", [None, "application/json", "text/plain", "audio/wav", "audio/mpeg"]
+)
+def test_speech_rejects_incompatible_media_before_any_audio(client, content_type):
+    async def scenario():
+        response = Response(b'{"error":"oops"}', content_type=content_type)
+        client._client.replies = [response]
+        received = []
+        with pytest.raises(http.OpenAIHttpFailure) as raised:
+            async for chunk in client.speech("unchanged text", "en"):
+                received.append(chunk)
+        assert not received and response.closed
+        assert not raised.value.retryable and not raised.value.transport
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("content_type", ["audio/pcm", "application/octet-stream"])
+def test_speech_accepts_declared_raw_media(client, content_type):
+    async def scenario():
+        response = Response(b"\1\2" * 480, content_type=content_type)
+        client._client.replies = [response]
+        assert (
+            b"".join([chunk async for chunk in client.speech("fact", "en")])
+            == b"\1\2" * 480
+        )
         assert response.closed
 
     asyncio.run(scenario())

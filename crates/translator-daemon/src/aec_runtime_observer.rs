@@ -969,6 +969,7 @@ impl DuplexRuntimeObserver for AecRuntimeObserver {
             }
             DuplexRuntimeEvent::GenerationRestart { .. } => self.record_generation_restart(),
             DuplexRuntimeEvent::TranscriptFinal { .. }
+            | DuplexRuntimeEvent::InputComplete { .. }
             | DuplexRuntimeEvent::TranslationFinal { .. }
             | DuplexRuntimeEvent::AudioFrame { .. }
             | DuplexRuntimeEvent::FirstAudioExpired { .. }

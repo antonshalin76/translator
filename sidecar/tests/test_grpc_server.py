@@ -2322,6 +2322,118 @@ def test_no_speech_error_serializes_to_stable_proto() -> None:
     assert encoded.utterance_id == str(utterance_id)
 
 
+def test_actual_cloud_grpc_no_speech_emits_native_required_latency_error_final_batch(
+    tmp_path,
+):
+    async def scenario():
+        config = secure_config(tmp_path)
+        pipeline = FakePipeline()
+        pipeline.failure = OpenAIHttpFailure(SafeErrorCode.NO_SPEECH, retryable=False)
+        provider = OpenAIRealtimeProvider(
+            environ={"OPENAI_API_KEY": "synthetic"},
+            pipeline_factory=lambda *_args, **_kwargs: pipeline,
+            now_ns=lambda: 133_000_000,
+        )
+        batches = []
+        reserve = provider.reserve_session
+
+        def observed_reserve(value, publish):
+            async def observed_publish(batch, commit):
+                batches.append(tuple(type(event).__name__ for event in batch))
+                await publish(batch, commit)
+
+            return reserve(value, observed_publish)
+
+        provider.reserve_session = observed_reserve
+        server = ProviderGrpcServer(config, openai_provider=provider)
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"unix://{config.socket_path}")
+        source = InteractiveRequests()
+        identity = uuid4()
+        value = open_request(
+            identity,
+            provider_id=provider_pb2.PROVIDER_ID_OPENAI,
+            voice_engine=provider_pb2.VOICE_ENGINE_OPENAI,
+        )
+        value.open_session.requested_input_format.frame_duration_ms = 20
+        value.open_session.requested_output_format.frame_duration_ms = 20
+        first = frame_request(identity, pcm=bytes(640), capture_monotonic_ns=10_000_000)
+        first.input_frame.frame_duration_ms = 20
+        call = provider_pb2_grpc.ProviderTransportStub(channel).Stream(
+            source, metadata=((AUTH_METADATA_KEY, f"Bearer {TOKEN}"),), timeout=4
+        )
+        try:
+            await source.send(value)
+            assert (await call.read()).HasField("session_opened")
+            assert (await call.read()).HasField("health")
+            await source.send(first)
+            initial = await call.read()
+            assert initial.HasField("latency"), (
+                "NO_SPEECH requires a preceding native ASR latency event"
+            )
+            events = [initial, await call.read(), await call.read()]
+            assert [event.WhichOneof("event") for event in events] == [
+                "latency",
+                "error",
+                "utterance_final",
+            ]
+            latency, error, final = (
+                events[0].latency,
+                events[1].error,
+                events[2].utterance_final,
+            )
+            assert [
+                latency.event_sequence,
+                error.event_sequence,
+                final.event_sequence,
+            ] == [3, 4, 5]
+            assert latency.asr_first_text_ms == latency.asr_final_text_ms == 123
+            assert latency.HasField("asr_first_text_ms") and latency.HasField(
+                "asr_final_text_ms"
+            )
+            assert not latency.HasField("mt_first_text_ms") and not latency.HasField(
+                "tts_first_audio_ms"
+            )
+            assert (
+                latency.utterance_id
+                == error.utterance_id
+                == final.utterance_id
+                == first.input_frame.utterance_id
+            )
+            assert error.code == provider_pb2.SAFE_ERROR_CODE_NO_SPEECH
+            assert final.outcome == provider_pb2.UTTERANCE_OUTCOME_DROPPED
+            assert batches == [
+                (
+                    "ProviderLatency",
+                    "PrivacySafeProviderError",
+                    "ProviderUtteranceFinal",
+                )
+            ]
+            assert not provider._sessions[identity].failed
+            assert [call[0] for call in pipeline.calls] == ["warmup", "asr"]
+            pipeline.failure = None
+            second = frame_request(identity, pcm=bytes(640), sequence=1)
+            second.input_frame.frame_duration_ms = 20
+            await source.send(second)
+            assert (await call.read()).HasField("audio_delta")
+            assert (
+                await call.read()
+            ).utterance_final.outcome == provider_pb2.UTTERANCE_OUTCOME_COMPLETED
+            await source.send(close_request(identity))
+            assert (await call.read()).HasField("session_closed")
+            await source.close()
+            assert await call.read() is grpc.aio.EOF
+            await server.retry_stream_cleanup()
+            assert pipeline.closed and not provider._sessions and not server._streams
+        finally:
+            call.cancel()
+            await source.close()
+            await channel.close()
+            await server.stop()
+
+    run(asyncio.wait_for(scenario(), timeout=5))
+
+
 class RetryHealthEngine(ProviderEngine):
     def health(self, session_id, *, now_ns):
         return (
@@ -3287,6 +3399,103 @@ def test_actual_stream_closure_wakes_blocked_publication_without_queued_dispatch
         ), snapshot
 
     run(asyncio.wait_for(scenario(), timeout=6))
+
+
+def test_actual_grpc_cancel_waiter_revokes_pcm_publisher_before_it_can_commit(tmp_path):
+    class Context:
+        async def abort(self, code, detail):
+            raise AssertionError((code, detail))
+
+    async def scenario():
+        config = secure_config(tmp_path)
+        pipeline = FakePipeline()
+        pipeline.audio_gate = asyncio.Event()
+        provider = OpenAIRealtimeProvider(
+            environ={"OPENAI_API_KEY": "synthetic"},
+            pipeline_factory=lambda *_args, **_kwargs: pipeline,
+        )
+        owner = ProviderGrpcServer(config, openai_provider=provider)
+        source = InteractiveRequests()
+        stream = _ProviderServicer(config, owner).Stream(source.__aiter__(), Context())
+        identity = uuid4()
+        opened = open_request(
+            identity,
+            provider_id=provider_pb2.PROVIDER_ID_OPENAI,
+            voice_engine=provider_pb2.VOICE_ENGINE_OPENAI,
+        )
+        opened.open_session.requested_input_format.frame_duration_ms = 20
+        opened.open_session.requested_output_format.frame_duration_ms = 20
+        value = frame_request(identity, pcm=bytes(640))
+        value.input_frame.frame_duration_ms = 20
+        try:
+            await source.send(opened)
+            assert (await anext(stream)).HasField("session_opened")
+            assert (await anext(stream)).HasField("health")
+            await source.send(value)
+            async with asyncio.timeout(0.5):
+                while not any(call[0] == "tts" for call in pipeline.calls):
+                    await asyncio.sleep(0)
+            session = provider._sessions[identity]
+            generation = session.utterances[UUID(value.input_frame.utterance_id)]
+            drained = inspect.getclosurevars(session.publish).nonlocals["event_drained"]
+            await session.publish(
+                (provider._health(session), provider._health(session)), lambda: None
+            )
+            assert (await anext(stream)).HasField("health")
+            assert not drained.is_set()
+            await source.send(
+                provider_pb2.ProviderRequest(
+                    cancel_utterance=provider_pb2.CancelUtterance(
+                        schema_version="translator.provider.cancel_utterance.v1",
+                        session_id=str(identity),
+                        direction_id=provider_pb2.AUDIO_DIRECTION_MICROPHONE,
+                        utterance_id=value.input_frame.utterance_id,
+                        reason=provider_pb2.CANCEL_REASON_USER_INTERRUPT,
+                    )
+                )
+            )
+            async with asyncio.timeout(0.5):
+                while len(drained._waiters) != 1:
+                    await asyncio.sleep(0)
+            pipeline.audio_gate.set()
+            async with asyncio.timeout(0.5):
+                while len(drained._waiters) != 2:
+                    await asyncio.sleep(0)
+            assert (await anext(stream)).HasField("health")
+            event = await anext(stream)
+            assert event.HasField("utterance_final"), (
+                "revoked PCM committed through the real gRPC publisher"
+            )
+            assert (
+                event.utterance_final.outcome
+                == provider_pb2.UTTERANCE_OUTCOME_CANCELLED
+            )
+            assert not event.utterance_final.HasField("final_audio_sequence")
+            assert generation.task.done() and generation.task.cancelling() == 1
+            assert not session.failed and session.delivery_error is None
+            next_value = frame_request(identity, pcm=bytes(640), sequence=1)
+            next_value.input_frame.frame_duration_ms = 20
+            await source.send(next_value)
+            audio, final = await anext(stream), await anext(stream)
+            assert audio.HasField("audio_delta")
+            assert audio.audio_delta.utterance_id == next_value.input_frame.utterance_id
+            assert (
+                final.utterance_final.outcome
+                == provider_pb2.UTTERANCE_OUTCOME_COMPLETED
+            )
+            await source.send(close_request(identity))
+            assert (await anext(stream)).HasField("session_closed")
+            await source.close()
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+            assert pipeline.closed and not provider._sessions and not owner._streams
+        finally:
+            pipeline.audio_gate.set()
+            await source.close()
+            await stream.aclose()
+            await owner.stop()
+
+    run(asyncio.wait_for(scenario(), timeout=4))
 
 
 @pytest.mark.parametrize(

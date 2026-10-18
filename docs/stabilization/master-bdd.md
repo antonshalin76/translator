@@ -11,10 +11,12 @@
 | Mode | first-audio breach | p95 queue breach | maximum source age |
 | --- | ---: | ---: | ---: |
 | Quality-first | `>3000 ms` | `>500 ms` | `3000 ms` |
+| Quality-first, OpenAI | `>5000 ms` after EOU | `>500 ms` | first playable PCM: `5000 ms` after EOU |
 | Balanced | `>2000 ms` | `>350 ms` | `2000 ms` |
 | Streaming-first | `>1000 ms` | `>250 ms` | `1000 ms` |
 
 - Equality does not breach. External audible latency is an eval measurement, not a segmenter claim.
+- The owner explicitly selected the five-second OpenAI Quality-first response budget on 2026-10-19. Both first-playable admission and adaptive first-audio samples use the EOU anchor for this provider/mode only. Local and other-mode limits, capture cutoffs, queue limits, six-second first-response watchdog, 250-ms cancellation, and Start/Stop deadlines are unchanged. A provider switch clears the old provider's adaptive samples and breach counters; it must not import an unrelated pipeline's latency history.
 - The mandatory local-provider release matrix is all three modes x both audio directions x both language pairs x both required target voices, including every fallback allowed to report operational. Removing or hiding any baseline local core cell blocks release. The release manifest binds a provider-first-frame p99 for every matrix cell. Its processing reserve is that cell's p99 rounded up to a 20-ms frame plus 100 ms; when more than one fallback can be chosen after capture, the reserve uses the conservative maximum across those reachable cells. The forced capture cutoff is `maximum source age - processing reserve`. Failure of a mandatory local cell blocks release; only explicitly optional capabilities such as OpenAI and validated open-speaker AEC may be omitted and documented.
 - Release classification is a separate immutable contract: graph-boundary p95 `<=1000 ms` is `meets_target`, `(1000,1500] ms` is `usable_degraded`, and `>1500 ms` is `fails_usable_limit`.
 - Starting with both directions disabled is invalid. Incoming-only opens no microphone and requires a validated physical sink. Outgoing-only may use the direct physical mic only with headphones; open speakers require matching validated AEC. Simultaneous duplex requires headphones or matching validated AEC. An unsafe path never falls back to a direct physical mic/sink.
@@ -222,6 +224,8 @@ Owner/seam: `translator-core` mode policy projected through typed IPC/status; cr
 Given confirmed speech in any mode, natural silence commits immediately and continuous speech must commit a stable partial no later than the manifest-bound forced capture cutoff defined above, strictly before that mode's maximum source age. Confirmed frame sequences across a forced boundary are contiguous, unique, and assigned exactly once; delayed confirmation may buffer but not lose confirmed speech. Sub-confirmation bursts submit nothing. Natural silence marks `continuation=false`; forced voice marks `continuation=true`. Invalid or oversized environment overrides fail validation or clamp to the active capture cutoff.
 
 The first confirmed frame creates one monotonic source deadline of that frame's capture timestamp plus `3000/2000/1000 ms`. Work is valid at equality and expired strictly after the deadline. Capture, provider-input, provider-output, and playback each recheck the same deadline; expired work is cancelled and no late audio is played. End-of-utterance never resets the deadline. A continuous-speech test spanning at least four forced boundaries in every mode proves each chunk produces audible audio and a terminal event before its own earliest-frame deadline, with the ACC-2 critical meaning preserved across boundaries; frame-accounting alone cannot pass.
+
+The OpenAI Quality-first first-playable response gate has the explicitly authorized separate EOU-based five-second budget above. This does not extend capture, queue residence, cancellation or other-mode budgets, and does not change the independent release latency classification.
 
 Owner/seam: generic audio segmenter accepts typed limits; daemon maps canonical mode policy to those limits; frame-sequence property tests and daemon adapter test.
 

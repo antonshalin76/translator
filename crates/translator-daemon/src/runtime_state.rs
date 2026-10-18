@@ -561,6 +561,11 @@ impl RuntimeStore {
             None
         };
         drop(snapshot);
+        if provider_changed {
+            let mut latency = self.latency.lock().expect("latency mutex poisoned");
+            latency.set_provider(candidate.provider_id);
+            self.update_latency_snapshot(&latency);
+        }
         if let Some(provider_switch) = clear_debug {
             let mut debug = self.debug_text.lock().expect("debug text mutex poisoned");
             if provider_switch {
@@ -831,6 +836,100 @@ mod tests {
     };
 
     use super::{RuntimeEvent, RuntimeStore};
+
+    #[test]
+    fn provider_switch_resets_latency_history_without_changing_selected_modes() {
+        let store = RuntimeStore::default();
+        let direction = super::AudioDirection::Microphone;
+        store.set_latency_policy(super::LatencyPolicyPatch {
+            direction_id: direction,
+            current_mode: super::TranslationMode::Balanced,
+        });
+        for at in 1..=20 {
+            store.record_latency_utterance(
+                direction,
+                at,
+                super::LatencySample {
+                    first_audio_ms: 100,
+                    last_audio_ms: 200,
+                    queue_lag_ms: 100,
+                },
+            );
+        }
+        store.evaluate_latency_epoch(direction, 60_000);
+        assert_eq!(store.snapshot().latency_policy[0].p95_first_audio_ms, 100);
+        for at in 60_001..60_003 {
+            store.record_latency_utterance(
+                direction,
+                at,
+                super::LatencySample {
+                    first_audio_ms: 2_001,
+                    last_audio_ms: 2_101,
+                    queue_lag_ms: 100,
+                },
+            );
+        }
+        store.observe_latency_queue(super::AudioDirection::Speaker, 0, Some(501));
+        store.observe_latency_queue(super::AudioDirection::Speaker, 1_999, Some(501));
+        let cloud = store
+            .provider_candidate(super::ProviderPatch {
+                provider_id: super::ProviderId::Openai,
+                cloud_opt_in: Some(true),
+            })
+            .unwrap();
+        store.commit_control(cloud);
+        assert!(
+            store
+                .record_latency_utterance(
+                    direction,
+                    3,
+                    super::LatencySample {
+                        first_audio_ms: 2_001,
+                        last_audio_ms: 2_101,
+                        queue_lag_ms: 100,
+                    }
+                )
+                .is_none()
+        );
+        assert_eq!(
+            store.snapshot().latency_policy[0].current_mode,
+            super::TranslationMode::Balanced
+        );
+        assert_eq!(store.snapshot().latency_policy[0].p95_first_audio_ms, 0);
+        assert!(
+            store
+                .observe_latency_queue(super::AudioDirection::Speaker, 2_000, Some(501))
+                .is_none()
+        );
+        let same = store.snapshot();
+        store.commit_control(same);
+        assert!(
+            store
+                .record_latency_utterance(
+                    direction,
+                    4,
+                    super::LatencySample {
+                        first_audio_ms: 2_001,
+                        last_audio_ms: 2_101,
+                        queue_lag_ms: 100,
+                    }
+                )
+                .is_none()
+        );
+        assert!(
+            store
+                .record_latency_utterance(
+                    direction,
+                    5,
+                    super::LatencySample {
+                        first_audio_ms: 2_001,
+                        last_audio_ms: 2_101,
+                        queue_lag_ms: 100,
+                    }
+                )
+                .is_some()
+        );
+    }
 
     #[test]
     fn provider_switch_normalizes_voice_engine_without_losing_language_or_gender() {

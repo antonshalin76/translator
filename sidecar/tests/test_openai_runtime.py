@@ -27,6 +27,7 @@ from translator_sidecar.provider_contract import (
     ProviderAudioDelta,
     ProviderId,
     ProviderInputFrame,
+    ProviderLatency,
     ProviderSessionClosed,
     ProviderTranscriptDelta,
     ProviderTranslationDelta,
@@ -1008,13 +1009,36 @@ def test_no_speech_is_utterance_local_and_next_speech_uses_same_session():
             SafeErrorCode.NO_SPEECH, retryable=False
         )
         try:
-            await h.provider.submit_frame(frame(request))
+            h.provider._now_ns = lambda: 133_000_000
+            value = frame(request, final=False).model_copy(
+                update={"capture_monotonic_ns": 10_000_000}
+            )
+            await h.provider.submit_frame(value)
+            await h.provider.submit_frame(
+                value.model_copy(
+                    update={
+                        "sequence": 1,
+                        "capture_monotonic_ns": 30_000_000,
+                        "end_of_utterance": True,
+                    }
+                )
+            )
             await h.settled()
-            assert h.events[0].code is SafeErrorCode.NO_SPEECH
+            assert [type(event) for event in h.events] == [
+                ProviderLatency,
+                PrivacySafeProviderError,
+                ProviderUtteranceFinal,
+            ]
+            assert h.events[0].asr_first_text_ms == h.events[0].asr_final_text_ms == 123
+            assert (
+                h.events[0].mt_first_text_ms is None
+                and h.events[0].tts_first_audio_ms is None
+            )
+            assert h.events[1].code is SafeErrorCode.NO_SPEECH
             assert h.events[-1].outcome is UtteranceOutcome.DROPPED
             assert [call[0] for call in h.pipelines[0].calls] == ["warmup", "asr"]
             h.pipelines[0].failure = None
-            await h.provider.submit_frame(frame(request, sequence=1))
+            await h.provider.submit_frame(frame(request, sequence=2))
             await h.settled()
             assert h.events[-1].outcome is UtteranceOutcome.COMPLETED
             assert len(h.pipelines) == 1

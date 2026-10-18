@@ -872,6 +872,37 @@ def test_bridge_event_stream_timeout_names_direction_and_buffered_events() -> No
         )
 
 
+def test_eou_observation_is_consumed_without_changing_audible_measurement() -> None:
+    direction = BenchmarkDirection.RU_TO_EN
+    lines = [
+        json.dumps(
+            {
+                "schema_version": "translator.task7-bridge.v1",
+                "event": event,
+                "direction": "microphone",
+                "utterance_id": "00000000-0000-0000-0000-000000000001",
+                "monotonic_ns": timestamp,
+            }
+        )
+        for event, timestamp in (
+            ("speech_started", 10),
+            ("input_complete", 20),
+            ("audio_frame", 30),
+            ("utterance_terminal", 40),
+        )
+    ]
+    measurement = object.__new__(LivePipelineMeasurement)
+    measurement._events = BridgeEventStream(lines)
+    measurement._timeout_s = 1
+    measurement._monitors = {
+        direction: SimpleNamespace(wait_onset=lambda *args, **kwargs: 35)
+    }
+    observed = measurement._collect_direction(direction, 1, 1, 0)
+    assert not observed.dropped and observed.first_audio_ns == 30
+    assert observed.first_audible_ns == 35
+    assert not measurement._events._events[direction]
+
+
 def test_bridge_event_parses_only_typed_safe_error_and_terminal_outcome() -> None:
     error = BridgeEvent.parse(
         json.dumps(

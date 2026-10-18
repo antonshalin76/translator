@@ -12,6 +12,16 @@ const NS_PER_MS: u64 = 1_000_000;
 pub const MAX_ACTIVE_UTTERANCES: usize = 64;
 pub const MAX_TERMINAL_UTTERANCES: usize = 4096;
 
+pub const fn first_audio_max_age_ms(provider: ProviderId, mode: TranslationMode) -> u32 {
+    match (provider, mode) {
+        (ProviderId::Openai, TranslationMode::QualityFirst) => 5_000,
+        (_, TranslationMode::QualityFirst) => 3_000,
+        (_, TranslationMode::Balanced) => 2_000,
+        (_, TranslationMode::StreamingFirst) => 1_000,
+        (_, TranslationMode::Unspecified) => 0,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderSessionContract {
     pub session_id: Uuid,
@@ -341,7 +351,11 @@ impl ProviderEventValidator {
                     .contains_key(&utterance_id);
                 let capture_ns = self.input_complete_ns[&utterance_id];
                 if is_first_playable
-                    && now_ns.saturating_sub(capture_ns) > self.max_age_ms() * NS_PER_MS
+                    && now_ns.saturating_sub(capture_ns)
+                        > u64::from(first_audio_max_age_ms(
+                            self.contract.provider_id,
+                            self.contract.mode,
+                        )) * NS_PER_MS
                 {
                     return Err(ProviderValidationError::ExpiredAudio);
                 }
@@ -605,15 +619,6 @@ impl ProviderEventValidator {
         self.last_playable_audio_sequence.remove(&utterance_id);
         self.cancel_pending.remove(&utterance_id);
         Ok(())
-    }
-
-    fn max_age_ms(&self) -> u64 {
-        match self.contract.mode {
-            TranslationMode::QualityFirst => 3000,
-            TranslationMode::Balanced => 2000,
-            TranslationMode::StreamingFirst => 1000,
-            TranslationMode::Unspecified => 0,
-        }
     }
 }
 

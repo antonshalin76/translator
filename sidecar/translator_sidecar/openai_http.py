@@ -321,13 +321,15 @@ class OpenAIHttpPipeline:
             reply = await self._json(response)
             try:
                 choice = reply["choices"][0]
+                message = choice["message"]
                 if (
                     reply["model"] not in (MT_MODEL, "gpt-4.1-2025-04-14")
                     or choice["finish_reason"] != "stop"
-                    or choice["message"].get("refusal")
+                    or not isinstance(message, dict)
+                    or message.get("refusal")
                 ):
                     raise OpenAIHttpFailure()
-                return _text(choice["message"]["content"])
+                return _text(message["content"])
             except (KeyError, TypeError, IndexError):
                 raise OpenAIHttpFailure() from None
 
@@ -348,6 +350,11 @@ class OpenAIHttpPipeline:
                 + ". Pronounce every number and name exactly as written. Do not add or omit words.",
             },
         ) as response:
+            if "Content-Type" not in response.headers or response.content_type not in (
+                "audio/pcm",
+                "application/octet-stream",
+            ):
+                raise OpenAIHttpFailure()
             size = 0
             audible = False
             async for chunk in response.content.iter_chunked(960):

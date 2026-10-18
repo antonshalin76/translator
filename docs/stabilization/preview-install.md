@@ -181,6 +181,10 @@ redirects and binding failures fail closed; the service never changes VPN,
 routes, DNS or offload settings. Cloud quality and sustained operation remain
 unqualified until the recovery plan's separate gates pass. Existing installed
 archives retain their own source identity; these instructions do not update them.
+The authorized OpenAI Quality-first budget is up to five seconds after the end
+of each phrase for the first playable audio. Other providers/modes, cancellation,
+input limits and Start/Stop deadlines are unchanged; this is not permission for
+unbounded waiting or network retries.
 
 ## Stop and rollback
 

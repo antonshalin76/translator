@@ -1,4 +1,6 @@
-use translator_core::{AudioDirection, LatencyPolicyState, TranslationMode};
+use translator_core::{AudioDirection, LatencyPolicyState, ProviderId, TranslationMode};
+
+use crate::direction_session::{provider_id, provider_mode};
 
 const EPOCH_MS: u64 = 60_000;
 const MINIMUM_SAMPLES: usize = 20;
@@ -53,6 +55,7 @@ struct TimedSample {
 
 #[derive(Debug)]
 struct DirectionPolicy {
+    provider: ProviderId,
     state: LatencyPolicyState,
     samples: Vec<TimedSample>,
     last_evaluated_end_ms: u64,
@@ -68,6 +71,7 @@ struct DirectionPolicy {
 impl DirectionPolicy {
     fn new(direction: AudioDirection) -> Self {
         Self {
+            provider: ProviderId::Local,
             state: LatencyPolicyState::new(
                 direction,
                 TranslationMode::QualityFirst,
@@ -102,7 +106,7 @@ impl DirectionPolicy {
             self.consecutive_utterance_breaches = 0;
             return None;
         }
-        if sample.first_audio_ms > thresholds(self.state.current_mode).0 {
+        if sample.first_audio_ms > thresholds(self.provider, self.state.current_mode).0 {
             self.consecutive_utterance_breaches += 1;
         } else {
             self.consecutive_utterance_breaches = 0;
@@ -169,7 +173,7 @@ impl DirectionPolicy {
             nearest_rank_p95(epoch.iter().map(|sample| sample.last_audio_ms));
         self.state.p95_queue_lag_ms =
             nearest_rank_p95(epoch.iter().map(|sample| sample.queue_lag_ms));
-        let (first_limit, queue_limit) = thresholds(self.state.current_mode);
+        let (first_limit, queue_limit) = thresholds(self.provider, self.state.current_mode);
         let breached = self.state.p95_first_audio_ms > first_limit
             || self.state.p95_queue_lag_ms > queue_limit;
 
@@ -288,6 +292,18 @@ impl Default for DuplexLatencyPolicy {
 }
 
 impl DuplexLatencyPolicy {
+    pub(crate) fn set_provider(&mut self, provider: ProviderId) {
+        for direction in [AudioDirection::Microphone, AudioDirection::Speaker] {
+            let policy = self.policy_mut(direction);
+            if policy.provider != provider {
+                let mode = policy.state.current_mode;
+                *policy = DirectionPolicy::new(direction);
+                policy.provider = provider;
+                policy.state.current_mode = mode;
+            }
+        }
+    }
+
     pub fn record_utterance(
         &mut self,
         direction: AudioDirection,
@@ -346,12 +362,16 @@ fn nearest_rank_p95(values: impl Iterator<Item = u32>) -> u32 {
     values[rank.saturating_sub(1)]
 }
 
-const fn thresholds(mode: TranslationMode) -> (u32, u32) {
-    match mode {
-        TranslationMode::QualityFirst => (3_000, 500),
-        TranslationMode::Balanced => (2_000, 350),
-        TranslationMode::StreamingFirst => (1_000, 250),
-    }
+const fn thresholds(provider: ProviderId, mode: TranslationMode) -> (u32, u32) {
+    let queue = match mode {
+        TranslationMode::QualityFirst => 500,
+        TranslationMode::Balanced => 350,
+        TranslationMode::StreamingFirst => 250,
+    };
+    (
+        translator_ipc::first_audio_max_age_ms(provider_id(provider), provider_mode(mode)),
+        queue,
+    )
 }
 
 const fn next_degraded_mode(mode: TranslationMode) -> Option<TranslationMode> {
@@ -367,5 +387,70 @@ const fn next_recovered_mode(mode: TranslationMode) -> Option<TranslationMode> {
         TranslationMode::QualityFirst => None,
         TranslationMode::Balanced => Some(TranslationMode::QualityFirst),
         TranslationMode::StreamingFirst => Some(TranslationMode::Balanced),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::{prelude::*, test_runner::RngSeed};
+
+    #[test]
+    fn cloud_quality_four_seconds_do_not_trip_either_hysteresis() {
+        let mut policies = DuplexLatencyPolicy::default();
+        policies.set_provider(ProviderId::Openai);
+        for epoch in 0..2 {
+            for index in 0..20 {
+                assert!(
+                    policies
+                        .record_utterance(
+                            AudioDirection::Microphone,
+                            epoch * 60_000 + index * 100,
+                            LatencySample {
+                                first_audio_ms: 4_000,
+                                last_audio_ms: 4_100,
+                                queue_lag_ms: 100,
+                            }
+                        )
+                        .is_none()
+                );
+            }
+            assert!(
+                policies
+                    .evaluate_epoch(AudioDirection::Microphone, (epoch + 1) * 60_000)
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            policies
+                .state(AudioDirection::Microphone)
+                .p95_first_audio_ms,
+            4_000
+        );
+        assert_eq!(
+            policies.state(AudioDirection::Microphone).current_mode,
+            TranslationMode::QualityFirst
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 100, max_shrink_iters: 512, rng_seed: RngSeed::Fixed(0x2026_1019),
+            ..ProptestConfig::default()
+        })]
+        #[test]
+        fn consecutive_adaptation_obeys_provider_scoped_age_budget(cloud in any::<bool>(), mode_index in 0_u8..3, first_audio_ms in 0_u32..=7_000) {
+            let provider = if cloud { ProviderId::Openai } else { ProviderId::Local };
+            let mode = [TranslationMode::QualityFirst, TranslationMode::Balanced, TranslationMode::StreamingFirst][usize::from(mode_index)];
+            let mut policies = DuplexLatencyPolicy::default();
+            policies.set_provider(provider);
+            policies.force_mode(AudioDirection::Microphone, 0, mode);
+            let limit = match (cloud, mode_index) { (true, 0) => 5_000, (false, 0) => 3_000, (_, 1) => 2_000, _ => 1_000 };
+            for at_ms in 1..=3 {
+                let transition = policies.record_utterance(AudioDirection::Microphone, at_ms, LatencySample { first_audio_ms, last_audio_ms: first_audio_ms + 100, queue_lag_ms: 100 });
+                prop_assert_eq!(transition.is_some(), at_ms == 3 && mode_index < 2 && first_audio_ms > limit);
+            }
+            prop_assert_eq!(policies.state(AudioDirection::Speaker).current_mode, TranslationMode::QualityFirst);
+        }
     }
 }

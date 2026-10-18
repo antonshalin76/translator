@@ -33,6 +33,7 @@ from .provider_contract import (
     ProviderCapabilities,
     ProviderHealth,
     ProviderInputFrame,
+    ProviderLatency,
     ProviderQueues,
     ProviderSessionClosed,
     ProviderSessionOpened,
@@ -109,6 +110,7 @@ class _Binding:
 @dataclass(slots=True)
 class _Generation:
     binding: _Binding
+    capture_monotonic_ns: int
     pcm: bytearray = field(default_factory=bytearray)
     task: asyncio.Task[None] | None = None
     retirement: asyncio.Task[None] | None = None
@@ -120,6 +122,7 @@ class _Generation:
     deadline: float | None = None
     output_deadline: float | None = None
     timeout: asyncio.Timeout | None = None
+    asr_elapsed_ms: int | None = None
 
 
 @dataclass(slots=True)
@@ -294,7 +297,10 @@ class OpenAIRealtimeProvider:
                 raise OpenAIProviderProtocolError("input_utterance_mismatch")
             generation = session.utterances.get(frame.utterance_id)
             if generation is None:
-                generation = _Generation(_Binding(frame.stream_id, frame.utterance_id))
+                generation = _Generation(
+                    _Binding(frame.stream_id, frame.utterance_id),
+                    frame.capture_monotonic_ns,
+                )
                 session.utterances[frame.utterance_id] = generation
                 session.collecting_id = frame.utterance_id
             if generation.revoked:
@@ -408,6 +414,10 @@ class OpenAIRealtimeProvider:
             if generation.revoked:
                 return
             failure = _failure(error)
+            if failure.code is SafeErrorCode.NO_SPEECH:
+                generation.asr_elapsed_ms = max(
+                    0, (self._now_ns() - generation.capture_monotonic_ns) // 1_000_000
+                )
             session.failed = session.failed or (
                 not failure.retryable and failure.code is not SafeErrorCode.NO_SPEECH
             )
@@ -509,7 +519,15 @@ class OpenAIRealtimeProvider:
 
     @staticmethod
     def _revoke(session, generation):
-        generation.revoked = True
+        if not generation.revoked:
+            generation.revoked = True
+            task = generation.task
+            if (
+                task is not None
+                and task is not asyncio.current_task()
+                and not task.done()
+            ):
+                task.cancel()
         session.terminal_ids.add(generation.binding.utterance_id)
         generation.pcm.clear()
         if session.collecting_id == generation.binding.utterance_id:
@@ -543,7 +561,6 @@ class OpenAIRealtimeProvider:
     async def _dispose_generation(self, session, generation, owner, outcome, failure):
         task = generation.task
         if task is not None and task is not owner and not task.done():
-            task.cancel()
             done, _ = await asyncio.wait((task,), timeout=1.8)
             if not done:
                 session.failed = True
@@ -551,6 +568,19 @@ class OpenAIRealtimeProvider:
         async with session.publication_lock:
             if not generation.finalized:
                 batch = []
+                if failure and failure.code is SafeErrorCode.NO_SPEECH:
+                    batch.append(
+                        ProviderLatency(
+                            session_id=session.request.session_id,
+                            direction_id=session.request.direction_id,
+                            stream_id=generation.binding.stream_id,
+                            utterance_id=generation.binding.utterance_id,
+                            event_sequence=session.next_sequence(),
+                            asr_first_text_ms=generation.asr_elapsed_ms,
+                            asr_final_text_ms=generation.asr_elapsed_ms,
+                            provider_total_ms=generation.asr_elapsed_ms,
+                        )
+                    )
                 if failure:
                     batch.append(self._error(session, generation, failure))
                 batch.append(

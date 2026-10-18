@@ -1031,6 +1031,7 @@ class LivePipelineMeasurement:
         terminal = False
         dropped = False
         event_names = {
+            "input_complete",
             "audio_frame",
             "asr_final",
             "first_audio_expired",

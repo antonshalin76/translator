@@ -186,6 +186,12 @@ pub enum DuplexRuntimeEvent {
         #[serde(skip)]
         capture_monotonic_ns: u64,
     },
+    InputComplete {
+        direction: AudioDirection,
+        utterance_id: uuid::Uuid,
+        #[serde(skip)]
+        capture_monotonic_ns: u64,
+    },
     #[serde(rename = "asr_final")]
     TranscriptFinal {
         direction: AudioDirection,
@@ -297,6 +303,10 @@ impl Task7BridgeEvent {
     pub fn from_runtime(event: DuplexRuntimeEvent) -> Self {
         let timestamp = match event {
             DuplexRuntimeEvent::SpeechStarted {
+                capture_monotonic_ns,
+                ..
+            }
+            | DuplexRuntimeEvent::InputComplete {
                 capture_monotonic_ns,
                 ..
             } => capture_monotonic_ns,
@@ -467,6 +477,8 @@ impl ProviderEffectContext {
 #[derive(Debug, Default)]
 struct ObservedUtterance {
     capture_monotonic_ns: u64,
+    input_complete_monotonic_ns: Option<u64>,
+    quality_cloud: bool,
     first_audio_monotonic_ns: Option<u64>,
     last_audio_monotonic_ns: Option<u64>,
     max_queue_lag_ms: u32,
@@ -514,9 +526,28 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
                     key,
                     ObservedUtterance {
                         capture_monotonic_ns,
+                        quality_cloud: {
+                            let snapshot = self.store.snapshot();
+                            snapshot.provider_id == translator_core::ProviderId::Openai
+                                && snapshot.latency_policy.iter().any(|policy| {
+                                    policy.direction_id == direction
+                                        && policy.current_mode == TranslationMode::QualityFirst
+                                })
+                        },
                         ..ObservedUtterance::default()
                     },
                 );
+            }
+            DuplexRuntimeEvent::InputComplete {
+                direction,
+                utterance_id,
+                capture_monotonic_ns,
+            } => {
+                if let Some(utterance) = utterances.get_mut(&(direction, utterance_id)) {
+                    utterance
+                        .input_complete_monotonic_ns
+                        .get_or_insert(capture_monotonic_ns);
+                }
             }
             DuplexRuntimeEvent::AudioFrame {
                 direction,
@@ -561,7 +592,15 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
                 ) else {
                     return;
                 };
-                let first_audio_ms = duration_ms(utterance.capture_monotonic_ns, first);
+                let anchor = if utterance.quality_cloud {
+                    let Some(input_complete) = utterance.input_complete_monotonic_ns else {
+                        return;
+                    };
+                    input_complete
+                } else {
+                    utterance.capture_monotonic_ns
+                };
+                let first_audio_ms = duration_ms(anchor, first);
                 let last_audio_ms = duration_ms(utterance.capture_monotonic_ns, last);
                 self.store.record_latency_utterance(
                     direction,
@@ -3656,18 +3695,29 @@ fn observe_capture_event(
     event: &CaptureEvent,
     observer: &dyn DuplexRuntimeObserver,
 ) {
-    if let CaptureEvent::SpeechStarted {
-        utterance_id,
-        capture_monotonic_ns,
-        ..
-    } = event
-    {
-        observer.observe(DuplexRuntimeEvent::SpeechStarted {
+    let observed = match event {
+        CaptureEvent::SpeechStarted {
+            utterance_id,
+            capture_monotonic_ns,
+            ..
+        } => DuplexRuntimeEvent::SpeechStarted {
             direction,
             utterance_id: *utterance_id,
             capture_monotonic_ns: *capture_monotonic_ns,
-        });
-    }
+        },
+        CaptureEvent::Frame {
+            utterance_id,
+            frame,
+            end_of_utterance: true,
+            ..
+        } => DuplexRuntimeEvent::InputComplete {
+            direction,
+            utterance_id: *utterance_id,
+            capture_monotonic_ns: frame.capture_monotonic_ns(),
+        },
+        _ => return,
+    };
+    observer.observe(observed);
 }
 
 fn observe_latency_effect(
@@ -5448,9 +5498,10 @@ pub(crate) mod tests {
     fn private_live_duplex_progress() {
         use crate::AudioMixController;
         let _ = tracing_subscriber::fmt().with_ansi(false).try_init();
-        struct Progress(Mutex<([u64; 2], [u64; 2], u64)>);
+        struct Progress(Mutex<([u64; 2], [u64; 2], u64)>, RuntimeLatencyObserver);
         impl DuplexRuntimeObserver for Progress {
             fn observe(&self, event: DuplexRuntimeEvent) {
+                self.1.observe(event);
                 let mut progress = self.0.lock().unwrap();
                 let index = |direction| usize::from(direction == AudioDirection::Speaker);
                 match event {
@@ -5467,6 +5518,14 @@ pub(crate) mod tests {
                     | DuplexRuntimeEvent::FirstAudioExpired { .. } => progress.2 += 1,
                     _ => {}
                 }
+            }
+
+            fn requested_mode(&self, direction: AudioDirection) -> Option<TranslationMode> {
+                self.1.requested_mode(direction)
+            }
+
+            fn reset_direction(&self, direction: AudioDirection) {
+                self.1.reset_direction(direction);
             }
         }
         let directory =
@@ -5512,6 +5571,8 @@ pub(crate) mod tests {
                 VoiceEngine::Openai
             };
         }
+        let latency_store = RuntimeStore::default();
+        latency_store.commit_control(snapshot.clone());
         let launch = test_launch(
             snapshot,
             TestAudioTargets {
@@ -5527,7 +5588,10 @@ pub(crate) mod tests {
             directory.join("provider.sock"),
         )
         .unwrap();
-        let progress = Arc::new(Progress(Mutex::new(([0; 2], [0; 2], 0))));
+        let progress = Arc::new(Progress(
+            Mutex::new(([0; 2], [0; 2], 0)),
+            RuntimeLatencyObserver::new(latency_store.clone()),
+        ));
         let mix = Arc::new(crate::AudioMixApplication::new(
             translator_audio::SystemCommandRunner,
         ));
@@ -5557,7 +5621,7 @@ pub(crate) mod tests {
             let state = *progress.0.lock().unwrap();
             println!(
                 "LIVE_PROGRESS {}",
-                serde_json::json!({"elapsed_ms": began.elapsed().as_millis(), "completed":state.0, "played_frames":state.1, "faults":state.2})
+                serde_json::json!({"elapsed_ms": began.elapsed().as_millis(), "completed":state.0, "played_frames":state.1, "faults":state.2, "latency_policy": latency_store.snapshot().latency_policy})
             );
             for index in 0..2 {
                 if state.0[index] > previous[index] && state.1[index] > previous_written[index] {
@@ -8584,6 +8648,97 @@ pub(crate) mod tests {
 
         assert_eq!(
             observer.requested_mode(AudioDirection::Speaker),
+            Some(TranslationMode::Balanced)
+        );
+    }
+
+    #[test]
+    fn cloud_quality_latency_uses_eou_and_accepts_four_second_response_after_long_speech() {
+        let store = RuntimeStore::default();
+        let cloud = store
+            .provider_candidate(crate::ProviderPatch {
+                provider_id: ProviderId::Openai,
+                cloud_opt_in: Some(true),
+            })
+            .unwrap();
+        store.commit_control(cloud);
+        let observer = RuntimeLatencyObserver::new(store.clone());
+        for index in 0..20 {
+            let utterance_id = uuid::Uuid::new_v4();
+            let start = (index + 1) * 1_000_000_000;
+            let eou = start + 10_000_000_000;
+            observer.observe(DuplexRuntimeEvent::SpeechStarted {
+                direction: AudioDirection::Microphone,
+                utterance_id,
+                capture_monotonic_ns: start,
+            });
+            observe_capture_event(
+                AudioDirection::Microphone,
+                &CaptureEvent::Frame {
+                    stream_id: uuid::Uuid::nil(),
+                    utterance_id,
+                    frame: aec_test_frame(index, eou),
+                    end_of_utterance: true,
+                },
+                &observer,
+            );
+            {
+                let utterances = observer.utterances.lock().unwrap();
+                let observed = &utterances[&(AudioDirection::Microphone, utterance_id)];
+                assert_eq!(observed.capture_monotonic_ns, start);
+                assert_eq!(observed.input_complete_monotonic_ns, Some(eou));
+            }
+            observer.observe(DuplexRuntimeEvent::AudioFrame {
+                direction: AudioDirection::Microphone,
+                utterance_id,
+                sequence: 0,
+                provider_monotonic_ns: eou + 4_000_000_000,
+                observed_monotonic_ns: eou + 4_000_000_000,
+                queue_lag_ms: 20,
+            });
+            observer.observe(DuplexRuntimeEvent::UtteranceTerminal {
+                direction: AudioDirection::Microphone,
+                utterance_id,
+            });
+        }
+        assert_eq!(
+            observer.requested_mode(AudioDirection::Microphone),
+            Some(TranslationMode::QualityFirst)
+        );
+        store.evaluate_latency_epoch(AudioDirection::Microphone, 60_000);
+        let snapshot = store.snapshot();
+        let policy = snapshot
+            .latency_policy
+            .iter()
+            .find(|policy| policy.direction_id == AudioDirection::Microphone)
+            .unwrap();
+        assert_eq!(policy.p95_first_audio_ms, 4_000);
+        assert_eq!(policy.p95_last_audio_ms, 14_000);
+        for index in 3..6 {
+            let utterance_id = uuid::Uuid::new_v4();
+            let start = (index * 20 + 1) * 1_000_000_000;
+            observer.observe(DuplexRuntimeEvent::SpeechStarted {
+                direction: AudioDirection::Microphone,
+                utterance_id,
+                capture_monotonic_ns: start,
+            });
+            observer.observe(DuplexRuntimeEvent::InputComplete {
+                direction: AudioDirection::Microphone,
+                utterance_id,
+                capture_monotonic_ns: start + 10_000_000_000,
+            });
+            observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
+                direction: AudioDirection::Microphone,
+                utterance_id,
+                observed_monotonic_ns: start + 15_001_000_000,
+            });
+            observer.observe(DuplexRuntimeEvent::UtteranceTerminal {
+                direction: AudioDirection::Microphone,
+                utterance_id,
+            });
+        }
+        assert_eq!(
+            observer.requested_mode(AudioDirection::Microphone),
             Some(TranslationMode::Balanced)
         );
     }

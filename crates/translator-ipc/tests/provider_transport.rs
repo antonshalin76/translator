@@ -751,32 +751,47 @@ fn validator_enforces_debug_privacy_and_static_error_messages() {
 
 #[test]
 fn validator_enforces_mode_age_at_exact_boundary() {
-    for (mode, deadline_ms) in [
-        (TranslationMode::QualityFirst, 3000_u64),
-        (TranslationMode::Balanced, 2000),
-        (TranslationMode::StreamingFirst, 1000),
+    for (provider, mode, deadline_ms) in [
+        (ProviderId::Local, TranslationMode::QualityFirst, 3000_u64),
+        (ProviderId::Openai, TranslationMode::QualityFirst, 5000),
+        (ProviderId::Local, TranslationMode::Balanced, 2000),
+        (ProviderId::Openai, TranslationMode::Balanced, 2000),
+        (ProviderId::Local, TranslationMode::StreamingFirst, 1000),
+        (ProviderId::Openai, TranslationMode::StreamingFirst, 1000),
     ] {
         let session_id = Uuid::new_v4();
         let accepted_id = Uuid::new_v4();
-        let mut accepted = ProviderEventValidator::new(contract(session_id, mode, false));
-        accepted.validate(&opened(session_id, 1), 0).unwrap();
+        let mut configuration = contract(session_id, mode, false);
+        configuration.provider_id = provider;
+        let mut opening = opened(session_id, 1);
+        if let Some(provider_event::Event::SessionOpened(value)) = opening.event.as_mut() {
+            value.capabilities.as_mut().unwrap().cloud_egress = provider == ProviderId::Openai;
+        }
+        let mut accepted = ProviderEventValidator::new(configuration.clone());
+        accepted.validate(&opening, 0).unwrap();
         accepted.record_input(accepted_id, 0).unwrap();
+        accepted
+            .record_end_of_utterance(accepted_id, 12_000_000_000)
+            .unwrap();
         accepted
             .validate(
                 &audio(session_id, accepted_id, 2, 0),
-                deadline_ms * 1_000_000,
+                12_000_000_000 + deadline_ms * 1_000_000,
             )
             .unwrap();
 
         let expired_id = Uuid::new_v4();
-        let mut expired = ProviderEventValidator::new(contract(session_id, mode, false));
-        expired.validate(&opened(session_id, 1), 0).unwrap();
+        let mut expired = ProviderEventValidator::new(configuration);
+        expired.validate(&opening, 0).unwrap();
         expired.record_input(expired_id, 0).unwrap();
+        expired
+            .record_end_of_utterance(expired_id, 12_000_000_000)
+            .unwrap();
         assert_eq!(
             expired
                 .validate(
                     &audio(session_id, expired_id, 2, 0),
-                    deadline_ms * 1_000_000 + 1,
+                    12_000_000_000 + deadline_ms * 1_000_000 + 1,
                 )
                 .unwrap_err(),
             ProviderValidationError::ExpiredAudio
@@ -786,7 +801,7 @@ fn validator_enforces_mode_age_at_exact_boundary() {
             value.outcome = UtteranceOutcome::Dropped.into();
         }
         expired
-            .validate(&dropped, deadline_ms * 1_000_000 + 1)
+            .validate(&dropped, 12_000_000_000 + deadline_ms * 1_000_000 + 1)
             .unwrap();
     }
 }

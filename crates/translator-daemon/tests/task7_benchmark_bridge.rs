@@ -53,6 +53,14 @@ fn runtime_wire_contract(event: DuplexRuntimeEvent) -> (Value, Option<u64>) {
             json!({"event":"speech_started", "direction":direction_name(direction), "utterance_id":utterance_id.to_string()}),
             Some(capture_monotonic_ns),
         ),
+        DuplexRuntimeEvent::InputComplete {
+            direction,
+            utterance_id,
+            capture_monotonic_ns,
+        } => (
+            json!({"event":"input_complete", "direction":direction_name(direction), "utterance_id":utterance_id.to_string()}),
+            Some(capture_monotonic_ns),
+        ),
         DuplexRuntimeEvent::TranscriptFinal {
             direction,
             utterance_id,
@@ -197,6 +205,11 @@ fn all_runtime_cases() -> Vec<DuplexRuntimeEvent> {
                 utterance_id: id,
                 capture_monotonic_ns: 101,
             },
+            DuplexRuntimeEvent::InputComplete {
+                direction,
+                utterance_id: id,
+                capture_monotonic_ns: 102,
+            },
             DuplexRuntimeEvent::TranscriptFinal {
                 direction,
                 utterance_id: id,
@@ -278,7 +291,7 @@ async fn complete_bridge_wire_contract_matches_unchanged_python_consumers() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut ndjson = Vec::new();
     let events = all_runtime_cases();
-    assert_eq!(events.len(), 99);
+    assert_eq!(events.len(), 101);
     for event in events {
         let (expected, supplied) = runtime_wire_contract(event);
         let before = now_ns();
@@ -373,7 +386,7 @@ async fn complete_bridge_wire_contract_matches_unchanged_python_consumers() {
         status.success(),
         "unchanged Python bridge rejected synthetic wire contract"
     );
-    assert_eq!(report.trim(), "109");
+    assert_eq!(report.trim(), "111");
 }
 
 fn assert_privacy_safe(event: Task7BridgeEvent) {
@@ -408,6 +421,11 @@ fn bridge_runtime_events_serialize_only_privacy_safe_metadata() {
             direction: AudioDirection::Microphone,
             utterance_id,
             capture_monotonic_ns: 10,
+        },
+        DuplexRuntimeEvent::InputComplete {
+            direction: AudioDirection::Microphone,
+            utterance_id,
+            capture_monotonic_ns: 11,
         },
         DuplexRuntimeEvent::TranscriptFinal {
             direction: AudioDirection::Microphone,

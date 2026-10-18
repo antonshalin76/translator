@@ -521,7 +521,7 @@ const fn provider_direction(value: AudioDirection) -> ProviderDirection {
     }
 }
 
-const fn provider_id(value: ProviderId) -> ProviderProviderId {
+pub(crate) const fn provider_id(value: ProviderId) -> ProviderProviderId {
     match value {
         ProviderId::Local => ProviderProviderId::Local,
         ProviderId::Openai => ProviderProviderId::Openai,
@@ -535,7 +535,7 @@ const fn provider_language(value: Language) -> ProviderLanguage {
     }
 }
 
-const fn provider_mode(value: TranslationMode) -> ProviderTranslationMode {
+pub(crate) const fn provider_mode(value: TranslationMode) -> ProviderTranslationMode {
     match value {
         TranslationMode::QualityFirst => ProviderTranslationMode::QualityFirst,
         TranslationMode::Balanced => ProviderTranslationMode::Balanced,
