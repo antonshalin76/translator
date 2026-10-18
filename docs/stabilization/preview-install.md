@@ -100,6 +100,8 @@ with speakers is rejected by the existing acoustic admission. It does not
 establish that speaker-only translation or app routing has passed real-call E2E.
 
 Some USB adapters report only an Analog port, even with headphones connected.
+Empty or literal `(null)` display descriptions fall back to the actual device
+name. This changes no device identity, port type or headphone authorization.
 While translation is stopped, explicitly confirm the currently selected
 microphone/output pair using the headphone button. Status then reports
 `user_confirmed_headphones`, not driver-detected headphones or validated AEC.

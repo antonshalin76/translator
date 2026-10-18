@@ -8133,7 +8133,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1095,
+      "node_count": 1098,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -9098,6 +9098,21 @@
         {
           "file": "crates/translator-audio/tests/device_watcher.rs",
           "id": "translator-audio::test::device_watcher::changed_default_source_does_not_replace_an_available_pin",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/device_watcher.rs",
+          "id": "translator-audio::test::device_watcher::device_description_fallback_preserves_identity_and_unknown_acoustic_facts",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/device_watcher.rs",
+          "id": "translator-audio::test::device_watcher::device_description_json_null_remains_a_discovery_failure_without_pin_commit",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-audio/tests/device_watcher.rs",
+          "id": "translator-audio::test::device_watcher::device_description_preserves_valid_utf8_verbatim",
           "status": "deterministic"
         },
         {

@@ -232,6 +232,121 @@ fn generic_headphone_runner() -> FreshFactsRunner {
     runner
 }
 
+#[test]
+fn device_description_fallback_preserves_identity_and_unknown_acoustic_facts() {
+    for description in [
+        Some("(null)"),
+        Some(" (NuLl) "),
+        None,
+        Some(""),
+        Some(" \t "),
+    ] {
+        let runner = generic_headphone_runner();
+        {
+            let mut snapshot = runner.snapshot.lock().unwrap();
+            for sources in [true, false] {
+                let devices = if sources {
+                    &mut snapshot.sources
+                } else {
+                    &mut snapshot.sinks
+                };
+                if let Some(description) = description {
+                    devices[0]["description"] = description.into();
+                } else {
+                    devices[0].as_object_mut().unwrap().remove("description");
+                }
+            }
+        }
+        let mut watcher = PulseDeviceWatcher::new(runner, AecCapability::Unavailable);
+        let read = watcher.read_facts().unwrap();
+        let expected_source = PhysicalDevice {
+            id: 42,
+            name: "external-input".into(),
+            description: "external-input".into(),
+            active_port: None,
+            active_port_type: None,
+            available: true,
+        };
+        let expected_sink = PhysicalDevice {
+            id: 41,
+            name: "external-output".into(),
+            description: "external-output".into(),
+            active_port: Some("analog-output".into()),
+            active_port_type: Some("Analog".into()),
+            available: true,
+        };
+        assert_eq!(read.source.selected.as_ref(), Some(&expected_source));
+        assert_eq!(read.sink.selected.as_ref(), Some(&expected_sink));
+        assert_eq!(read.source.pinned_name.as_deref(), Some("external-input"));
+        assert_eq!(read.sink.pinned_name.as_deref(), Some("external-output"));
+        assert_eq!(read.source.current_default, read.source.pinned_name);
+        assert_eq!(read.sink.current_default, read.sink.pinned_name);
+        assert_eq!(read.output_mode, OutputMode::UnknownUnsafe);
+        assert_eq!(read.aec_capability, AecCapability::Unavailable);
+        assert_eq!(
+            serde_json::to_value(&read.sink).unwrap()["selected"]["description"],
+            "external-output"
+        );
+        let committed = watcher.reconcile(DeviceOverride::default()).unwrap();
+        assert_eq!(committed.source, read.source);
+        assert_eq!(committed.sink, read.sink);
+        assert_eq!(committed.output_mode, OutputMode::UnknownUnsafe);
+    }
+}
+
+#[test]
+fn device_description_preserves_valid_utf8_verbatim() {
+    let runner = generic_headphone_runner();
+    {
+        let mut snapshot = runner.snapshot.lock().unwrap();
+        snapshot.sources[0]["description"] = " USB Микрофон ".into();
+        snapshot.sinks[0]["description"] = "UACDemoV1.0 Аналоговый стерео".into();
+    }
+    let mut watcher = PulseDeviceWatcher::new(runner, AecCapability::Unavailable);
+    let read = watcher.read_facts().unwrap();
+    assert_eq!(
+        read.source.selected.as_ref().unwrap().description,
+        " USB Микрофон "
+    );
+    assert_eq!(
+        read.sink.selected.as_ref().unwrap().description,
+        "UACDemoV1.0 Аналоговый стерео"
+    );
+    let committed = watcher.reconcile(DeviceOverride::default()).unwrap();
+    assert_eq!(committed.source, read.source);
+    assert_eq!(committed.sink, read.sink);
+    assert_eq!(committed.output_mode, OutputMode::UnknownUnsafe);
+}
+
+#[test]
+fn device_description_json_null_remains_a_discovery_failure_without_pin_commit() {
+    for sources in [true, false] {
+        let runner = generic_headphone_runner();
+        {
+            let mut snapshot = runner.snapshot.lock().unwrap();
+            let devices = if sources {
+                &mut snapshot.sources
+            } else {
+                &mut snapshot.sinks
+            };
+            devices[0]["description"] = serde_json::Value::Null;
+        }
+        let mut watcher = PulseDeviceWatcher::new(runner, AecCapability::Unavailable);
+        assert_eq!(
+            watcher.read_facts().unwrap_err().code(),
+            DeviceWatcherErrorCode::DiscoveryFailed
+        );
+        assert_eq!(
+            watcher
+                .reconcile(DeviceOverride::default())
+                .unwrap_err()
+                .code(),
+            DeviceWatcherErrorCode::DiscoveryFailed
+        );
+        assert_eq!(watcher.selected_sink_name(), None);
+    }
+}
+
 fn confirm_current_headphones(
     watcher: &mut PulseDeviceWatcher<FreshFactsRunner>,
 ) -> translator_audio::DeviceFacts {

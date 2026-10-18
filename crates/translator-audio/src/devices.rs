@@ -692,6 +692,13 @@ struct RawPort {
 impl From<RawDevice> for PhysicalDevice {
     fn from(device: RawDevice) -> Self {
         let available = device_available(&device);
+        let description = if device.description.trim().is_empty()
+            || device.description.trim().eq_ignore_ascii_case("(null)")
+        {
+            device.name.clone()
+        } else {
+            device.description
+        };
         let active_port = device.active_port.filter(|port| !port.is_empty());
         let active_port_type = device
             .ports
@@ -703,7 +710,7 @@ impl From<RawDevice> for PhysicalDevice {
         Self {
             id: device.index,
             name: device.name,
-            description: device.description,
+            description,
             active_port,
             active_port_type,
             available,
