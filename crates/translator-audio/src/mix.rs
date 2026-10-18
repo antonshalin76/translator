@@ -358,7 +358,16 @@ where
         percent: MixPercent,
         deadline: Instant,
     ) -> Result<(), AudioMixError> {
-        self.verify_registered_zero(registration, deadline)?;
+        let input = self.registered_input(registration, deadline)?;
+        let expected = (u32::from(percent.0) * 65_536 + 50) / 100;
+        if input.volume.values().all(|channel| {
+            channel.value == expected || (expected > 0 && channel.value.abs_diff(expected) <= 1)
+        }) {
+            return Ok(());
+        }
+        if input.volume.values().any(|channel| channel.value != 0) {
+            return Err(discovery_failed());
+        }
         let args = vec![
             "set-sink-input-volume".to_owned(),
             registration.index().to_string(),
@@ -372,7 +381,6 @@ where
             return Err(AudioMixError::new(AudioMixErrorCode::VolumeApplyFailed));
         }
         let observed = self.registered_input(registration, deadline)?;
-        let expected = (u32::from(percent.0) * 65_536 + 50) / 100;
         if observed
             .volume
             .values()

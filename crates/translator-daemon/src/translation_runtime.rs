@@ -45,6 +45,7 @@ const DIRECTION_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DIRECTION_CLEANUP_BUDGET: Duration = Duration::from_secs(4);
 pub const RUNTIME_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
 const HOT_IO_LIVENESS_TIMEOUT: Duration = Duration::from_secs(1);
+const MODE_CHANGE_DRAIN_MAX: Duration = Duration::from_secs(30);
 const WATCHDOG_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_RUNTIME_RESTARTS: usize = 3;
 
@@ -1411,6 +1412,7 @@ struct ProcessAcquisition {
     provider: Option<ProviderStreamClient>,
     capture: Option<PulsePcmCapture>,
     playback: Option<PulsePcmPlayback>,
+    playback_admission: Option<PulsePlaybackRegistration>,
     runtime_generation: Option<Uuid>,
     native: Option<Arc<NativeDuplexIo>>,
 }
@@ -1421,6 +1423,7 @@ struct PreparedDirection {
     provider: ProviderStreamClient,
     capture: Option<PulsePcmCapture>,
     playback: Option<PulsePcmPlayback>,
+    playback_admission: Option<PulsePlaybackRegistration>,
     playback_reusable: bool,
     productive_playback: bool,
     playback_mix_authority: Option<Arc<dyn PlaybackMixAuthority>>,
@@ -3164,6 +3167,7 @@ impl DirectionEffects for ProcessDirectionEffects {
             provider: None,
             capture: None,
             playback: None,
+            playback_admission: None,
             runtime_generation: None,
             native: self.native.clone(),
         }
@@ -3230,6 +3234,7 @@ impl DirectionEffects for ProcessDirectionEffects {
                 tracing::error!(event = "playback_admission_failed", error = ?error);
                 FaultScope::Local
             })?;
+        owner.playback_admission = Some(registration);
         tracing::info!(event = "direction_prepare_ready", direction = ?owner.launch.runtime.direction);
         Ok(())
     }
@@ -3260,6 +3265,7 @@ impl DirectionEffects for ProcessDirectionEffects {
             provider,
             capture,
             playback,
+            playback_admission: owner.playback_admission.take(),
             playback_reusable: true,
             productive_playback: false,
             playback_mix_authority: self.playback_mix_authority.clone(),
@@ -3275,6 +3281,7 @@ impl DirectionEffects for ProcessDirectionEffects {
             provider: Some(prepared.provider),
             capture: prepared.capture,
             playback: prepared.playback,
+            playback_admission: prepared.playback_admission,
             runtime_generation: Some(prepared.runtime_generation),
             native: prepared.native,
         }
@@ -3335,6 +3342,7 @@ impl DirectionEffects for ProcessDirectionEffects {
                     .is_ok_and(|result| result.is_ok())
             {
                 owner.playback = None;
+                owner.playback_admission = None;
             } else {
                 clean = false;
             }
@@ -3520,6 +3528,7 @@ fn watchdog_phase_deadline(session: &DirectionSession) -> Option<Instant> {
 struct DirectionPlayback<'a> {
     launch: &'a DirectionLaunch,
     playback: &'a mut Option<PulsePcmPlayback>,
+    admission: &'a mut Option<PulsePlaybackRegistration>,
     reusable: &'a mut bool,
     mix_authority: &'a Option<Arc<dyn PlaybackMixAuthority>>,
     native: &'a Option<Arc<NativeDuplexIo>>,
@@ -3565,6 +3574,7 @@ async fn stop_playback_for_reset(
     {
         HotIoResult::Completed(Ok(())) => {
             *direction.playback = None;
+            *direction.admission = None;
             *direction.reusable = true;
             Ok(None)
         }
@@ -3841,6 +3851,29 @@ async fn write_playback_frame(
             })?,
         );
         *direction.reusable = true;
+        let registration_deadline = phase_deadline
+            .unwrap_or_else(|| Instant::now() + HOT_IO_LIVENESS_TIMEOUT)
+            .min(Instant::now() + HOT_IO_LIVENESS_TIMEOUT);
+        *direction.admission = Some(
+            match await_hot_io(
+                HotIoKind::PlaybackWrite,
+                stop,
+                Some(registration_deadline),
+                direction
+                    .playback
+                    .as_mut()
+                    .expect("new playback is owned")
+                    .wait_registered_muted(registration_deadline.into_std()),
+            )
+            .await
+            {
+                HotIoResult::Completed(Ok(registration)) => registration,
+                HotIoResult::Stopped { stop, .. } => return Ok(PlaybackWrite::Stopped(stop)),
+                _ => return Err(DirectionFailureOrigin::PcmPlayback),
+            },
+        );
+    }
+    if let Some(registration) = direction.admission.as_ref() {
         let admission_deadline = phase_deadline
             .unwrap_or_else(|| Instant::now() + HOT_IO_LIVENESS_TIMEOUT)
             .min(Instant::now() + HOT_IO_LIVENESS_TIMEOUT);
@@ -3849,19 +3882,12 @@ async fn write_playback_frame(
             stop,
             Some(admission_deadline),
             async {
-                let registration = direction
-                    .playback
-                    .as_mut()
-                    .expect("new playback is owned")
-                    .wait_registered_muted(admission_deadline.into_std())
-                    .await
-                    .map_err(|_| DuplexRuntimeError::StartFailed)?;
                 direction
                     .mix_authority
                     .as_ref()
                     .ok_or(DuplexRuntimeError::StartFailed)?
                     .admit_registered(
-                        &registration,
+                        registration,
                         PlaybackRegistrationPhase::Running,
                         admission_deadline.into_std(),
                     )
@@ -3869,7 +3895,9 @@ async fn write_playback_frame(
         )
         .await;
         match admitted {
-            HotIoResult::Completed(Ok(())) => {}
+            HotIoResult::Completed(Ok(())) => {
+                *direction.admission = None;
+            }
             HotIoResult::Stopped { stop, .. } => return Ok(PlaybackWrite::Stopped(stop)),
             _ => {
                 return Err(direction_runtime_error(
@@ -3923,6 +3951,7 @@ async fn run_direction_loop(
         provider,
         capture,
         playback,
+        playback_admission,
         playback_reusable,
         productive_playback,
         playback_mix_authority,
@@ -3934,6 +3963,7 @@ async fn run_direction_loop(
     let mut playback_io = DirectionPlayback {
         launch,
         playback,
+        admission: playback_admission,
         reusable: playback_reusable,
         mix_authority: playback_mix_authority,
         native: &native,
@@ -4550,13 +4580,18 @@ async fn wait_for_playback_deadline(
     deadline_ns: u64,
     stop: &mut watch::Receiver<Option<WorkerStop>>,
 ) -> Result<Option<WorkerStop>, DirectionFailureOrigin> {
-    let remaining_ns = deadline_ns.saturating_sub(monotonic_ns());
+    let remaining = Duration::from_nanos(deadline_ns.saturating_sub(monotonic_ns()));
     tokio::select! {
         biased;
         stop = wait_for_direction_stop(stop) => Ok(Some(stop)),
-        _ = tokio::time::sleep(Duration::from_nanos(remaining_ns)) => Ok(None),
-        _ = tokio::time::sleep(HOT_IO_LIVENESS_TIMEOUT) => {
-            Err(DirectionFailureOrigin::PcmPlayback)
+        result = async {
+            if remaining > MODE_CHANGE_DRAIN_MAX {
+                return Err(DirectionFailureOrigin::PcmPlayback);
+            }
+            tokio::time::sleep(remaining).await;
+            Ok(None)
+        } => {
+            result
         }
     }
 }
@@ -7444,6 +7479,301 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires an explicit zero-card private PulseAudio socket and virtual fixture sinks"]
+    async fn private_pulse_prepared_mode_replacement_remains_audible() {
+        use crate::AudioMixController;
+
+        struct AdmissionCounter {
+            mix: Arc<dyn PlaybackMixAuthority>,
+            running: Mutex<Vec<Uuid>>,
+        }
+        impl PlaybackMixAuthority for AdmissionCounter {
+            fn admit_registered(
+                &self,
+                registration: &PulsePlaybackRegistration,
+                phase: PlaybackRegistrationPhase,
+                deadline: std::time::Instant,
+            ) -> Result<(), DuplexRuntimeError> {
+                if phase == PlaybackRegistrationPhase::Running {
+                    self.running.lock().unwrap().push(registration.session_id());
+                }
+                self.mix.admit_registered(registration, phase, deadline)
+            }
+        }
+
+        let server = std::env::var("PULSE_SERVER").expect("private PULSE_SERVER required");
+        assert!(
+            server.starts_with("unix:/tmp/translator-handshake-") && server.ends_with("/native")
+        );
+        let cards = std::process::Command::new("pactl")
+            .args(["--format=json", "list", "cards"])
+            .output()
+            .unwrap();
+        assert!(cards.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&cards.stdout).unwrap(),
+            serde_json::json!([])
+        );
+        let mix = Arc::new(crate::AudioMixApplication::new(
+            translator_audio::SystemCommandRunner,
+        ));
+        let admissions = Arc::new(AdmissionCounter {
+            mix: mix.clone(),
+            running: Mutex::new(Vec::new()),
+        });
+        mix.reconcile_committed(crate::TranslationMixMode::Quarantine {
+            mic_original_expected: false,
+        })
+        .unwrap();
+        let store = RuntimeStore::default();
+        let observer = RuntimeLatencyObserver::new(store.clone());
+        let mut launch = test_launch(
+            ready_snapshot(),
+            TestAudioTargets {
+                microphone_capture: "translator_test_mic.monitor".into(),
+                microphone_playback: "translator_mic_out".into(),
+                speaker_capture: "translator_remote_in.monitor".into(),
+                speaker_playback: "translator_test_out".into(),
+            },
+        )
+        .microphone
+        .unwrap();
+        let mut results = Vec::new();
+        for (index, (mode, percent)) in [
+            (TranslationMode::QualityFirst, 100),
+            (TranslationMode::Balanced, 35),
+            (TranslationMode::StreamingFirst, 0),
+            (TranslationMode::StreamingFirst, 100),
+            (TranslationMode::StreamingFirst, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store.set_latency_policy(crate::LatencyPolicyPatch {
+                direction_id: AudioDirection::Microphone,
+                current_mode: mode,
+            });
+            assert_eq!(
+                refresh_launch_mode(&mut launch, &observer),
+                index == 1 || index == 2
+            );
+            let desired = crate::AudioMixState {
+                microphone_translation_percent: percent,
+                ..crate::AudioMixState::default()
+            };
+            if index != 0 {
+                mix.apply_desired(desired, crate::TranslationMixMode::Translating)
+                    .unwrap();
+            }
+            let (_directory, socket, stop, server, stream_task) = start_prepare_server(None);
+            let effects = ProcessDirectionEffects {
+                playback_mix_authority: Some(admissions.clone()),
+                ..ProcessDirectionEffects::new(ProcessDuplexConfig {
+                    python: "unused".into(),
+                    sidecar_root: "unused".into(),
+                    socket_path: socket,
+                    expected_uid: fs::metadata(_directory.path()).unwrap().uid(),
+                })
+            };
+            let mut owner = effects.begin(launch.clone());
+            effects
+                .prepare(
+                    &mut owner,
+                    &crate::SidecarLaunch {
+                        generation_id: Uuid::new_v4(),
+                        token: "ab".repeat(32),
+                    },
+                    Instant::now() + Duration::from_secs(3),
+                )
+                .await
+                .unwrap();
+            let mut prepared = effects
+                .finish(owner)
+                .unwrap_or_else(|_| panic!("prepare failed"));
+            let before = admissions.running.lock().unwrap().len();
+            if index == 4 {
+                let index = prepared.playback_admission.as_ref().unwrap().index();
+                assert!(
+                    std::process::Command::new("pactl")
+                        .args(["set-sink-input-volume", &index.to_string(), "1"])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            if index == 0 {
+                mix.apply_desired(desired, crate::TranslationMixMode::Translating)
+                    .unwrap();
+            }
+            let mut monitor = PulsePcmCapture::spawn(&PulsePcmCommand::capture(
+                "translator_mic_out.monitor",
+                "mode-replacement-observer",
+            ))
+            .unwrap();
+            let (_stop, mut stopped) = watch::channel(None);
+            let format = StreamPcmFormat::provider_default();
+            let frame = PcmFrame::try_new(
+                0,
+                monotonic_ns(),
+                format,
+                [0_i16, 8192, 0, -8192]
+                    .into_iter()
+                    .cycle()
+                    .take(format.frame_bytes() / 2)
+                    .flat_map(i16::to_le_bytes)
+                    .collect(),
+            )
+            .unwrap();
+            let metadata = QueuedPlaybackMetadata {
+                utterance_id: Uuid::new_v4(),
+                sequence: 0,
+                provider_monotonic_ns: monotonic_ns(),
+                enqueued_monotonic_ns: monotonic_ns(),
+            };
+            let mut playback = DirectionPlayback {
+                launch: &prepared.launch,
+                playback: &mut prepared.playback,
+                admission: &mut prepared.playback_admission,
+                reusable: &mut prepared.playback_reusable,
+                mix_authority: &prepared.playback_mix_authority,
+                native: &prepared.native,
+            };
+            if index == 0 {
+                let reason = WorkerStop::Close {
+                    reason: CloseRequestReason::UserStop,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                };
+                let (_stop, mut canceled) = watch::channel(Some(reason));
+                assert!(
+                    matches!(write_playback_frame(&mut playback, &mut canceled, &frame, Some(metadata), Some(Instant::now() + Duration::from_secs(1)), &RecordingObserver::default()).await, Ok(PlaybackWrite::Stopped(stop)) if stop == reason)
+                );
+                assert!(playback.admission.is_some());
+                assert_eq!(admissions.running.lock().unwrap().len(), before);
+            }
+            let (written, audible) = tokio::join!(
+                async {
+                    for sequence in 0..20 {
+                        if index == 3 && sequence == 10 {
+                            assert!(
+                                stop_playback_for_reset(
+                                    &mut playback,
+                                    &mut stopped,
+                                    Some(Instant::now() + Duration::from_secs(1))
+                                )
+                                .await?
+                                .is_none()
+                            );
+                            assert!(playback.admission.is_none());
+                        }
+                        write_playback_frame(
+                            &mut playback,
+                            &mut stopped,
+                            &frame,
+                            Some(metadata),
+                            Some(Instant::now() + Duration::from_secs(1)),
+                            &RecordingObserver::default(),
+                        )
+                        .await?;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Ok::<_, DirectionFailureOrigin>(())
+                },
+                async {
+                    let mut nonzero = false;
+                    for sequence in 0..50 {
+                        let frame = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            monitor.read_frame(sequence, monotonic_ns()),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        nonzero |= frame.pcm().iter().any(|byte| *byte != 0);
+                    }
+                    nonzero
+                }
+            );
+            let inputs = std::process::Command::new("pactl")
+                .args(["--format=json", "list", "sink-inputs"])
+                .output()
+                .unwrap();
+            let inputs: serde_json::Value = serde_json::from_slice(&inputs.stdout).unwrap();
+            let input = inputs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|input| input["properties"]["media.name"] == "translator-outgoing-playback")
+                .unwrap();
+            let gain = input["volume"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|channel| channel["value"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            monitor.stop().await.unwrap();
+            let running = admissions.running.lock().unwrap()[before..].to_vec();
+            assert_eq!(
+                running.len(),
+                if index == 3 { 2 } else { 1 },
+                "admission is once per playback, not once per PCM frame"
+            );
+            if index == 3 {
+                assert_ne!(
+                    running[0], running[1],
+                    "reset respawn must admit its new identity"
+                );
+            }
+            let mut owner = effects.recover_owner(prepared);
+            effects
+                .stop_pcm(&mut owner, Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+            effects
+                .close_provider(
+                    &mut owner,
+                    CloseRequestReason::UserStop,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            stop_prepare_server(stop, server, stream_task).await;
+            for _ in 0..3 {
+                assert!(
+                    mode_change_after_event(
+                        &observer,
+                        launch.runtime.mode,
+                        DuplexRuntimeEvent::UtteranceTerminal {
+                            direction: AudioDirection::Microphone,
+                            utterance_id: Uuid::new_v4()
+                        }
+                    )
+                    .is_none(),
+                    "same-mode phrase must not request another preparation"
+                );
+            }
+            results.push((percent, written, audible, gain, index == 4));
+        }
+        for (percent, written, audible, gain, rejected) in results {
+            if rejected {
+                assert_eq!(written, Err(DirectionFailureOrigin::PcmPlayback));
+                assert!(!audible, "rejected admission must publish no PCM");
+                continue;
+            }
+            assert!(written.is_ok(), "first-frame admission failed: {written:?}");
+            let expected = (u64::from(percent) * 65_536 + 50) / 100;
+            assert!(
+                gain.iter().all(|actual| actual.abs_diff(expected) <= 1),
+                "prepared replacement retained wrong gain: {gain:?} instead of {percent}%"
+            );
+            assert_eq!(
+                audible,
+                percent != 0,
+                "independent sink audibility for {percent}%"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_aec_reservation_has_zero_provider_or_pcm_effects() {
         let directory = tempdir().unwrap();
         let mut launch = test_launch(
@@ -8418,17 +8748,22 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn source_p1_mode_change_drain_never_waits_past_the_hot_io_liveness_ceiling() {
-        let distant_deadline_ns = monotonic_ns().saturating_add(60_000_000_000);
+    async fn mode_change_drain_preserves_two_seconds_of_owned_audio() {
+        let distant_deadline_ns = monotonic_ns().saturating_add(2_000_000_000);
         let (_stop, mut stop_receiver) = watch::channel(None);
         let drain = tokio::spawn(async move {
             wait_for_playback_deadline(distant_deadline_ns, &mut stop_receiver).await
         });
         tokio::task::yield_now().await;
-        tokio::time::advance(HOT_IO_LIVENESS_TIMEOUT - Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
-        assert!(!drain.is_finished());
-        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::advance(HOT_IO_LIVENESS_TIMEOUT).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !drain.is_finished(),
+            "already written audio is not blocked I/O"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
         for _ in 0..16 {
             if drain.is_finished() {
                 break;
@@ -8439,11 +8774,12 @@ pub(crate) mod tests {
         if !bounded {
             drain.abort();
         }
-        let _ = drain.await;
+        let result = drain.await;
         assert!(
             bounded,
-            "a mode-change drain must stop at the existing one-second hot-I/O ceiling"
+            "a mode-change drain must complete after its owned audio tail"
         );
+        assert_eq!(result.unwrap(), Ok(None));
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -8483,10 +8819,6 @@ pub(crate) mod tests {
             wait_for_playback_deadline(distant_deadline_ns, &mut timeout_stop_receiver).await
         });
         tokio::task::yield_now().await;
-        tokio::time::advance(HOT_IO_LIVENESS_TIMEOUT - Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
-        assert!(!timed_out.is_finished());
-        tokio::time::advance(Duration::from_millis(1)).await;
         for _ in 0..16 {
             if timed_out.is_finished() {
                 break;
@@ -8500,7 +8832,7 @@ pub(crate) mod tests {
         let result = timed_out.await;
         assert!(
             bounded,
-            "the typed playback failure must occur at one second"
+            "a tail beyond the provider output bound must fail without waiting"
         );
         assert_eq!(result.unwrap(), Err(DirectionFailureOrigin::PcmPlayback));
     }
@@ -8512,11 +8844,12 @@ pub(crate) mod tests {
             deadline: Instant::now() + RUNTIME_CLEANUP_BUDGET,
         };
         let (stop, mut stop_receiver) = watch::channel(None);
-        let distant_deadline_ns = monotonic_ns().saturating_add(60_000_000_000);
+        let distant_deadline_ns = monotonic_ns().saturating_add(2_000_000_000);
         let stopped = tokio::spawn(async move {
             wait_for_playback_deadline(distant_deadline_ns, &mut stop_receiver).await
         });
         tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(250)).await;
         stop.send(Some(exact_stop)).unwrap();
         for _ in 0..16 {
             if stopped.is_finished() {
@@ -8531,6 +8864,25 @@ pub(crate) mod tests {
         let result = stopped.await;
         assert!(preempted, "Stop must preempt an in-flight audible drain");
         assert_eq!(result.unwrap(), Ok(Some(exact_stop)));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn mode_change_drain_expired_tail_and_ready_stop_are_immediate() {
+        let (_stop, mut receiver) = watch::channel(None);
+        assert_eq!(wait_for_playback_deadline(0, &mut receiver).await, Ok(None));
+        let exact_stop = WorkerStop::Close {
+            reason: CloseRequestReason::UserStop,
+            deadline: Instant::now() + RUNTIME_CLEANUP_BUDGET,
+        };
+        for deadline in [0, u64::MAX] {
+            let (_stop, mut receiver) = watch::channel(Some(exact_stop));
+            let started = Instant::now();
+            assert_eq!(
+                wait_for_playback_deadline(deadline, &mut receiver).await,
+                Ok(Some(exact_stop))
+            );
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        }
     }
 
     #[test]
@@ -8620,6 +8972,74 @@ pub(crate) mod tests {
             next_session.provider_contract().mode,
             translator_ipc::provider::TranslationMode::StreamingFirst
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 32,
+            max_shrink_iters: 64,
+            ..proptest::test_runner::Config::default()
+        })]
+        #[test]
+        fn mode_change_drain_obeys_the_media_bound_and_stop_priority(
+            seconds in 0_u64..61, stopped in proptest::bool::ANY,
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().unwrap();
+            let (result, exact_stop, elapsed) = runtime.block_on(async {
+                let exact_stop = WorkerStop::Close { reason: CloseRequestReason::UserStop, deadline: Instant::now() + RUNTIME_CLEANUP_BUDGET };
+                let (_stop, mut receiver) = watch::channel(stopped.then_some(exact_stop));
+                let started = Instant::now();
+                let result = wait_for_playback_deadline(monotonic_ns().saturating_add(seconds * 1_000_000_000), &mut receiver).await;
+                (result, exact_stop, started.elapsed())
+            });
+            if stopped {
+                proptest::prop_assert_eq!(result, Ok(Some(exact_stop)));
+                proptest::prop_assert_eq!(elapsed, Duration::ZERO);
+            } else if seconds <= 30 {
+                proptest::prop_assert_eq!(result, Ok(None));
+                proptest::prop_assert!(elapsed <= Duration::from_secs(seconds));
+            } else {
+                proptest::prop_assert_eq!(result, Err(DirectionFailureOrigin::PcmPlayback));
+                proptest::prop_assert_eq!(elapsed, Duration::ZERO);
+            }
+        }
+        #[test]
+        fn repeated_policy_modes_settle_without_requesting_another_replacement(
+            requests in proptest::collection::vec(0_u8..3, 1..24),
+        ) {
+            let store = RuntimeStore::default();
+            let observer = RuntimeLatencyObserver::new(store.clone());
+            let mut launch = test_launch(ready_snapshot(), TestAudioTargets {
+                microphone_capture: "test-mic".into(), microphone_playback: "test-out".into(),
+                speaker_capture: "test-remote".into(), speaker_playback: "test-speaker".into(),
+            }).microphone.unwrap();
+            for requested in requests {
+                let mode = match requested {
+                    0 => TranslationMode::QualityFirst,
+                    1 => TranslationMode::Balanced,
+                    _ => TranslationMode::StreamingFirst,
+                };
+                store.set_latency_policy(crate::LatencyPolicyPatch {
+                    direction_id: AudioDirection::Microphone, current_mode: mode,
+                });
+                refresh_launch_mode(&mut launch, &observer);
+                let open = DirectionSession::new(launch.runtime).open_request();
+                let Some(provider_request::Request::OpenSession(open)) = open.request else {
+                    unreachable!()
+                };
+                let expected = match requested {
+                    0 => translator_ipc::provider::TranslationMode::QualityFirst,
+                    1 => translator_ipc::provider::TranslationMode::Balanced,
+                    _ => translator_ipc::provider::TranslationMode::StreamingFirst,
+                };
+                proptest::prop_assert_eq!(open.mode, expected as i32);
+                proptest::prop_assert!(!refresh_launch_mode(&mut launch, &observer));
+                proptest::prop_assert!(mode_change_after_event(&observer, launch.runtime.mode,
+                    DuplexRuntimeEvent::UtteranceTerminal {
+                        direction: AudioDirection::Microphone, utterance_id: Uuid::new_v4(),
+                    }).is_none(), "same-mode request must settle");
+            }
+        }
     }
 
     #[test]
@@ -8936,6 +9356,7 @@ pub(crate) mod tests {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum Trigger {
             Fault(DirectionFailureOrigin),
+            ModeChangeDrain(Duration),
             ProductivePlayback,
             Panic,
         }
@@ -9454,6 +9875,20 @@ pub(crate) mod tests {
                         Some(Trigger::Fault(origin)) => {
                             return DirectionOutcome::Fault(classify_direction_failure(origin));
                         }
+                        Some(Trigger::ModeChangeDrain(duration)) => {
+                            return match wait_for_playback_deadline(
+                                monotonic_ns().saturating_add(duration.as_nanos() as u64),
+                                stop,
+                            )
+                            .await
+                            {
+                                Ok(None) => DirectionOutcome::ModeChanged,
+                                Ok(Some(reason)) => DirectionOutcome::Stopped(reason),
+                                Err(origin) => {
+                                    DirectionOutcome::Fault(classify_direction_failure(origin))
+                                }
+                            };
+                        }
                         Some(Trigger::Panic) => panic!("scripted worker panic"),
                         None => {}
                     }
@@ -9942,6 +10377,30 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             coordinator
+        }
+
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn owned_audio_drain_reopens_only_the_changed_direction_in_the_requested_mode() {
+            tokio::task::LocalSet::new().run_until(async {
+                let effects = ScriptedEffects::default();
+                let store = RuntimeStore::default();
+                let mut coordinator = coordinator(effects.clone(), Arc::new(LifecycleRecorder::default()));
+                coordinator.observer = Arc::new(RuntimeLatencyObserver::new(store.clone()));
+                coordinator.start_resources(transaction_deadline()).await.unwrap();
+                let speaker_epoch = coordinator.worker_epoch(AudioDirection::Speaker);
+                store.set_latency_policy(crate::LatencyPolicyPatch { direction_id: AudioDirection::Microphone, current_mode: TranslationMode::Balanced });
+                effects.trigger(AudioDirection::Microphone, Trigger::ModeChangeDrain(Duration::from_secs(2)));
+                coordinator.handle_next_worker_completion(transaction_deadline()).await.unwrap();
+                let replacement = &coordinator.workers[&AudioDirection::Microphone].launch;
+                assert_eq!(replacement.runtime.mode, TranslationMode::Balanced, "natural audio drain must not recover the old QualityFirst launch as a fault");
+                assert_eq!(DirectionSession::new(replacement.runtime).provider_contract().mode, translator_ipc::provider::TranslationMode::Balanced);
+                assert_eq!(coordinator.worker_epoch(AudioDirection::Speaker), speaker_epoch);
+                assert_eq!(effects.provider_acquisitions(AudioDirection::Microphone), 2);
+                assert_eq!(effects.provider_acquisitions(AudioDirection::Speaker), 1);
+                assert_eq!(coordinator.desired.microphone.as_ref().unwrap().runtime.mode, TranslationMode::Balanced);
+                coordinator.shutdown(transaction_deadline()).await.unwrap();
+                assert_eq!(effects.live_count(), 0);
+            }).await;
         }
 
         #[tokio::test(flavor = "current_thread")]

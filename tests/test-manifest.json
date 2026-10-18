@@ -8151,7 +8151,7 @@
       ]
     },
     "rust": {
-      "external_skip_count": 20,
+      "external_skip_count": 21,
       "file_count": 51,
       "files": [
         "apps/translator-ui/src-tauri/src/main.rs",
@@ -8206,7 +8206,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1102,
+      "node_count": 1107,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -11425,6 +11425,21 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::mode_change_drain_expired_tail_and_ready_stop_are_immediate",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::mode_change_drain_obeys_the_media_bound_and_stop_priority",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::mode_change_drain_preserves_two_seconds_of_owned_audio",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::batch_activates_after_all_prepares_and_preserves_unaffected_peer",
           "status": "deterministic"
         },
@@ -11511,6 +11526,11 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::local_quiescence_shutdown_covers_active_and_retained_candidate_union",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::native_owner_red::owned_audio_drain_reopens_only_the_changed_direction_in_the_requested_mode",
           "status": "deterministic"
         },
         {
@@ -11710,6 +11730,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_pulse_prepared_mode_replacement_remains_audible",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::process_prepare_capture_crossing_deadline_retains_owner_without_playback",
           "status": "deterministic"
         },
@@ -11805,6 +11830,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::repeated_policy_modes_settle_without_requesting_another_replacement",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::repeated_stop_timeouts_retain_the_same_native_thread_until_done",
           "status": "deterministic"
         },
@@ -11826,11 +11856,6 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::source_p1_latency_reset_evicts_only_the_joined_direction",
-          "status": "deterministic"
-        },
-        {
-          "file": "crates/translator-daemon/src/lib.rs",
-          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::source_p1_mode_change_drain_never_waits_past_the_hot_io_liveness_ceiling",
           "status": "deterministic"
         },
         {
@@ -16629,6 +16654,11 @@
       "code": "missing_external_prerequisite:private_pulse_fixture",
       "framework": "rust",
       "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_live_duplex_progress"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_pulse_prepared_mode_replacement_remains_audible"
     },
     {
       "code": "missing_external_prerequisite:isolated_native_pipewire",
