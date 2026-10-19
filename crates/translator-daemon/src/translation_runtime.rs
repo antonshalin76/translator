@@ -608,8 +608,8 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
                         Some(queue_lag_ms),
                     );
                     if utterance.terminal_received {
-                        let utterance = utterances.remove(&(direction, utterance_id)).unwrap();
-                        self.record_utterance_latency(direction, utterance);
+                        // No final native-frame receipt exists here; omit the incomplete latency sample.
+                        utterances.remove(&(direction, utterance_id));
                     }
                 }
             }
@@ -9443,37 +9443,67 @@ pub(crate) mod tests {
         let store = RuntimeStore::default();
         let observer = RuntimeLatencyObserver::new(store.clone());
         let direction = AudioDirection::Speaker;
-        let utterance_id = Uuid::new_v4();
-        observer.observe(DuplexRuntimeEvent::SpeechStarted {
-            direction,
-            utterance_id,
-            capture_monotonic_ns: 1,
-        });
-        observer.observe(DuplexRuntimeEvent::InputComplete {
-            direction,
-            utterance_id,
-            capture_monotonic_ns: 2,
-        });
-        observer.observe(DuplexRuntimeEvent::UtteranceTerminalOutcome {
-            direction,
-            utterance_id,
-            outcome: TerminalOutcome::Completed,
-        });
-        observer.observe(DuplexRuntimeEvent::UtteranceTerminal {
-            direction,
-            utterance_id,
-        });
-        assert_eq!(store.snapshot().translation_progress[1].audio_started, 0);
-        observer.observe(DuplexRuntimeEvent::AudioFrame {
-            direction,
-            utterance_id,
-            sequence: 0,
-            provider_monotonic_ns: 3,
-            observed_monotonic_ns: 3,
-            queue_lag_ms: 0,
-        });
-        assert_eq!(store.snapshot().translation_progress[1].audio_started, 1);
-        assert!(observer.utterances.lock().unwrap().is_empty());
+        for index in 0..20 {
+            let start = (index + 1) * 1_000_000_000;
+            let utterance_id = Uuid::new_v4();
+            observer.observe(DuplexRuntimeEvent::SpeechStarted {
+                direction,
+                utterance_id,
+                capture_monotonic_ns: start,
+            });
+            observer.observe(DuplexRuntimeEvent::InputComplete {
+                direction,
+                utterance_id,
+                capture_monotonic_ns: start + 1_000_000_000,
+            });
+            observer.observe(DuplexRuntimeEvent::UtteranceTerminalOutcome {
+                direction,
+                utterance_id,
+                outcome: TerminalOutcome::Completed,
+            });
+            observer.observe(DuplexRuntimeEvent::UtteranceTerminal {
+                direction,
+                utterance_id,
+            });
+            assert_eq!(
+                store.snapshot().translation_progress[1].audio_started,
+                index
+            );
+            observer.observe(DuplexRuntimeEvent::AudioFrame {
+                direction,
+                utterance_id,
+                sequence: 0,
+                provider_monotonic_ns: start + 2_000_000_000,
+                observed_monotonic_ns: start + 2_000_000_000,
+                queue_lag_ms: 0,
+            });
+            assert_eq!(
+                store.snapshot().translation_progress[1].audio_started,
+                index + 1
+            );
+            observer.observe(DuplexRuntimeEvent::AudioFrame {
+                direction,
+                utterance_id,
+                sequence: 1,
+                provider_monotonic_ns: start + 3_000_000_000,
+                observed_monotonic_ns: start + 3_000_000_000,
+                queue_lag_ms: 0,
+            });
+            assert_eq!(
+                store.snapshot().translation_progress[1].audio_started,
+                index + 1
+            );
+            assert!(observer.utterances.lock().unwrap().is_empty());
+        }
+        store.evaluate_latency_epoch(direction, 60_000);
+        let policy = store
+            .snapshot()
+            .latency_policy
+            .into_iter()
+            .find(|policy| policy.direction_id == direction)
+            .unwrap();
+        assert_eq!(policy.p95_first_audio_ms, 0);
+        assert_eq!(policy.p95_last_audio_ms, 0);
     }
 
     #[test]
