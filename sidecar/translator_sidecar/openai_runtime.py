@@ -55,6 +55,7 @@ from .provider_registry import SessionDrainReceipt
 PublishEvents = Callable[[tuple[object, ...], Callable[[], None]], Awaitable[None]]
 _MAX_OUTPUT_SECONDS = 30
 _MAX_READY_UTTERANCES = 3
+_QUALITY_FIRST_PREPARATION_SECONDS = 12
 
 
 class Pipeline(Protocol):
@@ -322,8 +323,10 @@ class OpenAIRealtimeProvider:
                     for item in session.utterances.values()
                 )
                 generation.input_complete = True
-                generation.deadline = (
-                    asyncio.get_running_loop().time() + self._drain_timeout
+                generation.deadline = asyncio.get_running_loop().time() + (
+                    _QUALITY_FIRST_PREPARATION_SECONDS
+                    if session.request.mode is TranslationMode.QUALITY_FIRST
+                    else self._drain_timeout
                 )
                 if generation.discarding or ready >= _MAX_READY_UTTERANCES:
                     overflow = generation

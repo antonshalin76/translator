@@ -17,6 +17,54 @@ use uuid::Uuid;
 const NS_PER_MS: u64 = 1_000_000;
 
 #[test]
+fn quality_cloud_preparation_is_bounded_without_extending_output_liveness() {
+    let session_id = Uuid::new_v4();
+    let stream_id = Uuid::new_v4();
+    let utterance_id = Uuid::new_v4();
+    let mut contract = provider_contract(session_id, stream_id);
+    contract.provider_id = ProviderId::Openai;
+    contract.mode = ProviderTranslationMode::QualityFirst;
+    let mut silent = ProviderStreamCoordinator::new(contract.clone());
+    let mut coordinator = ProviderStreamCoordinator::new(contract);
+    let mut opening = opened(session_id);
+    if let Some(provider_event::Event::SessionOpened(value)) = opening.event.as_mut() {
+        value.capabilities.as_mut().unwrap().cloud_egress = true;
+    }
+    coordinator.validate_event(&opening, 0).unwrap();
+    coordinator
+        .start_utterance(stream_id, utterance_id, 0)
+        .unwrap();
+    coordinator
+        .record_end_of_utterance(stream_id, utterance_id, 500 * NS_PER_MS)
+        .unwrap();
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        Some(12_500 * NS_PER_MS)
+    );
+    silent.validate_event(&opening, 0).unwrap();
+    silent.start_utterance(stream_id, utterance_id, 0).unwrap();
+    silent
+        .record_end_of_utterance(stream_id, utterance_id, 500 * NS_PER_MS)
+        .unwrap();
+    assert!(silent.poll(12_500 * NS_PER_MS).unwrap().is_empty());
+    assert_eq!(
+        silent.poll(12_500 * NS_PER_MS + 1).unwrap(),
+        vec![cancel_action(session_id, stream_id, utterance_id)]
+    );
+    assert!(coordinator.poll(6_501 * NS_PER_MS).unwrap().is_empty());
+    coordinator
+        .validate_event(
+            &audio_delta(session_id, stream_id, utterance_id, 0, 2, 7_500 * NS_PER_MS),
+            7_500 * NS_PER_MS,
+        )
+        .unwrap();
+    assert_eq!(
+        coordinator.next_phase_deadline_ns(),
+        Some(8_000 * NS_PER_MS)
+    );
+}
+
+#[test]
 fn next_phase_deadline_tracks_current_phase_without_polling_or_resetting_it() {
     let session_id = Uuid::new_v4();
     let stream_id = Uuid::new_v4();
@@ -442,6 +490,44 @@ proptest! {
         rng_seed: RngSeed::Fixed(0x2026_1018),
         ..ProptestConfig::default()
     })]
+
+    #[test]
+    fn response_preparation_budget_is_mode_scoped_and_never_renewed(
+        cloud in any::<bool>(), mode_index in 0_usize..3, eou_ms in 0_u64..12_000,
+    ) {
+        let session_id = Uuid::from_u128(1);
+        let stream_id = Uuid::from_u128(2);
+        let utterance_id = Uuid::from_u128(3);
+        let mut contract = provider_contract(session_id, stream_id);
+        contract.provider_id = if cloud { ProviderId::Openai } else { ProviderId::Local };
+        contract.mode = [ProviderTranslationMode::QualityFirst, ProviderTranslationMode::Balanced,
+            ProviderTranslationMode::StreamingFirst][mode_index];
+        let timeout_ms = if cloud && mode_index == 0 { 12_000 } else { 6_000 };
+        let mut coordinator = ProviderStreamCoordinator::new(contract);
+        let mut opening = opened(session_id);
+        if let Some(provider_event::Event::SessionOpened(value)) = opening.event.as_mut() {
+            value.capabilities.as_mut().unwrap().cloud_egress = cloud;
+        }
+        coordinator.validate_event(&opening, 0).unwrap();
+        coordinator.start_utterance(stream_id, utterance_id, 0).unwrap();
+        coordinator.record_end_of_utterance(stream_id, utterance_id, eou_ms * NS_PER_MS).unwrap();
+        let deadline = (eou_ms + timeout_ms) * NS_PER_MS;
+        for _ in 0..3 {
+            prop_assert_eq!(coordinator.next_phase_deadline_ns(), Some(deadline));
+        }
+        prop_assert!(coordinator.poll(deadline).unwrap().is_empty());
+        prop_assert_eq!(coordinator.poll(deadline + 1).unwrap(), vec![cancel_action(session_id, stream_id, utterance_id)]);
+        prop_assert!(coordinator.poll(deadline + 1).unwrap().is_empty());
+        prop_assert_eq!(coordinator.next_phase_deadline_ns(), Some(deadline + 1 + 250 * NS_PER_MS));
+        let mut cancelled = cancelled_final(session_id, stream_id, utterance_id);
+        if let Some(provider_event::Event::UtteranceFinal(value)) = cancelled.event.as_mut() {
+            value.event_sequence = 2;
+            value.final_audio_sequence = None;
+        }
+        coordinator.validate_event(&cancelled, deadline + 2).unwrap();
+        prop_assert_eq!(coordinator.next_phase_deadline_ns(), None);
+        prop_assert!(coordinator.start_utterance(stream_id, Uuid::from_u128(4), deadline + 3).is_ok());
+    }
 
     #[test]
     fn early_output_never_rejuvenates_the_input_deadline(

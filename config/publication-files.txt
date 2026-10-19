@@ -127,6 +127,7 @@ crates/translator-daemon/tests/latency_policy.rs
 crates/translator-daemon/tests/panic_privacy.rs
 crates/translator-daemon/tests/privacy_debug.rs
 crates/translator-daemon/tests/process_sidecar_smoke.rs
+crates/translator-daemon/tests/provider_audio_watchdog.proptest-regressions
 crates/translator-daemon/tests/provider_audio_watchdog.rs
 crates/translator-daemon/tests/queue_policy.rs
 crates/translator-daemon/tests/round_trip_process.rs

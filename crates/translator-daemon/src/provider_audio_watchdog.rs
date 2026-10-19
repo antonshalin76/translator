@@ -86,6 +86,7 @@ pub struct ProviderAudioWatchdog {
     session_id: Uuid,
     utterances: HashMap<Uuid, WatchedUtterance>,
     session_phase: SessionPhase,
+    first_audio_after_eou_timeout: Duration,
 }
 
 impl ProviderAudioWatchdog {
@@ -94,6 +95,7 @@ impl ProviderAudioWatchdog {
             session_id,
             utterances: HashMap::new(),
             session_phase: SessionPhase::Active,
+            first_audio_after_eou_timeout: FIRST_AUDIO_AFTER_EOU_TIMEOUT,
         }
     }
 
@@ -136,7 +138,7 @@ impl ProviderAudioWatchdog {
             UtterancePhase::CollectingInput { deadline_ns } if now_ns <= deadline_ns => {
                 watched.phase = UtterancePhase::AwaitingFirstAudio {
                     deadline_ns: now_ns
-                        .saturating_add(FIRST_AUDIO_AFTER_EOU_TIMEOUT.as_nanos() as u64),
+                        .saturating_add(self.first_audio_after_eou_timeout.as_nanos() as u64),
                 };
                 Ok(())
             }
@@ -519,7 +521,12 @@ impl ProviderStreamCoordinator {
 
     pub fn new(contract: ProviderSessionContract) -> Self {
         Self {
-            watchdog: ProviderAudioWatchdog::new(contract.session_id),
+            watchdog: ProviderAudioWatchdog {
+                first_audio_after_eou_timeout: Duration::from_millis(u64::from(
+                    translator_ipc::first_response_timeout_ms(contract.provider_id, contract.mode),
+                )),
+                ..ProviderAudioWatchdog::new(contract.session_id)
+            },
             validator: ProviderEventValidator::new(contract),
             receive_buffers: HashMap::new(),
         }

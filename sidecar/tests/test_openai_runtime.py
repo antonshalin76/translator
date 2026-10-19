@@ -369,10 +369,13 @@ def test_safe_http_failure_preserves_policy_and_never_retries_phrase(
     asyncio.run(scenario())
 
 
-def test_watchdog_drops_one_phrase_and_next_phrase_recovers():
+@pytest.mark.parametrize("mode", list(TranslationMode))
+def test_watchdog_drops_one_phrase_and_next_phrase_recovers(monkeypatch, mode):
+    monkeypatch.setattr(openai_runtime, "_QUALITY_FIRST_PREPARATION_SECONDS", 0.01)
+
     async def scenario():
         h = Harness(timeout=0.01)
-        request = await h.open()
+        request = await h.open(mode=mode)
         h.pipelines[0].transcribe_gate = asyncio.Event()
         await h.provider.submit_frame(frame(request))
         await h.settled()
@@ -473,10 +476,15 @@ def test_continuous_output_has_an_absolute_bound_after_first_frame(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_first_deadline_is_captured_at_eou_not_when_delayed_task_starts():
+@pytest.mark.parametrize("mode", list(TranslationMode))
+def test_first_deadline_is_captured_at_eou_not_when_delayed_task_starts(
+    monkeypatch, mode
+):
+    monkeypatch.setattr(openai_runtime, "_QUALITY_FIRST_PREPARATION_SECONDS", 0.01)
+
     async def scenario():
         h = Harness(timeout=0.01)
-        request = await h.open()
+        request = await h.open(mode=mode)
         original = h.provider._process
 
         async def delayed_process(session, generation):
@@ -1118,10 +1126,11 @@ def test_cancel_owns_only_selected_active_queued_or_collecting_utterance(selecte
     asyncio.run(scenario())
 
 
-def test_drain_revokes_every_task_and_collector_before_releasing_pipeline():
+@pytest.mark.parametrize("mode", list(TranslationMode))
+def test_drain_revokes_every_task_and_collector_before_releasing_pipeline(mode):
     async def scenario():
         h = Harness()
-        request = await h.open()
+        request = await h.open(mode=mode)
         h.pipelines[0].transcribe_gate = asyncio.Event()
         values = [
             frame(request, sequence=index, final=index != 2) for index in range(3)
@@ -1385,15 +1394,26 @@ def test_quality_first_invalid_response_never_publishes_prepared_partial_audio(f
     asyncio.run(scenario())
 
 
-def test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline():
+@pytest.mark.parametrize("body", ["trickle", "stalled-eof"])
+def test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline(
+    monkeypatch, body
+):
+    monkeypatch.setattr(openai_runtime, "_QUALITY_FIRST_PREPARATION_SECONDS", 0.03)
+
     async def scenario():
         h = Harness(timeout=0.03)
         request = await h.open(mode=TranslationMode.QUALITY_FIRST)
+        closed = asyncio.Event()
 
         async def slow_speech(_text, _language):
-            for _ in range(9):
-                yield b"\x01\x00" * 480
-                await asyncio.sleep(0.01)
+            try:
+                for _ in range(9):
+                    yield b"\x01\x00" * 480
+                    if body == "stalled-eof":
+                        await asyncio.Event().wait()
+                    await asyncio.sleep(0.01)
+            finally:
+                closed.set()
 
         h.pipelines[0].speech = slow_speech
         await h.provider.submit_frame(frame(request))
@@ -1404,6 +1424,157 @@ def test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline(
         ]
         assert h.events[-1].outcome is UtteranceOutcome.DROPPED
         assert h.events[-1].final_audio_sequence is None
+        assert closed.is_set()
         await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", list(TranslationMode))
+def test_preparation_deadline_is_mode_scoped_and_captured_at_eou(mode):
+    async def scenario():
+        h = Harness(timeout=6)
+        request = await h.open(mode=mode)
+        value = frame(request)
+        pipeline = h.pipelines[0]
+        pipeline.transcribe_gate = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        before = loop.time()
+        try:
+            await h.provider.submit_frame(value)
+            generation = h.provider._sessions[request.session_id].utterances[
+                value.utterance_id
+            ]
+            expected = 12 if mode is TranslationMode.QUALITY_FIRST else 6
+            assert before + expected <= generation.deadline <= loop.time() + expected
+            assert h.provider._drain_timeout == 6
+        finally:
+            await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_quality_first_late_whole_eof_completes_without_early_pcm_and_peer_progress(
+    monkeypatch,
+):
+    monkeypatch.setattr(openai_runtime, "_QUALITY_FIRST_PREPARATION_SECONDS", 0.3)
+
+    async def scenario():
+        h = Harness(timeout=0.03)
+        request = await h.open(mode=TranslationMode.QUALITY_FIRST, rate=24_000)
+        peer = open_request(mode=TranslationMode.QUALITY_FIRST).model_copy(
+            update={
+                "direction_id": AudioDirection.SPEAKER,
+                "source_language": Language.EN,
+                "target_language": Language.RU,
+            }
+        )
+        await h.provider.reserve_session(peer, h.publish).open()
+        prepared, eof = asyncio.Event(), asyncio.Event()
+        original = h.pipelines[0].speech
+
+        async def held_eof(_text, _language):
+            yield b"\x01\x00" * 480
+            prepared.set()
+            await eof.wait()
+
+        h.pipelines[0].speech = held_eof
+        value, peer_value = frame(request), frame(peer)
+        try:
+            await h.provider.submit_frame(value)
+            await asyncio.wait_for(prepared.wait(), 0.25)
+            await h.provider.submit_frame(peer_value)
+            await asyncio.sleep(0.06)
+            assert not any(event.session_id == request.session_id for event in h.events)
+            assert any(
+                isinstance(event, ProviderUtteranceFinal)
+                and event.utterance_id == peer_value.utterance_id
+                and event.outcome is UtteranceOutcome.COMPLETED
+                for event in h.events
+            )
+            eof.set()
+            await h.settled()
+            audio = [
+                event
+                for event in h.events
+                if isinstance(event, ProviderAudioDelta)
+                and event.utterance_id == value.utterance_id
+            ]
+            assert len(audio) == 1 and audio[0].pcm == b"\x01\x00" * 480
+            assert h.events[-1].outcome is UtteranceOutcome.COMPLETED
+            assert h.events[-1].utterance_id == value.utterance_id
+            h.pipelines[0].speech = original
+            following = frame(request, sequence=1)
+            await h.provider.submit_frame(following)
+            await h.settled()
+            assert h.events[-1].utterance_id == following.utterance_id
+            assert h.events[-1].outcome is UtteranceOutcome.COMPLETED
+            assert len(h.pipelines) == 2 and not h.pipelines[0].closed
+        finally:
+            eof.set()
+            await h.provider.shutdown()
+            assert all(pipeline.closed for pipeline in h.pipelines)
+
+    asyncio.run(scenario())
+
+
+def test_quality_first_preparation_budget_includes_waiting_for_processing_lock(
+    monkeypatch,
+):
+    monkeypatch.setattr(openai_runtime, "_QUALITY_FIRST_PREPARATION_SECONDS", 0.03)
+
+    async def scenario():
+        h = Harness()
+        request = await h.open(mode=TranslationMode.QUALITY_FIRST)
+        session = h.provider._sessions[request.session_id]
+        try:
+            async with session.processing_lock:
+                await h.provider.submit_frame(frame(request))
+                await h.settled()
+            assert h.pipelines[0].calls == [("warmup",)]
+            assert [type(event) for event in h.events] == [
+                PrivacySafeProviderError,
+                ProviderUtteranceFinal,
+            ]
+            assert h.events[-1].outcome is UtteranceOutcome.DROPPED
+            assert h.events[-1].final_audio_sequence is None
+            assert not session.failed
+        finally:
+            await h.provider.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_quality_first_first_pcm_commit_switches_to_original_output_liveness_budget(
+    monkeypatch,
+):
+    monkeypatch.setattr(openai_runtime, "_QUALITY_FIRST_PREPARATION_SECONDS", 0.3)
+
+    async def scenario():
+        h = Harness(timeout=0.03)
+        request = await h.open(mode=TranslationMode.QUALITY_FIRST)
+        session = h.provider._sessions[request.session_id]
+        value = frame(request)
+        committed = asyncio.Event()
+
+        async def blocked_after_commit(batch, commit):
+            h.events.extend(batch)
+            commit()
+            if any(isinstance(event, ProviderAudioDelta) for event in batch):
+                generation = session.utterances[value.utterance_id]
+                assert generation.deadline <= asyncio.get_running_loop().time() + 0.03
+                committed.set()
+                await asyncio.Event().wait()
+
+        session.publish = blocked_after_commit
+        try:
+            await h.provider.submit_frame(value)
+            await asyncio.wait_for(committed.wait(), 0.25)
+            await asyncio.wait_for(h.settled(), 0.2)
+            assert h.events[-1].outcome is UtteranceOutcome.DROPPED
+            assert h.events[-1].final_audio_sequence == 0
+            assert session.delivery_error is None and not session.failed
+        finally:
+            await h.provider.shutdown()
 
     asyncio.run(scenario())

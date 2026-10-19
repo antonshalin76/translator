@@ -619,6 +619,22 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
                 observed_monotonic_ns,
             } => {
                 if let Some(utterance) = utterances.get_mut(&(direction, utterance_id)) {
+                    if utterance.quality_cloud {
+                        if utterance.first_audio_monotonic_ns.is_none()
+                            && !utterance.first_audio_expired
+                        {
+                            utterance.first_audio_expired = true;
+                            self.store.record_translation_progress(
+                                direction,
+                                crate::DirectionProgressOutcome::LateAudioDropped,
+                            );
+                        }
+                        // A timeout is not a native first/last audio receipt.
+                        if utterance.terminal_received {
+                            utterances.remove(&(direction, utterance_id));
+                        }
+                        return;
+                    }
                     if !utterance.first_audio_expired {
                         utterance.first_audio_expired = true;
                         self.store.record_translation_progress(
@@ -4173,6 +4189,16 @@ async fn run_direction_loop(
                                             direction = ?launch.runtime.direction,
                                             action = "purge_and_send"
                                         );
+                                        if launch.runtime.provider_id == translator_core::ProviderId::Openai
+                                            && session.provider_contract().mode == translator_ipc::provider::TranslationMode::QualityFirst
+                                            && let Some(translator_ipc::provider::provider_request::Request::CancelUtterance(cancel)) = request.request.as_ref()
+                                            && let Ok(utterance_id) = Uuid::parse_str(&cancel.utterance_id)
+                                        {
+                                            observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
+                                                direction: launch.runtime.direction, utterance_id,
+                                                observed_monotonic_ns: monotonic_ns(),
+                                            });
+                                        }
                                         playback_queue.clear();
                                         playback_metadata.clear();
                                         reset_playback = true;
@@ -6801,8 +6827,8 @@ pub(crate) mod tests {
             let limit_ms = translator_ipc::first_audio_max_age_ms(
                 translator_ipc::provider::ProviderId::try_from(directions[0].1.open.provider_id).unwrap(),
                 translator_ipc::provider::TranslationMode::try_from(directions[0].1.open.mode).unwrap());
-            assert_eq!(limit_ms, if late_quality_answer { 6_000 } else { 2_000 });
-            let delay_ms = if late_quality_answer { 5_200 } else { u64::from(limit_ms) + 25 };
+            assert_eq!(limit_ms, if late_quality_answer { 12_000 } else { 2_000 });
+            let delay_ms = if late_quality_answer { 7_200 } else { u64::from(limit_ms) + 25 };
             let expires_ns = first[0].capture_monotonic_ns + delay_ms * 1_000_000;
             tokio::time::sleep(Duration::from_nanos(expires_ns.saturating_sub(monotonic_ns()))).await;
             assert!(directions.iter().all(|(_, _, _, task, _)| !task.is_finished()));
@@ -9436,6 +9462,74 @@ pub(crate) mod tests {
             let peer = snapshot.translation_progress.iter().find(|progress| progress.direction_id != direction).unwrap();
             proptest::prop_assert_eq!((peer.audio_started, peer.late_audio_dropped), (0, 0));
         }
+    }
+
+    #[test]
+    fn cloud_preparation_expiry_reports_missing_audio_without_inventing_latency() {
+        let store = RuntimeStore::default();
+        let cloud = store
+            .provider_candidate(crate::ProviderPatch {
+                provider_id: ProviderId::Openai,
+                cloud_opt_in: Some(true),
+            })
+            .unwrap();
+        store.commit_control(cloud);
+        let observer = RuntimeLatencyObserver::new(store.clone());
+        let direction = AudioDirection::Microphone;
+        for index in 0..20 {
+            let utterance_id = Uuid::new_v4();
+            observer.observe(DuplexRuntimeEvent::SpeechStarted {
+                direction,
+                utterance_id,
+                capture_monotonic_ns: (index + 1) * 1_000_000_000,
+            });
+            for _ in 0..2 {
+                observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
+                    direction,
+                    utterance_id,
+                    observed_monotonic_ns: (index + 13) * 1_000_000_000,
+                });
+            }
+            observer.observe(DuplexRuntimeEvent::UtteranceTerminalOutcome {
+                direction,
+                utterance_id,
+                outcome: TerminalOutcome::Cancelled,
+            });
+            observer.observe(DuplexRuntimeEvent::UtteranceTerminal {
+                direction,
+                utterance_id,
+            });
+        }
+        let next = Uuid::new_v4();
+        observer.observe(DuplexRuntimeEvent::SpeechStarted {
+            direction,
+            utterance_id: next,
+            capture_monotonic_ns: 40_000_000_000,
+        });
+        observer.observe(DuplexRuntimeEvent::AudioFrame {
+            direction,
+            utterance_id: next,
+            sequence: 0,
+            provider_monotonic_ns: 41_000_000_000,
+            observed_monotonic_ns: 41_000_000_000,
+            queue_lag_ms: 0,
+        });
+        observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
+            direction,
+            utterance_id: next,
+            observed_monotonic_ns: 42_000_000_000,
+        });
+        store.evaluate_latency_epoch(direction, 60_000);
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.translation_progress[0].late_audio_dropped, 20);
+        assert_eq!(snapshot.translation_progress[0].audio_started, 1);
+        assert_eq!(
+            snapshot.translation_progress[0].last_outcome,
+            Some(crate::DirectionProgressOutcome::AudioStarted)
+        );
+        assert_eq!(snapshot.translation_progress[1].late_audio_dropped, 0);
+        assert_eq!(snapshot.latency_policy[0].p95_first_audio_ms, 0);
+        assert_eq!(snapshot.latency_policy[0].p95_last_audio_ms, 0);
     }
 
     #[test]

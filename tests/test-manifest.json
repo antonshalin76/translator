@@ -256,7 +256,7 @@
         "sidecar/tests/test_task7_e2e.py",
         "sidecar/tests/test_task7_live.py"
       ],
-      "node_count": 1320,
+      "node_count": 1333,
       "nodes": [
         {
           "file": "sidecar/tests/test_asr_quality.py",
@@ -4832,7 +4832,19 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_drain_revokes_every_task_and_collector_before_releasing_pipeline",
+          "id": "sidecar/tests/test_openai_runtime.py::test_drain_revokes_every_task_and_collector_before_releasing_pipeline[balanced]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_drain_revokes_every_task_and_collector_before_releasing_pipeline[quality_first]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_drain_revokes_every_task_and_collector_before_releasing_pipeline[streaming_first]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4922,7 +4934,19 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_first_deadline_is_captured_at_eou_not_when_delayed_task_starts",
+          "id": "sidecar/tests/test_openai_runtime.py::test_first_deadline_is_captured_at_eou_not_when_delayed_task_starts[balanced]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_first_deadline_is_captured_at_eou_not_when_delayed_task_starts[quality_first]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_first_deadline_is_captured_at_eou_not_when_delayed_task_starts[streaming_first]",
           "reason": "",
           "status": "deterministic"
         },
@@ -4982,7 +5006,31 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_preparation_deadline_is_mode_scoped_and_captured_at_eou[balanced]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_preparation_deadline_is_mode_scoped_and_captured_at_eou[quality_first]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_preparation_deadline_is_mode_scoped_and_captured_at_eou[streaming_first]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
           "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_cancel_before_eof_purges_buffer_and_next_phrase_completes",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_first_pcm_commit_switches_to_original_output_liveness_budget",
           "reason": "",
           "status": "deterministic"
         },
@@ -5006,7 +5054,25 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_late_whole_eof_completes_without_early_pcm_and_peer_progress",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_preparation_budget_includes_waiting_for_processing_lock",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline[stalled-eof]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_quality_first_raw_complete_frames_do_not_renew_first_response_deadline[trickle]",
           "reason": "",
           "status": "deterministic"
         },
@@ -5372,7 +5438,19 @@
         },
         {
           "file": "sidecar/tests/test_openai_runtime.py",
-          "id": "sidecar/tests/test_openai_runtime.py::test_watchdog_drops_one_phrase_and_next_phrase_recovers",
+          "id": "sidecar/tests/test_openai_runtime.py::test_watchdog_drops_one_phrase_and_next_phrase_recovers[balanced]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_watchdog_drops_one_phrase_and_next_phrase_recovers[quality_first]",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "sidecar/tests/test_openai_runtime.py",
+          "id": "sidecar/tests/test_openai_runtime.py::test_watchdog_drops_one_phrase_and_next_phrase_recovers[streaming_first]",
           "reason": "",
           "status": "deterministic"
         },
@@ -8236,7 +8314,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1119,
+      "node_count": 1122,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -11440,6 +11518,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::cloud_preparation_expiry_reports_missing_audio_without_inventing_latency",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::cloud_quality_latency_uses_eou_and_accepts_four_second_response_after_long_speech",
           "status": "deterministic"
         },
@@ -13131,6 +13214,16 @@
         {
           "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
           "id": "translator-daemon::test::provider_audio_watchdog::provider_audio_before_eou_keeps_the_immutable_input_deadline",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
+          "id": "translator-daemon::test::provider_audio_watchdog::quality_cloud_preparation_is_bounded_without_extending_output_liveness",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/tests/provider_audio_watchdog.rs",
+          "id": "translator-daemon::test::provider_audio_watchdog::response_preparation_budget_is_mode_scoped_and_never_renewed",
           "status": "deterministic"
         },
         {

@@ -24,9 +24,18 @@ pub const fn first_audio_target_ms(provider: ProviderId, mode: TranslationMode) 
 
 pub const fn first_audio_max_age_ms(provider: ProviderId, mode: TranslationMode) -> u32 {
     match (provider, mode) {
-        // Whole-EOF cloud speech may miss the target; the response watchdog still bounds it.
-        (ProviderId::Openai, TranslationMode::QualityFirst) => 6_000,
+        (ProviderId::Openai, TranslationMode::QualityFirst) => {
+            first_response_timeout_ms(provider, mode)
+        }
         _ => first_audio_target_ms(provider, mode),
+    }
+}
+
+pub const fn first_response_timeout_ms(provider: ProviderId, mode: TranslationMode) -> u32 {
+    match (provider, mode) {
+        // Preparation includes queue, ASR, translation and validated whole-speech EOF.
+        (ProviderId::Openai, TranslationMode::QualityFirst) => 12_000,
+        _ => 6_000,
     }
 }
 
