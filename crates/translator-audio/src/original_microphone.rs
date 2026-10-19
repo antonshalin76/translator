@@ -599,6 +599,8 @@ struct NativeTransport {
     cancel_at: Option<NativePhase>,
     #[cfg(test)]
     accepted_pcm: Option<Vec<u8>>,
+    #[cfg(test)]
+    prebuffering: bool,
 }
 
 #[cfg(test)]
@@ -634,6 +636,8 @@ impl NativeTransport {
             cancel_at: None,
             #[cfg(test)]
             accepted_pcm: None,
+            #[cfg(test)]
+            prebuffering: false,
         })
     }
 
@@ -746,6 +750,14 @@ impl NativeTransport {
             || registration.source_index != route.source_index
             || registration.sink_index != route.sink_index
         {
+            tracing::warn!(
+                event = "original_microphone_identity_rejected",
+                component = "route",
+                source_name_matches = registration.source_name == route.source,
+                source_index_matches = registration.source_index == route.source_index,
+                sink_index_matches = registration.sink_index == route.sink_index,
+                "Native original microphone route identity mismatch"
+            );
             return Err(OriginalMicrophoneError::Identity);
         }
         watch_stream(self.capture.as_mut().unwrap(), &registration.lease);
@@ -754,7 +766,6 @@ impl NativeTransport {
         self.context.set_state_callback(Some(Box::new(move || {
             context_lease.fail(OriginalMicrophoneError::Transport, "context_state")
         })));
-        self.inspect(&registration, true, deadline)?;
         self.activate(&registration, deadline)?;
         self.inspect(&registration, true, deadline)?;
         self.check_flow(&registration.lease)?;
@@ -823,6 +834,10 @@ impl NativeTransport {
         })();
         if result.is_err() {
             trigger.cancel();
+        }
+        #[cfg(test)]
+        if result.is_ok() {
+            self.prebuffering = false;
         }
         result
     }
@@ -911,6 +926,23 @@ impl NativeTransport {
             || capture.get_device_name().as_deref() != Some(registration.source_name.as_str())
             || playback.get_device_name().as_deref() != Some(MIC_OUT_SINK)
         {
+            tracing::warn!(
+                event = "original_microphone_identity_rejected",
+                component = "check_streams",
+                context_ready = self.context.get_state() == ContextState::Ready,
+                client_matches = self.context.get_index() == Some(registration.client_id),
+                capture_ready = capture.get_state() == StreamState::Ready,
+                playback_ready = playback.get_state() == StreamState::Ready,
+                capture_index_matches = capture.get_index() == Some(registration.capture_index),
+                playback_index_matches = playback.get_index() == Some(registration.playback_index),
+                source_index_matches =
+                    capture.get_device_index() == Some(registration.source_index),
+                sink_index_matches = playback.get_device_index() == Some(registration.sink_index),
+                source_name_matches =
+                    capture.get_device_name().as_deref() == Some(registration.source_name.as_str()),
+                sink_name_matches = playback.get_device_name().as_deref() == Some(MIC_OUT_SINK),
+                "Native original microphone stream identity mismatch"
+            );
             return Err(OriginalMicrophoneError::Identity);
         }
         validate_native_formats(
@@ -1049,9 +1081,14 @@ impl NativeTransport {
         let introspector = self.context.introspect();
         let results = Rc::clone(&checks);
         let identity = registration.clone();
+        #[cfg(test)]
+        let prebuffering = self.prebuffering;
         let mut playback =
             introspector.get_sink_input_info(registration.playback_index, move |result| {
                 record_inspection(&results, 0, result, |info| {
+                    let corked = info.corked;
+                    #[cfg(test)]
+                    let corked = corked || prebuffering;
                     info.index == identity.playback_index
                         && info.sink == identity.sink_index
                         && info.client == Some(identity.client_id)
@@ -1063,7 +1100,7 @@ impl NativeTransport {
                         && info.volume.len() == 1
                         && (!initial_zero || info.volume == Volume::MUTED)
                         && !info.mute
-                        && !info.corked
+                        && !corked
                         && properties_match(
                             &info.proplist,
                             &identity,
@@ -1457,6 +1494,17 @@ fn record_inspection<T>(
             check.valid = false;
             check.complete = true;
         }
+    }
+    if !check.valid || (check.complete && check.items != 1) {
+        tracing::warn!(
+            event = "original_microphone_identity_rejected",
+            component = "record_inspection",
+            inspection_index = index,
+            items = check.items,
+            valid = check.valid,
+            complete = check.complete,
+            "Native original microphone inspection rejected"
+        );
     }
 }
 
@@ -2207,6 +2255,37 @@ mod tests {
         };
         let source_index = endpoint("sources", microphone);
         let sink_index = endpoint("sinks", MIC_OUT_SINK);
+        let session_id = Uuid::new_v4();
+        let mut native = NativeTransport::new(session_id).unwrap();
+        // Model the valid server readback while playback is waiting for prebuffer credit.
+        native.prebuffering = true;
+        let registration = native
+            .connect(
+                Route {
+                    source: microphone.to_owned(),
+                    source_index,
+                    sink_index,
+                },
+                session_id,
+                Arc::new(Lease::default()),
+                Instant::now() + STARTUP_LIMIT,
+            )
+            .expect("cold playback must activate before strict uncorked readback");
+        assert!(!native.prebuffering);
+        native.prebuffering = true;
+        assert_eq!(
+            native.inspect(&registration, true, Instant::now() + STARTUP_LIMIT),
+            Err(OriginalMicrophoneError::Identity),
+            "post-activation readback must still reject corked playback"
+        );
+        native.disconnect(Instant::now() + CLEANUP_LIMIT).unwrap();
+        for kind in ["sink-inputs", "source-outputs"] {
+            assert!(
+                inventory(kind).iter().all(|value| {
+                    value["properties"][SESSION_PROPERTY] != session_id.to_string()
+                })
+            );
+        }
         for phase in [
             NativePhase::Context,
             NativePhase::Playback,

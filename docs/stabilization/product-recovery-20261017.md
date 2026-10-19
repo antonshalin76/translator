@@ -28,13 +28,17 @@
 До первого PCM озвучка полностью получена и проверена. VPN `amn0` обязателен. Остальные режимы,
 локальные сроки, Start/Stop и отмена не меняются; физическая речь в cloud не идёт.
 
-Открыты 5/8/9/10/11/12. Последний длительный cloud-тест остановлен на шестой
-минуте по прежнему жёсткому контракту 5 s: 29/30 Completed, одна Cancelled после подготовки первого PCM примерно
-за 5.169 s. Полный TTS занял 3.474 s, из них headers→EOF — 2.585 s;
-после EOF публикация заняла 0.271 ms. Это FAIL задержки, а не доказательство
-зависания: прежний тест сам останавливается при первом expiry. Новый отдельный
-тест обязан проверить следующую фразу и соседнее направление, не ослабляя
-прежний zero-fault gate и не учитывая Cancelled как Completed.
+Открыты 5/8/9/10/11/12 до проверки окончательного установленного пакета.
+Cloud `35c0d02` прошёл 1200 s: Completed 100/100, faults/cancellations 0,
+независимые ненулевые sink-счётчики 15836/19182, полная очистка, swap 0.
+Все 602 HTTP-запроса завершились 200. ASR-start→полный TTS EOF: p50 3017 ms,
+p95 4111 ms, max 5840 ms; это не измерение EOU→native PCM и не доказательство
+реальной доставки позже 6 s. Последнее отдельно проверено synthetic canary 7.2 s.
+Прежние cloud FAIL при бюджетах 5/6 s сохраняются без пересчёта в PASS.
+Native Start пакета `35c0d02` дал `Identity`; диагностический пакет позднее
+прошёл 11 UI-проверок, но логи без изменения поведения не доказывают исправление.
+Обнаруженная преждевременная проверка uncorked playback исправляется у владельца
+original-mic; строгий readback остаётся после активации, до передачи речи.
 
 На текущей связке четыре спорных случая заново прошли полный ASR→MT→TTS:
 готовность 3.040–3.459 s от компонентного file-ASR start. Независимый Qwen
@@ -113,6 +117,57 @@ systemd/installer — секреты окружения, процессная г
 Исправлять причину один раз у владельца. Не дублировать правила в UI/тестах.
 
 ## Журнал выполнения
+
+### 2026-10-19: холодный original-mic startup
+
+- Физический probe с нулевым gain наблюдал корректный playback как corked
+  во время prebuffering. До активации нужны bounded нули, а не передача речи;
+  `pump(false)` отбрасывает capture. Первая строгая `inspect` требовала uncorked
+  до `activate`, которая только и доказывает trigger ACK/consumer progress.
+- В существующий private-Pulse lifecycle test добавлен test-only readback fault:
+  corked до успешной активации. RED — `Identity`; удаление единственной
+  преждевременной `inspect` сохраняет strict post-activation readback,
+  check_flow и публикацию только после проверки. Отдельная отрицательная
+  проверка продолжает отвергать corked после активации. Это доказанный дефект
+  порядка, но не доказанная единственная причина исторического opaque Identity.
+- Нет нового FSM, retry, deadline, зависимости или ослабления acoustic admission.
+  Безопасные диагностические поля содержат только predicates/счётчики.
+  Физический микрофон не сохраняется и не отправляется в OpenAI.
+
+### 2026-10-19: новый пакет — открытый отказ реального Start
+
+- Source `35c0d02`, tree `1ef45a3ca1b6f47012b86aa92c5361bdd17ace17`:
+  runtime/source gates прошли (Rust 1099, pytest 1328, unittest 394, UI 34),
+  затем aggregate остановился на отсутствующем regression-seed в publication
+  inventory. Единственная metadata-коррекция +1 path; неизменные code/lock/test
+  blobs проверены повторным architect readback. Final-tree SCA/schema/
+  publication/manifest tail PASS. Исходный aggregate остаётся FAIL.
+  Exact-head no-mistakes охватил все 13 paths без замечаний; обычный SSH push
+  и readback origin подтвердили SHA. Это не product PASS.
+- Новый preview собран и установлен; полный checksum inventory, загрузка ключа,
+  auth rejection, Stopped/local/no-egress, restart и реальный rollback на
+  `040dd3d`/возврат нового пакета прошли. Новый native UI затем отверг Start:
+  `original_loopback_custody_unknown`, original-mic startup `Identity`.
+  Позднее возник отдельный `MoveFailed`/`cleanup_pending`. Сохранённые stream
+  metadata подтверждают 48-kHz/s16/mono, правильные source/sink и gain, но не
+  раскрывают конкретный нарушенный predicate. Диагностика продолжается без
+  ослабления guard. Предыдущий UI PASS на `040dd3d` не закрывает этот FAIL.
+- Новый 12-s cloud sustained gate запущен отдельно на сохранённом immutable
+  debug-бинарнике `35c0d02` и noneditable package; это не проверка host Start.
+  Работа в native-original owner не меняет измеряемый cloud artifact.
+  Safe tracing уточняет route/stream/inspection причины Identity без ослабления
+  predicates. Изолированный native owner на уже существующем виртуальном
+  источнике/нулевом gain прошёл prepare/Stop; физический микрофон не открывался.
+  На хосте появился захват Jieli процессом Zoom — физическая проверка отложена.
+  `cleanup_pending` удерживает bypass custody после непроверенного маршрута,
+  а не доказанный живой runtime; explicit Stop повторяет проверку фактов.
+  Изолированный cloud `35c0d02` завершился PASS: 1200 s, Completed 100/100,
+  faults 0, independent nonzero sink 15836/19182, cleanup полный, swap 0.
+  Это debug/private-Pulse + packaged Python, не installed HTTP Start.
+  После освобождения Jieli нулевой physical native-owner probe также прошёл
+  prepare/Stop, без сохранения PCM; первоначальный daemon Start FAIL не снят.
+  Следующая диагностика привязывается к полному daemon, не ослабляет guard и
+  не меняет прошедшие cloud-модули. Пункты 5/8/9/10/11/12 пока открыты.
 
 ### 2026-10-19: завершение локального прогона и установленный интерфейс
 
