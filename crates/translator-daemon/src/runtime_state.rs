@@ -25,6 +25,7 @@ pub struct RuntimeSnapshot {
     pub debug_text_enabled: bool,
     pub debug_capture_enabled: bool,
     pub directions: Vec<DirectionState>,
+    pub translation_progress: Vec<DirectionProgress>,
     pub audio_mix: AudioMixState,
     pub provider_id: ProviderId,
     pub audio_leaves_machine: bool,
@@ -50,6 +51,9 @@ impl Default for RuntimeSnapshot {
                 DirectionState::new(AudioDirection::Microphone, Language::Ru, Language::En),
                 DirectionState::new(AudioDirection::Speaker, Language::En, Language::Ru),
             ],
+            translation_progress: [AudioDirection::Microphone, AudioDirection::Speaker]
+                .map(DirectionProgress::new)
+                .to_vec(),
             audio_mix: AudioMixState::default(),
             provider_id: ProviderId::Local,
             audio_leaves_machine: false,
@@ -63,6 +67,32 @@ impl Default for RuntimeSnapshot {
             self_test: RoundTripSelfTestState::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DirectionProgress {
+    pub direction_id: AudioDirection,
+    pub audio_started: u64,
+    pub late_audio_dropped: u64,
+    pub last_outcome: Option<DirectionProgressOutcome>,
+}
+
+impl DirectionProgress {
+    fn new(direction_id: AudioDirection) -> Self {
+        Self {
+            direction_id,
+            audio_started: 0,
+            late_audio_dropped: 0,
+            last_outcome: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectionProgressOutcome {
+    AudioStarted,
+    LateAudioDropped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -311,6 +341,41 @@ impl RuntimeStore {
         snapshot
     }
 
+    pub(crate) fn reset_translation_progress(&self) {
+        let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
+        for progress in &mut snapshot.translation_progress {
+            *progress = DirectionProgress::new(progress.direction_id);
+        }
+        drop(snapshot);
+        self.publish_snapshot_changed();
+    }
+
+    pub(crate) fn record_translation_progress(
+        &self,
+        direction: AudioDirection,
+        outcome: DirectionProgressOutcome,
+    ) {
+        let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
+        let Some(progress) = snapshot
+            .translation_progress
+            .iter_mut()
+            .find(|progress| progress.direction_id == direction)
+        else {
+            return;
+        };
+        match outcome {
+            DirectionProgressOutcome::AudioStarted => {
+                progress.audio_started = progress.audio_started.saturating_add(1)
+            }
+            DirectionProgressOutcome::LateAudioDropped => {
+                progress.late_audio_dropped = progress.late_audio_dropped.saturating_add(1)
+            }
+        }
+        progress.last_outcome = Some(outcome);
+        drop(snapshot);
+        self.publish_snapshot_changed();
+    }
+
     pub fn set_audio_graph(&self, state: AudioGraphState) {
         let mut snapshot = self.snapshot.write().expect("runtime state lock poisoned");
         if snapshot.audio_graph.as_ref() == Some(&state) {
@@ -546,6 +611,11 @@ impl RuntimeStore {
         snapshot.audio_mix = candidate.audio_mix;
         snapshot.provider_id = candidate.provider_id;
         snapshot.audio_leaves_machine = candidate.audio_leaves_machine;
+        if provider_changed {
+            for progress in &mut snapshot.translation_progress {
+                *progress = DirectionProgress::new(progress.direction_id);
+            }
+        }
         if admitted_facts {
             snapshot.devices = candidate.devices;
             snapshot.audio_graph = candidate.audio_graph;
@@ -836,6 +906,37 @@ mod tests {
     };
 
     use super::{RuntimeEvent, RuntimeStore};
+
+    #[test]
+    fn translation_progress_is_saturating_and_provider_scoped() {
+        let store = RuntimeStore::default();
+        {
+            let mut snapshot = store.snapshot.write().unwrap();
+            snapshot.translation_progress[0].audio_started = u64::MAX;
+            snapshot.translation_progress[0].late_audio_dropped = u64::MAX;
+        }
+        store.record_translation_progress(
+            super::AudioDirection::Microphone,
+            super::DirectionProgressOutcome::AudioStarted,
+        );
+        store.record_translation_progress(
+            super::AudioDirection::Microphone,
+            super::DirectionProgressOutcome::LateAudioDropped,
+        );
+        let progress = store.snapshot().translation_progress;
+        assert_eq!(progress[0].audio_started, u64::MAX);
+        assert_eq!(progress[0].late_audio_dropped, u64::MAX);
+        let candidate = store.snapshot();
+        store.commit_control(candidate);
+        assert_eq!(store.snapshot().translation_progress, progress);
+        let mut candidate = store.snapshot();
+        candidate.provider_id = super::ProviderId::Openai;
+        store.commit_control(candidate);
+        assert_eq!(
+            store.snapshot().translation_progress,
+            super::RuntimeSnapshot::default().translation_progress
+        );
+    }
 
     #[test]
     fn provider_switch_resets_latency_history_without_changing_selected_modes() {

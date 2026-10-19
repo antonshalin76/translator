@@ -1045,6 +1045,11 @@ impl DuplexRuntimeObserverFanout {
 }
 
 impl DuplexRuntimeObserver for DuplexRuntimeObserverFanout {
+    fn start_session(&self) {
+        self.primary.start_session();
+        self.collector.start_session();
+    }
+
     fn observe(&self, event: DuplexRuntimeEvent) {
         self.primary.observe(event);
         self.collector.observe(event);
@@ -1145,6 +1150,10 @@ mod tests {
     }
 
     impl DuplexRuntimeObserver for PrimaryObserver {
+        fn start_session(&self) {
+            self.internal_events.lock().unwrap().push("start");
+        }
+
         fn observe(&self, event: DuplexRuntimeEvent) {
             self.public_events.lock().unwrap().push(event);
         }
@@ -1928,6 +1937,7 @@ mod tests {
         collector.start_positive_control(100).unwrap();
         let primary = Arc::new(PrimaryObserver::default());
         let fanout = DuplexRuntimeObserverFanout::new(primary.clone(), collector.clone());
+        fanout.start_session();
         let public_event = DuplexRuntimeEvent::SpeechStarted {
             direction: AudioDirection::Microphone,
             utterance_id: Uuid::new_v4(),
@@ -1949,7 +1959,7 @@ mod tests {
         );
         assert_eq!(
             primary.internal_events.lock().unwrap().as_slice(),
-            &["capture", "attempted", "accepted"]
+            &["start", "capture", "attempted", "accepted"]
         );
         assert_eq!(
             primary.resets.lock().unwrap().as_slice(),

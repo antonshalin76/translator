@@ -12,7 +12,7 @@
       "files": [
         "apps/translator-ui/src/uiModel.test.ts"
       ],
-      "node_count": 29,
+      "node_count": 34,
       "nodes": [
         {
           "file": "apps/translator-ui/src/uiModel.test.ts",
@@ -173,6 +173,36 @@
         {
           "file": "apps/translator-ui/src/uiModel.test.ts",
           "id": "apps/translator-ui/src/uiModel.test.ts::explicit physical headphone confirmation::running, cleanup, unavailable and known speakers cannot be confirmed",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::observed direction audio progress::disconnection, disabled and stopped channels hide stale progress",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::observed direction audio progress::each direction renders only its own observed outcome",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::observed direction audio progress::expiry is an explicit skipped phrase, not evidence that a channel stopped",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::observed direction audio progress::legacy missing, empty and zero observations do not invent translated speech",
+          "reason": "",
+          "status": "deterministic"
+        },
+        {
+          "file": "apps/translator-ui/src/uiModel.test.ts",
+          "id": "apps/translator-ui/src/uiModel.test.ts::observed direction audio progress::only the next actual audio-start outcome clears the late warning; history alone cannot",
           "reason": "",
           "status": "deterministic"
         },
@@ -8151,7 +8181,7 @@
       ]
     },
     "rust": {
-      "external_skip_count": 21,
+      "external_skip_count": 23,
       "file_count": 51,
       "files": [
         "apps/translator-ui/src-tauri/src/main.rs",
@@ -8206,7 +8236,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1113,
+      "node_count": 1119,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -11300,6 +11330,11 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::runtime_state::tests::translation_progress_is_saturating_and_provider_scoped",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::runtime_state::tests::voice_override_candidates_reject_all_present_values_without_snapshot_or_events",
           "status": "deterministic"
         },
@@ -11800,6 +11835,16 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_late_quality_answer_is_played",
+          "status": "external_skip"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_burst_backpressure_preserves_capture_and_audio_order",
           "status": "deterministic"
         },
@@ -11916,6 +11961,21 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::terminal_reap_keeps_thread_ownership_until_completion_is_observable",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::translation_progress_counts_known_utterances_once",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::translation_progress_retains_completed_utterance_until_first_native_write",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::translation_progress_survives_stale_controls_and_requires_native_audio",
           "status": "deterministic"
         },
         {
@@ -16689,6 +16749,16 @@
       "code": "missing_external_prerequisite:private_pulse_fixture",
       "framework": "rust",
       "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_pulse_prepared_mode_replacement_remains_audible"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance"
+    },
+    {
+      "code": "missing_external_prerequisite:private_pulse_fixture",
+      "framework": "rust",
+      "id": "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_late_quality_answer_is_played"
     },
     {
       "code": "missing_external_prerequisite:isolated_native_pipewire",

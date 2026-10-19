@@ -14,6 +14,7 @@ pub use client::{
 pub use validation::{
     MAX_ACTIVE_UTTERANCES, MAX_TERMINAL_UTTERANCES, ProviderEventValidator,
     ProviderSessionContract, ProviderValidationError, first_audio_max_age_ms,
+    first_audio_target_ms,
 };
 
 pub const PROVIDER_PROTO: &str =

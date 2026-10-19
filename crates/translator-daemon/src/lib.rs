@@ -101,10 +101,10 @@ pub use round_trip_runtime::{
 };
 pub(crate) use runtime_state::RuntimeEvent;
 pub use runtime_state::{
-    AudioMixKnowledge, AudioMixPatch, AudioMixState, DirectionPatch, DirectionRuntimeFailure,
-    DirectionRuntimeStatus, DirectionState, LatencyPolicyPatch, ProviderPatch,
-    RoundTripSelfTestState, RuntimeMutationError, RuntimeSnapshot, RuntimeStatus, RuntimeStore,
-    VoiceProfilePatch,
+    AudioMixKnowledge, AudioMixPatch, AudioMixState, DirectionPatch, DirectionProgress,
+    DirectionProgressOutcome, DirectionRuntimeFailure, DirectionRuntimeStatus, DirectionState,
+    LatencyPolicyPatch, ProviderPatch, RoundTripSelfTestState, RuntimeMutationError,
+    RuntimeSnapshot, RuntimeStatus, RuntimeStore, VoiceProfilePatch,
 };
 pub use secure_state::{ControlToken, RuntimeLease, SecureRuntimeError, SecureRuntimeErrorCode};
 pub use sidecar_runtime::{

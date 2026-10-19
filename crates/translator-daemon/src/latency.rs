@@ -387,7 +387,7 @@ const fn thresholds(provider: ProviderId, mode: TranslationMode) -> (u32, u32) {
         TranslationMode::StreamingFirst => 250,
     };
     (
-        translator_ipc::first_audio_max_age_ms(provider_id(provider), provider_mode(mode)),
+        translator_ipc::first_audio_target_ms(provider_id(provider), provider_mode(mode)),
         queue,
     )
 }

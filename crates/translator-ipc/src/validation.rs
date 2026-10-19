@@ -12,13 +12,21 @@ const NS_PER_MS: u64 = 1_000_000;
 pub const MAX_ACTIVE_UTTERANCES: usize = 64;
 pub const MAX_TERMINAL_UTTERANCES: usize = 4096;
 
-pub const fn first_audio_max_age_ms(provider: ProviderId, mode: TranslationMode) -> u32 {
+pub const fn first_audio_target_ms(provider: ProviderId, mode: TranslationMode) -> u32 {
     match (provider, mode) {
         (ProviderId::Openai, TranslationMode::QualityFirst) => 5_000,
         (_, TranslationMode::QualityFirst) => 3_000,
         (_, TranslationMode::Balanced) => 2_000,
         (_, TranslationMode::StreamingFirst) => 1_000,
         (_, TranslationMode::Unspecified) => 0,
+    }
+}
+
+pub const fn first_audio_max_age_ms(provider: ProviderId, mode: TranslationMode) -> u32 {
+    match (provider, mode) {
+        // Whole-EOF cloud speech may miss the target; the response watchdog still bounds it.
+        (ProviderId::Openai, TranslationMode::QualityFirst) => 6_000,
+        _ => first_audio_target_ms(provider, mode),
     }
 }
 

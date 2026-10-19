@@ -2,6 +2,16 @@ schema_version = 1
 
 [[skip]]
 framework = "rust"
+id = "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
+id = "translator-daemon::lib::translator_daemon::translation_runtime::tests::production_duplex_batched_audio_late_quality_answer_is_played"
+code = "missing_external_prerequisite:private_pulse_fixture"
+
+[[skip]]
+framework = "rust"
 id = "translator-daemon::lib::translator_daemon::translation_runtime::tests::private_live_duplex_progress"
 code = "missing_external_prerequisite:private_pulse_fixture"
 

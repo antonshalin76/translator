@@ -675,6 +675,7 @@ impl DuplexRunner for NativeAecCalibrationEngine {
             .block_on(io.handle.stop_playback(deadline))
             .map_err(|_| DuplexStartFailure::rejected(DuplexRuntimeError::StartFailed))?;
         io.attach_reservation(reservation);
+        self.inner.observer.start_session();
         tokio::runtime::Handle::current()
             .block_on(io.resume(deadline))
             .map_err(DuplexStartFailure::rejected)?;

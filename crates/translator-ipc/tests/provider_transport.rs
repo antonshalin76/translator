@@ -753,7 +753,7 @@ fn validator_enforces_debug_privacy_and_static_error_messages() {
 fn validator_enforces_mode_age_at_exact_boundary() {
     for (provider, mode, deadline_ms) in [
         (ProviderId::Local, TranslationMode::QualityFirst, 3000_u64),
-        (ProviderId::Openai, TranslationMode::QualityFirst, 5000),
+        (ProviderId::Openai, TranslationMode::QualityFirst, 6000),
         (ProviderId::Local, TranslationMode::Balanced, 2000),
         (ProviderId::Openai, TranslationMode::Balanced, 2000),
         (ProviderId::Local, TranslationMode::StreamingFirst, 1000),

@@ -121,10 +121,20 @@ class MixFixture:
                     ("speaker", "en", "ru"),
                 )
             ],
+            translation_progress=[
+                dict(
+                    direction_id=direction,
+                    audio_started=0,
+                    late_audio_dropped=0,
+                    last_outcome=None,
+                )
+                for direction in ("microphone", "speaker")
+            ],
         )
         self.patches = []
         self.auth_errors = 0
         self.status_reads = 0
+        self.status_unavailable = False
         self.lock = threading.Lock()
         fixture = self
 
@@ -155,6 +165,10 @@ class MixFixture:
                     with fixture.lock:
                         fixture.status_reads += 1
                         snapshot = json.loads(json.dumps(fixture.snapshot))
+                        unavailable = fixture.status_unavailable
+                    if unavailable:
+                        self.reply(503, dict(code="service_unavailable"))
+                        return
                     self.reply(200, snapshot)
                 elif self.path == "/v1/aec-calibration":
                     self.reply(503, dict(code="aec_calibration_controller_unavailable"))
@@ -420,6 +434,97 @@ def connected_mix_checks(browser, wait, fixture, rows):
         )
 
     check("connected_busy_gain_keeps_final_commit", busy_final_gain, rows)
+
+    def service_owned_progress():
+        directions = ("microphone", "speaker")
+        late_text = "Фраза пропущена из-за задержки. Канал ждёт следующую."
+        started = {
+            "microphone": "Начата выдача аудио: 18. Пропущено из-за задержки: 3.",
+            "speaker": "Начата выдача аудио: 24. Пропущено из-за задержки: 4.",
+        }
+
+        def labels_equal(expected):
+            return browser.execute_script(
+                "return Object.entries(arguments[0]).every(([direction,text])=>"
+                "document.getElementById(direction+'-progress')?.textContent===text)",
+                expected,
+            )
+
+        def labels_hidden():
+            return not any(
+                browser.find_elements(By.ID, f"{direction}-progress")
+                for direction in directions
+            )
+
+        with fixture.lock:
+            original = json.loads(json.dumps(fixture.snapshot["translation_progress"]))
+            fixture.snapshot["translation_progress"] = [
+                dict(
+                    direction_id=direction,
+                    audio_started=count,
+                    late_audio_dropped=dropped,
+                    last_outcome="late_audio_dropped",
+                )
+                for direction, count, dropped in (
+                    ("microphone", 17, 3),
+                    ("speaker", 23, 4),
+                )
+            ]
+        try:
+            wait.until(lambda _: labels_equal(dict.fromkeys(directions, late_text)))
+            for direction in directions:
+                assert (
+                    browser.find_element(By.ID, f"{direction}-progress").get_attribute(
+                        "aria-live"
+                    )
+                    == "polite"
+                )
+            with fixture.lock:
+                for progress in fixture.snapshot["translation_progress"]:
+                    progress["audio_started"] += 1
+                    progress["last_outcome"] = "audio_started"
+            wait.until(lambda _: labels_equal(started))
+            with fixture.lock:
+                fixture.snapshot.update(
+                    runtime_status="stopped", translation_running=False
+                )
+            wait.until(lambda _: labels_hidden())
+            with fixture.lock:
+                fixture.snapshot.update(
+                    runtime_status="running", translation_running=True
+                )
+            wait.until(lambda _: labels_equal(started))
+            with fixture.lock:
+                fixture.status_unavailable = True
+            wait.until(
+                lambda page: (
+                    page.find_element(By.CSS_SELECTOR, ".build-state").text
+                    == "Нет связи с сервисом"  # noqa: RUF001 - literal Russian UI label
+                )
+            )
+            assert labels_hidden()
+        finally:
+            with fixture.lock:
+                fixture.status_unavailable = False
+                fixture.snapshot.update(
+                    runtime_status="running", translation_running=True
+                )
+                fixture.snapshot["translation_progress"] = original
+        wait.until(
+            lambda page: (
+                page.find_element(By.CSS_SELECTOR, ".build-state").text
+                == "Сервис подключён"
+            )
+        )
+        return dict(
+            latest_late_then_audio_started=True,
+            started_counts=dict(microphone=18, speaker=24),
+            dropped_counts=dict(microphone=3, speaker=4),
+            stopped_and_disconnected_hidden=True,
+            scope="service_snapshot_projection_not_completion_or_heard_audio",
+        )
+
+    check("connected_service_owned_progress", service_owned_progress, rows)
 
     def details_poll_and_cloud():
         details = browser.find_element(By.CSS_SELECTOR, ".advanced-settings")

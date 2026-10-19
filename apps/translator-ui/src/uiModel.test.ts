@@ -13,6 +13,7 @@ import {
   debugToggleIntent,
   directionToggleIntent,
   directionRuntimeLabel,
+  directionProgressLabel,
   headphoneConfirmationIntent,
   lifecycleEventClearsDebugText,
   providerPatchIntent,
@@ -34,6 +35,80 @@ test("direction labels distinguish a live channel, recovery and failure without 
   expect(directionRuntimeLabel({ ...direction, enabled: false }, true)).toBe("Отключен");
   expect(directionRuntimeLabel({ ...direction, runtime_status: "running" }, false)).toBe("Нет связи");
 });
+});
+
+describe("observed direction audio progress", () => {
+  const microphone: DirectionState = {
+    direction_id: "microphone", source_language: "ru", target_language: "en",
+    enabled: true, runtime_status: "running",
+    voice_profile: { language: "en", gender: "male", engine: "piper" },
+  };
+  const speaker: DirectionState = { ...microphone, direction_id: "speaker" };
+  const running: RuntimeSnapshot = {
+    runtime_status: "running", translation_running: true, provider_id: "openai",
+    debug_text_enabled: false, debug_capture_enabled: false,
+  };
+  const late: RuntimeSnapshot = { ...running, translation_progress: [{
+    direction_id: "microphone", audio_started: 0, late_audio_dropped: 1,
+    last_outcome: "late_audio_dropped",
+  }] };
+
+  test("legacy missing, empty and zero observations do not invent translated speech", () => {
+    expect(directionProgressLabel(running, microphone, true)).toBeNull();
+    expect(directionProgressLabel({ ...running, translation_progress: [] }, microphone, true)).toBeNull();
+    expect(directionProgressLabel({ ...running, translation_progress: [{
+      direction_id: "microphone", audio_started: 0, late_audio_dropped: 0, last_outcome: null,
+    }] }, microphone, true)).toBeNull();
+  });
+
+  test("disconnection, disabled and stopped channels hide stale progress", () => {
+    expect(directionProgressLabel(late, microphone, false)).toBeNull();
+    expect(directionProgressLabel(late, { ...microphone, enabled: false }, true)).toBeNull();
+    expect(directionProgressLabel({ ...late, runtime_status: "stopped", translation_running: false }, microphone, true)).toBeNull();
+    for (const runtime_status of ["stopped", "failed"] as const) {
+      expect(directionProgressLabel(late, { ...microphone, runtime_status }, true)).toBeNull();
+    }
+  });
+
+  test("expiry is an explicit skipped phrase, not evidence that a channel stopped", () => {
+    expect(directionProgressLabel(late, microphone, true)).toBe(
+      "Фраза пропущена из-за задержки. Канал ждёт следующую.",
+    );
+    expect(directionRuntimeLabel(microphone, true)).toBe("Канал открыт");
+    expect(directionProgressLabel(late, { ...microphone, runtime_status: "recovering" }, true)).toBe(
+      "Фраза пропущена из-за задержки. Канал восстанавливается.",
+    );
+  });
+
+  test("only the next actual audio-start outcome clears the late warning; history alone cannot", () => {
+    const history: RuntimeSnapshot = { ...late, translation_progress: [{
+      direction_id: "microphone", audio_started: 2, late_audio_dropped: 1,
+      last_outcome: "late_audio_dropped",
+    }] };
+    expect(directionProgressLabel(history, microphone, true)).toContain("Фраза пропущена");
+    const next: RuntimeSnapshot = { ...history, translation_progress: [{
+      direction_id: "microphone", audio_started: 3, late_audio_dropped: 1,
+      last_outcome: "audio_started",
+    }] };
+    expect(directionProgressLabel(next, microphone, true)).toBe(
+      "Начата выдача аудио: 3. Пропущено из-за задержки: 1.",
+    );
+    expect(directionProgressLabel(next, { ...microphone, runtime_status: "recovering" }, true)).toContain(
+      "Канал восстанавливается.",
+    );
+  });
+
+  test("each direction renders only its own observed outcome", () => {
+    const duplex: RuntimeSnapshot = { ...late, translation_progress: [
+      ...late.translation_progress!,
+      { direction_id: "speaker", audio_started: 4, late_audio_dropped: 0, last_outcome: "audio_started" },
+    ] };
+    expect(directionProgressLabel(duplex, microphone, true)).toContain("Фраза пропущена");
+    expect(directionProgressLabel(duplex, speaker, true)).toBe(
+      "Начата выдача аудио: 4. Пропущено из-за задержки: 0.",
+    );
+    expect(directionProgressLabel(late, speaker, true)).toBeNull();
+  });
 });
 
 describe("committed audio gains", () => {

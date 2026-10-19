@@ -410,6 +410,8 @@ pub trait DuplexRuntimeObserver: Send + Sync {
         self.provider_submission_accepted(direction, origin.observed_monotonic_ns);
     }
 
+    fn start_session(&self) {}
+
     fn reset_direction(&self, _direction: AudioDirection) {}
 
     fn requested_mode(&self, _direction: AudioDirection) -> Option<TranslationMode> {
@@ -480,6 +482,9 @@ struct ObservedUtterance {
     capture_monotonic_ns: u64,
     input_complete_monotonic_ns: Option<u64>,
     quality_cloud: bool,
+    first_audio_expired: bool,
+    provider_completed: bool,
+    terminal_received: bool,
     first_audio_monotonic_ns: Option<u64>,
     last_audio_monotonic_ns: Option<u64>,
     max_queue_lag_ms: u32,
@@ -496,6 +501,32 @@ impl RuntimeLatencyObserver {
             store,
             utterances: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn record_utterance_latency(&self, direction: AudioDirection, utterance: ObservedUtterance) {
+        let (Some(first), Some(last)) = (
+            utterance.first_audio_monotonic_ns,
+            utterance.last_audio_monotonic_ns,
+        ) else {
+            return;
+        };
+        let anchor = if utterance.quality_cloud {
+            let Some(input_complete) = utterance.input_complete_monotonic_ns else {
+                return;
+            };
+            input_complete
+        } else {
+            utterance.capture_monotonic_ns
+        };
+        self.store.record_latency_utterance(
+            direction,
+            last / 1_000_000,
+            LatencySample {
+                first_audio_ms: duration_ms(anchor, first),
+                last_audio_ms: duration_ms(utterance.capture_monotonic_ns, last),
+                queue_lag_ms: utterance.max_queue_lag_ms,
+            },
+        );
     }
 }
 
@@ -558,6 +589,14 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
                 ..
             } => {
                 if let Some(utterance) = utterances.get_mut(&(direction, utterance_id)) {
+                    if utterance.first_audio_monotonic_ns.is_none()
+                        && !utterance.first_audio_expired
+                    {
+                        self.store.record_translation_progress(
+                            direction,
+                            crate::DirectionProgressOutcome::AudioStarted,
+                        );
+                    }
                     utterance
                         .first_audio_monotonic_ns
                         .get_or_insert(observed_monotonic_ns);
@@ -568,6 +607,10 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
                         observed_monotonic_ns / 1_000_000,
                         Some(queue_lag_ms),
                     );
+                    if utterance.terminal_received {
+                        let utterance = utterances.remove(&(direction, utterance_id)).unwrap();
+                        self.record_utterance_latency(direction, utterance);
+                    }
                 }
             }
             DuplexRuntimeEvent::FirstAudioExpired {
@@ -576,48 +619,50 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
                 observed_monotonic_ns,
             } => {
                 if let Some(utterance) = utterances.get_mut(&(direction, utterance_id)) {
+                    if !utterance.first_audio_expired {
+                        utterance.first_audio_expired = true;
+                        self.store.record_translation_progress(
+                            direction,
+                            crate::DirectionProgressOutcome::LateAudioDropped,
+                        );
+                    }
                     utterance.first_audio_monotonic_ns = Some(observed_monotonic_ns);
                     utterance.last_audio_monotonic_ns = Some(observed_monotonic_ns);
+                    if utterance.terminal_received {
+                        let utterance = utterances.remove(&(direction, utterance_id)).unwrap();
+                        self.record_utterance_latency(direction, utterance);
+                    }
+                }
+            }
+            DuplexRuntimeEvent::UtteranceTerminalOutcome {
+                direction,
+                utterance_id,
+                outcome,
+            } => {
+                if let Some(utterance) = utterances.get_mut(&(direction, utterance_id)) {
+                    utterance.provider_completed = outcome == TerminalOutcome::Completed;
                 }
             }
             DuplexRuntimeEvent::UtteranceTerminal {
                 direction,
                 utterance_id,
             } => {
-                let Some(utterance) = utterances.remove(&(direction, utterance_id)) else {
-                    return;
-                };
-                let (Some(first), Some(last)) = (
-                    utterance.first_audio_monotonic_ns,
-                    utterance.last_audio_monotonic_ns,
-                ) else {
-                    return;
-                };
-                let anchor = if utterance.quality_cloud {
-                    let Some(input_complete) = utterance.input_complete_monotonic_ns else {
+                if let Some(utterance) = utterances.get_mut(&(direction, utterance_id)) {
+                    // Provider EOF can precede the first successful native PCM write.
+                    if utterance.provider_completed && utterance.first_audio_monotonic_ns.is_none()
+                    {
+                        utterance.terminal_received = true;
                         return;
-                    };
-                    input_complete
-                } else {
-                    utterance.capture_monotonic_ns
-                };
-                let first_audio_ms = duration_ms(anchor, first);
-                let last_audio_ms = duration_ms(utterance.capture_monotonic_ns, last);
-                self.store.record_latency_utterance(
-                    direction,
-                    last / 1_000_000,
-                    LatencySample {
-                        first_audio_ms,
-                        last_audio_ms,
-                        queue_lag_ms: utterance.max_queue_lag_ms,
-                    },
-                );
+                    }
+                }
+                if let Some(utterance) = utterances.remove(&(direction, utterance_id)) {
+                    self.record_utterance_latency(direction, utterance);
+                }
             }
             DuplexRuntimeEvent::TranscriptFinal { .. }
             | DuplexRuntimeEvent::TranslationFinal { .. }
             | DuplexRuntimeEvent::ProviderLatency { .. }
-            | DuplexRuntimeEvent::ProviderError { .. }
-            | DuplexRuntimeEvent::UtteranceTerminalOutcome { .. } => {}
+            | DuplexRuntimeEvent::ProviderError { .. } => {}
             DuplexRuntimeEvent::GenerationRestart { .. } => {
                 utterances.clear();
             }
@@ -631,6 +676,14 @@ impl DuplexRuntimeObserver for RuntimeLatencyObserver {
             .into_iter()
             .find(|policy| policy.direction_id == direction)
             .map(|policy| policy.current_mode)
+    }
+
+    fn start_session(&self) {
+        self.utterances
+            .lock()
+            .expect("latency observer mutex poisoned")
+            .clear();
+        self.store.reset_translation_progress();
     }
 
     fn reset_direction(&self, direction: AudioDirection) {
@@ -1886,6 +1939,7 @@ impl<R: crate::SidecarRuntime, E: DirectionEffects> DuplexCoordinator<R, E> {
 
     async fn start_resources(&mut self, deadline: Instant) -> Result<(), DuplexRuntimeError> {
         deadline_open(deadline, DuplexRuntimeError::StartFailed)?;
+        self.observer.start_session();
         tokio::time::timeout_at(deadline, self.supervisor.start())
             .await
             .map_err(|_| DuplexRuntimeError::StartFailed)?
@@ -5562,6 +5616,10 @@ pub(crate) mod tests {
             fn reset_direction(&self, direction: AudioDirection) {
                 self.1.reset_direction(direction);
             }
+
+            fn start_session(&self) {
+                self.1.start_session();
+            }
         }
         let directory =
             PathBuf::from(std::env::var("TRANSLATOR_LIVE_CHECK_ROOT").expect("private check root"));
@@ -5903,6 +5961,17 @@ pub(crate) mod tests {
         }
 
         async fn audio(&self, stream_id: Uuid, utterance_id: Uuid, sequence: u64) {
+            self.audio_pcm(stream_id, utterance_id, sequence, vec![0; 640])
+                .await;
+        }
+
+        async fn audio_pcm(
+            &self,
+            stream_id: Uuid,
+            utterance_id: Uuid,
+            sequence: u64,
+            pcm: Vec<u8>,
+        ) {
             self.events
                 .send(Ok(ProviderEvent {
                     event: Some(provider_event::Event::AudioDelta(
@@ -5919,7 +5988,7 @@ pub(crate) mod tests {
                             channels: 1,
                             sample_format: translator_ipc::provider::SampleFormat::S16le.into(),
                             frame_duration_ms: 20,
-                            pcm: vec![0; 640],
+                            pcm,
                         },
                     )),
                 }))
@@ -5928,6 +5997,22 @@ pub(crate) mod tests {
         }
 
         async fn completed(&self, stream_id: Uuid, utterance_id: Uuid, final_audio_sequence: u64) {
+            self.final_outcome(
+                stream_id,
+                utterance_id,
+                final_audio_sequence,
+                translator_ipc::provider::UtteranceOutcome::Completed,
+            )
+            .await;
+        }
+
+        async fn final_outcome(
+            &self,
+            stream_id: Uuid,
+            utterance_id: Uuid,
+            final_audio_sequence: u64,
+            outcome: translator_ipc::provider::UtteranceOutcome,
+        ) {
             self.events
                 .send(Ok(ProviderEvent {
                     event: Some(provider_event::Event::UtteranceFinal(
@@ -5939,7 +6024,7 @@ pub(crate) mod tests {
                             utterance_id: utterance_id.to_string(),
                             event_sequence: self.next_event_sequence(),
                             final_audio_sequence: Some(final_audio_sequence),
-                            outcome: translator_ipc::provider::UtteranceOutcome::Completed.into(),
+                            outcome: outcome.into(),
                         },
                     )),
                 }))
@@ -5977,7 +6062,8 @@ pub(crate) mod tests {
                                 transcript_delta: true,
                                 translation_delta: true,
                                 cancellation: true,
-                                cloud_egress: false,
+                                cloud_egress: open.provider_id
+                                    == translator_ipc::provider::ProviderId::Openai as i32,
                             }),
                             event_sequence: 1,
                         },
@@ -6125,31 +6211,50 @@ pub(crate) mod tests {
                     speaker_playback: "duplex-speaker".into(),
                 },
             );
-            let launch = match direction {
+            let mut launch = match direction {
                 AudioDirection::Microphone => launch.microphone,
                 AudioDirection::Speaker => launch.speaker,
             }
             .unwrap();
+            if self.effects.playback_mix_authority.is_some() {
+                launch.runtime.provider_id = ProviderId::Openai;
+                if std::env::var("TRANSLATOR_DUPLEX_LOOP_TEST").unwrap()
+                    == "production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance"
+                {
+                    launch.runtime.mode = TranslationMode::Balanced;
+                }
+            }
             let mut owner = self.effects.begin(launch);
-            self.effects
-                .prepare_with_pcm_spawners(
-                    &mut owner,
-                    &crate::SidecarLaunch {
-                        generation_id: Uuid::new_v4(),
-                        token: "ab".repeat(32),
-                    },
-                    Instant::now() + Duration::from_secs(2),
-                    PulsePcmCapture::spawn,
-                    PulsePcmPlayback::spawn,
-                )
-                .await
-                .unwrap();
+            let generation = crate::SidecarLaunch {
+                generation_id: Uuid::new_v4(),
+                token: "ab".repeat(32),
+            };
+            let deadline = Instant::now() + Duration::from_secs(2);
+            if self.effects.playback_mix_authority.is_some() {
+                self.effects
+                    .prepare(&mut owner, &generation, deadline)
+                    .await
+            } else {
+                self.effects
+                    .prepare_with_pcm_spawners(
+                        &mut owner,
+                        &generation,
+                        deadline,
+                        PulsePcmCapture::spawn,
+                        PulsePcmPlayback::spawn,
+                    )
+                    .await
+            }
+            .unwrap();
             let prepared = self
                 .effects
                 .finish(owner)
                 .unwrap_or_else(|_| panic!("prepare failed"));
             let provider = self.opened.recv().await.unwrap();
             for kind in ["capture", "playback"] {
+                if kind == "playback" && self.effects.playback_mix_authority.is_some() {
+                    continue;
+                }
                 marker_identity(&duplex_loop_marker(kind, direction)).await;
             }
             (prepared, provider)
@@ -6157,8 +6262,19 @@ pub(crate) mod tests {
 
         async fn cleanup(&self, prepared: PreparedDirection) {
             let direction = prepared.launch.runtime.direction;
-            let identities = ["capture", "playback"]
-                .map(|kind| parse_marker_identity(&duplex_loop_marker(kind, direction)).unwrap());
+            let identities = [
+                parse_marker_identity(&duplex_loop_marker("capture", direction)).unwrap(),
+                if self.effects.playback_mix_authority.is_some() {
+                    prepared
+                        .playback
+                        .as_ref()
+                        .unwrap()
+                        .process_identity()
+                        .unwrap()
+                } else {
+                    parse_marker_identity(&duplex_loop_marker("playback", direction)).unwrap()
+                },
+            ];
             let mut owner = self.effects.recover_owner(prepared);
             self.effects
                 .stop_pcm(&mut owner, Instant::now() + Duration::from_secs(2))
@@ -6264,12 +6380,15 @@ pub(crate) mod tests {
         while !gate.exists() {
             std::thread::sleep(Duration::from_millis(1));
         }
+        let mode = std::env::var("TRANSLATOR_DUPLEX_LOOP_TEST").unwrap();
+        let recover_next = mode
+            == "production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance"
+            || mode == "production_duplex_batched_audio_late_quality_answer_is_played";
         if kind == "capture" {
             let mut output = std::fs::OpenOptions::new()
                 .write(true)
                 .open("/proc/self/fd/3")
                 .unwrap();
-            let mode = std::env::var("TRANSLATOR_DUPLEX_LOOP_TEST").unwrap();
             if mode.contains("partial") || mode.contains("eof") {
                 output.write_all(&duplex_voice_frame(0)[..320]).unwrap();
                 output.flush().unwrap();
@@ -6278,22 +6397,29 @@ pub(crate) mod tests {
                     return;
                 }
             } else {
-                for sequence in 0..12 {
-                    output.write_all(&duplex_voice_frame(sequence)).unwrap();
+                for phrase in 0..=u64::from(recover_next) {
+                    if phrase == 1 {
+                        while !marker.with_extension("next").exists() {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    }
+                    for sequence in 0..12 {
+                        output.write_all(&duplex_voice_frame(sequence)).unwrap();
+                        if mode.contains("batched_audio") {
+                            output.flush().unwrap();
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
                     if mode.contains("batched_audio") {
-                        output.flush().unwrap();
-                        std::thread::sleep(Duration::from_millis(20));
+                        for _ in 0..40 {
+                            output.write_all(&[0; 640]).unwrap();
+                            output.flush().unwrap();
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
                     }
+                    output.flush().unwrap();
+                    fs::write(marker.with_extension("ready"), b"ready").unwrap();
                 }
-                if mode.contains("batched_audio") {
-                    for _ in 0..40 {
-                        output.write_all(&[0; 640]).unwrap();
-                        output.flush().unwrap();
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                }
-                output.flush().unwrap();
-                fs::write(marker.with_extension("ready"), b"ready").unwrap();
             }
             loop {
                 std::thread::sleep(Duration::from_secs(1));
@@ -6311,16 +6437,39 @@ pub(crate) mod tests {
         }
         let fixture = tempdir().unwrap();
         fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let private_playback = test
+            == "production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance"
+            || test == "production_duplex_batched_audio_late_quality_answer_is_played";
         for (program, kind) in [("parec", "capture"), ("pacat", "playback")] {
             let path = fixture.path().join(program);
-            fs::write(&path, format!(
-                "#!/bin/sh\numask 077\nexport TRANSLATOR_DUPLEX_PCM_KIND='{kind}'\nexport TRANSLATOR_DUPLEX_PCM_ARGUMENTS=\"$*\"\nexec 3>&1\nexec \"$TRANSLATOR_DUPLEX_TEST_BINARY\" --exact translation_runtime::tests::duplex_pcm_helper_process --nocapture --test-threads=1 >/dev/null\n"
-            )).unwrap();
+            let script = if private_playback && kind == "playback" {
+                "#!/bin/sh\numask 077\nexec /usr/bin/pacat \"$@\"\n".to_owned()
+            } else {
+                format!(
+                    "#!/bin/sh\numask 077\nexport TRANSLATOR_DUPLEX_PCM_KIND='{kind}'\nexport TRANSLATOR_DUPLEX_PCM_ARGUMENTS=\"$*\"\nexec 3>&1\nexec \"$TRANSLATOR_DUPLEX_TEST_BINARY\" --exact translation_runtime::tests::duplex_pcm_helper_process --nocapture --test-threads=1 >/dev/null\n"
+                )
+            };
+            fs::write(&path, script).unwrap();
             fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         let test_binary = std::env::current_exe().unwrap();
-        let mut child = tokio::process::Command::new(&test_binary)
-            .env_clear()
+        let mut command = tokio::process::Command::new(&test_binary);
+        command.env_clear();
+        if private_playback {
+            for name in [
+                "PULSE_SERVER",
+                "PULSE_RUNTIME_PATH",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "DBUS_SYSTEM_BUS_ADDRESS",
+            ] {
+                command.env(
+                    name,
+                    std::env::var_os(name).expect("private audio environment required"),
+                );
+            }
+        }
+        let mut child = command
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", fixture.path().display()),
@@ -6335,6 +6484,11 @@ pub(crate) mod tests {
             .arg(format!("translation_runtime::tests::{test}"))
             .arg("--nocapture")
             .arg("--test-threads=1")
+            .args(if private_playback {
+                vec!["--ignored"]
+            } else {
+                vec![]
+            })
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -6552,6 +6706,222 @@ pub(crate) mod tests {
         tokio::task::LocalSet::new()
             .run_until(duplex_batched_audio(true))
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "missing_external_prerequisite:private_pulse_fixture"]
+    async fn production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance() {
+        private_duplex_first_audio_case(
+            "production_duplex_batched_audio_first_audio_expiry_recovers_next_utterance",
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "missing_external_prerequisite:private_pulse_fixture"]
+    async fn production_duplex_batched_audio_late_quality_answer_is_played() {
+        private_duplex_first_audio_case(
+            "production_duplex_batched_audio_late_quality_answer_is_played",
+            true,
+        )
+        .await;
+    }
+
+    async fn private_duplex_first_audio_case(test: &str, late_quality_answer: bool) {
+        use crate::AudioMixController;
+        let server = std::env::var("PULSE_SERVER").expect("private PULSE_SERVER required");
+        assert!(
+            server.starts_with("unix:/tmp/translator-handshake-") && server.ends_with("/native")
+        );
+        let cards = std::process::Command::new("pactl")
+            .args(["--format=json", "list", "cards"])
+            .output()
+            .unwrap();
+        assert!(cards.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&cards.stdout).unwrap(),
+            serde_json::json!([])
+        );
+        if duplex_loop_child(test).await {
+            return;
+        }
+        tokio::task::LocalSet::new().run_until(async {
+            let mut fixture = DuplexLoopFixture::start();
+            let mix = Arc::new(crate::AudioMixApplication::new(translator_audio::SystemCommandRunner));
+            mix.apply_desired(crate::AudioMixState {
+                microphone_original_percent: 0, microphone_translation_percent: 100,
+                speaker_original_percent: 0, speaker_translation_percent: 100,
+            }, crate::TranslationMixMode::Translating).unwrap();
+            fixture.effects.playback_mix_authority = Some(mix);
+            let observer = Arc::new(RecordingObserver::default());
+            let mut directions = Vec::new();
+            let mut monitors = Vec::new();
+            for direction in [AudioDirection::Microphone, AudioDirection::Speaker] {
+                let (prepared, provider) = fixture.prepare(direction).await;
+                let playback_identity = prepared.playback.as_ref().unwrap().process_identity().unwrap();
+                let device = format!("{}.monitor", prepared.launch.playback_device);
+                let mut monitor = tokio::process::Command::new("/usr/bin/parec")
+                    .args(["--raw", "--format=s16le", "--rate=16000", "--channels=1",
+                        "--latency-msec=20", "--process-time-msec=20", &format!("--device={device}")])
+                    .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
+                let monitor_identity = ProcessIdentity::inspect(monitor.id().unwrap()).unwrap();
+                let mut output = monitor.stdout.take().unwrap();
+                let samples = Arc::new(Mutex::new(Vec::new()));
+                let observed = samples.clone();
+                let reader = tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut block = [0; 640];
+                    while output.read_exact(&mut block).await.is_ok() {
+                        observed.lock().unwrap().extend(block.chunks_exact(2)
+                            .map(|sample| i16::from_le_bytes([sample[0], sample[1]])));
+                    }
+                });
+                monitors.push((monitor, monitor_identity, reader, samples));
+                let (stop, task) = duplex_spawn_direction(prepared, observer.clone());
+                fs::write(duplex_loop_gate("capture", direction), b"release").unwrap();
+                directions.push((direction, provider, stop, task, playback_identity));
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !directions.iter().all(|(_, provider, ..)| provider.inputs.lock().unwrap()
+                    .iter().any(|frame| frame.end_of_utterance)) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            let first = directions.iter().map(|(_, provider, ..)| provider.inputs.lock().unwrap()
+                .iter().find(|frame| frame.end_of_utterance).unwrap().clone()).collect::<Vec<_>>();
+            let stream = Uuid::parse_str(&first[0].stream_id).unwrap();
+            let expired = Uuid::parse_str(&first[0].utterance_id).unwrap();
+            let peer_stream = Uuid::parse_str(&first[1].stream_id).unwrap();
+            let peer_first = Uuid::parse_str(&first[1].utterance_id).unwrap();
+            for sequence in 0..3 {
+                directions[1].1.audio_pcm(peer_stream, peer_first, sequence, vec![21 + sequence as u8; 640]).await;
+            }
+            directions[1].1.completed(peer_stream, peer_first, 2).await;
+            let limit_ms = translator_ipc::first_audio_max_age_ms(
+                translator_ipc::provider::ProviderId::try_from(directions[0].1.open.provider_id).unwrap(),
+                translator_ipc::provider::TranslationMode::try_from(directions[0].1.open.mode).unwrap());
+            assert_eq!(limit_ms, if late_quality_answer { 6_000 } else { 2_000 });
+            let delay_ms = if late_quality_answer { 5_200 } else { u64::from(limit_ms) + 25 };
+            let expires_ns = first[0].capture_monotonic_ns + delay_ms * 1_000_000;
+            tokio::time::sleep(Duration::from_nanos(expires_ns.saturating_sub(monotonic_ns()))).await;
+            assert!(directions.iter().all(|(_, _, _, task, _)| !task.is_finished()));
+            assert!(directions[0].1.cancels.lock().unwrap().is_empty());
+            if late_quality_answer {
+                // Fixed synthetic answer includes 20 ms of leading silence, not runtime pre-roll.
+                directions[0].1.audio_pcm(stream, expired, 0, vec![0; 640]).await;
+                for sequence in 0..3 {
+                    directions[0].1.audio_pcm(stream, expired, sequence + 1, vec![41 + sequence as u8; 640]).await;
+                }
+                directions[0].1.completed(stream, expired, 3).await;
+                duplex_wait_until(|| observer.events.lock().unwrap().iter().filter(|event|
+                    matches!(event, DuplexRuntimeEvent::AudioFrame { utterance_id, .. } if *utterance_id == expired)).count() == 4).await;
+                assert_eq!(ProcessIdentity::inspect(directions[0].4.pid), Some(directions[0].4));
+            } else {
+            // Late first-generation PCM is negative; valid following PCM is positive.
+            directions[0].1.audio_pcm(stream, expired, 0, vec![179; 640]).await;
+            duplex_wait_until(|| !directions[0].1.cancels.lock().unwrap().is_empty()).await;
+            let cancel = directions[0].1.cancels.lock().unwrap()[0].clone();
+            assert_eq!(cancel.session_id, directions[0].1.open.session_id);
+            assert_eq!(cancel.utterance_id, expired.to_string());
+            assert_eq!(cancel.reason, translator_ipc::provider::CancelReason::LatencyPolicy as i32);
+            directions[0].1.audio_pcm(stream, expired, 1, vec![180; 640]).await;
+            directions[0].1.final_outcome(stream, expired, 1,
+                translator_ipc::provider::UtteranceOutcome::Cancelled).await;
+            duplex_wait_until(|| observer.events.lock().unwrap().iter().any(|event| matches!(event,
+                DuplexRuntimeEvent::UtteranceTerminalOutcome { utterance_id, outcome: TerminalOutcome::Cancelled, .. }
+                    if *utterance_id == expired))).await;
+            assert_ne!(ProcessIdentity::inspect(directions[0].4.pid), Some(directions[0].4));
+            }
+            for (direction, _, _, _, _) in &directions {
+                fs::write(duplex_loop_marker("capture", *direction).with_extension("next"), b"release").unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !directions.iter().zip(&first).all(|((_, provider, ..), old)| provider.inputs.lock().unwrap()
+                    .iter().any(|frame| frame.end_of_utterance && frame.utterance_id != old.utterance_id)) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            let mut following = Vec::new();
+            for (index, (_, provider, ..)) in directions.iter().enumerate() {
+                let next = provider.inputs.lock().unwrap().iter()
+                    .find(|frame| frame.end_of_utterance && frame.utterance_id != first[index].utterance_id).unwrap().clone();
+                assert_eq!(next.session_id, first[index].session_id);
+                assert_eq!(next.stream_id, first[index].stream_id);
+                let utterance = Uuid::parse_str(&next.utterance_id).unwrap();
+                following.push(utterance);
+                for sequence in 0..3 {
+                    provider.audio_pcm(Uuid::parse_str(&next.stream_id).unwrap(), utterance,
+                        sequence, vec![11 + index as u8 * 20 + sequence as u8; 640]).await;
+                }
+                provider.completed(Uuid::parse_str(&next.stream_id).unwrap(), utterance, 2).await;
+            }
+            duplex_wait_until(|| observer.events.lock().unwrap().iter().filter(|event|
+                matches!(event, DuplexRuntimeEvent::AudioFrame { .. })).count() == if late_quality_answer { 13 } else { 9 }).await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while monitors.iter().any(|(_, _, _, samples)| samples.lock().unwrap().is_empty()) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            let events = observer.events.lock().unwrap().clone();
+            assert_eq!(events.iter().filter(|event| matches!(event,
+                DuplexRuntimeEvent::FirstAudioExpired { utterance_id, .. } if *utterance_id == expired)).count(), usize::from(!late_quality_answer));
+            assert!(!events.iter().any(|event| matches!(event,
+                DuplexRuntimeEvent::GenerationRestart { .. } | DuplexRuntimeEvent::ProviderError { .. })));
+            if !late_quality_answer {
+                assert!(!events.iter().any(|event| matches!(event,
+                    DuplexRuntimeEvent::AudioFrame { utterance_id, .. } if *utterance_id == expired)));
+            }
+            for utterance in following.iter().chain(std::iter::once(&peer_first)).chain(late_quality_answer.then_some(&expired)) {
+                let expected = if late_quality_answer && *utterance == expired { vec![0, 1, 2, 3] } else { vec![0, 1, 2] };
+                assert_eq!(events.iter().filter_map(|event| match event {
+                    DuplexRuntimeEvent::AudioFrame { utterance_id, sequence, .. } if utterance_id == utterance => Some(*sequence),
+                    _ => None,
+                }).collect::<Vec<_>>(), expected);
+                assert_eq!(events.iter().filter(|event| matches!(event,
+                    DuplexRuntimeEvent::UtteranceTerminalOutcome { utterance_id, outcome: TerminalOutcome::Completed, .. }
+                        if utterance_id == utterance)).count(), 1);
+            }
+            for (_, provider, stop, task, _) in directions {
+                assert!(!task.is_finished(), "actual following progress must retain its direction session");
+                assert_eq!(provider.cancels.lock().unwrap().len(), usize::from(!late_quality_answer && provider.open.direction_id == translator_ipc::provider::AudioDirection::Microphone as i32));
+                stop.send(Some(WorkerStop::Close { reason: CloseRequestReason::UserStop,
+                    deadline: Instant::now() + Duration::from_secs(2) })).unwrap();
+                let (prepared, result) = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+                assert!(matches!(result, Ok(DirectionOutcome::Stopped(_))));
+                assert!(prepared.productive_playback);
+                fixture.cleanup(prepared).await;
+            }
+            assert!(fixture.opened.try_recv().is_err(), "no replacement provider session may be opened");
+            for (index, (mut monitor, identity, reader, samples)) in monitors.into_iter().enumerate() {
+                monitor.kill().await.unwrap();
+                monitor.wait().await.unwrap();
+                tokio::time::timeout(Duration::from_secs(1), reader).await.unwrap().unwrap();
+                let raw_samples = samples.lock().unwrap();
+                let samples = raw_samples.iter().copied().filter(|sample| *sample != 0).collect::<Vec<_>>();
+                assert!(!samples.is_empty() && samples.iter().all(|sample| *sample > 0),
+                    "only valid following/peer PCM may reach the virtual sinks");
+                if late_quality_answer && index == 0 {
+                    let boundary = raw_samples.iter().position(|sample| *sample == i16::from_le_bytes([42, 42])).unwrap();
+                    eprintln!("LATE_SINK_EDGE {:?}; leading_nonzero_samples={}",
+                        &raw_samples[boundary-320..boundary-300],
+                        raw_samples[..boundary].iter().rev().take_while(|sample| **sample != 0).count());
+                    eprintln!("LATE_SINK_FRAME_SAMPLES {:?}; total_nonzero={}",
+                        [41, 42, 43].map(|byte| samples.iter().filter(|sample| **sample == i16::from_le_bytes([byte, byte])).count()), samples.len());
+                    let mut previous = 0;
+                    for byte in [41, 42, 43] {
+                        let word = i16::from_le_bytes([byte, byte]);
+                        let position = samples.iter().position(|sample| *sample == word).unwrap();
+                        assert!(position >= previous);
+                        assert!(samples.iter().filter(|sample| **sample == word).count() >= 320,
+                            "every late-answer frame must reach the independent sink");
+                        previous = position;
+                    }
+                }
+                assert_ne!(ProcessIdentity::inspect(identity.pid), Some(identity));
+            }
+            fixture.shutdown().await;
+        }).await;
     }
 
     async fn duplex_batched_audio(complete: bool) {
@@ -9040,6 +9410,155 @@ pub(crate) mod tests {
                     }).is_none(), "same-mode request must settle");
             }
         }
+
+        #[test]
+        fn translation_progress_counts_known_utterances_once(
+            repeats in 1_usize..32, expired in proptest::bool::ANY,
+            speaker in proptest::bool::ANY,
+        ) {
+            let store = RuntimeStore::default();
+            let observer = RuntimeLatencyObserver::new(store.clone());
+            let direction = if speaker { AudioDirection::Speaker } else { AudioDirection::Microphone };
+            let utterance_id = Uuid::new_v4();
+            observer.start_session();
+            observer.observe(DuplexRuntimeEvent::SpeechStarted { direction, utterance_id, capture_monotonic_ns: 1 });
+            for _ in 0..repeats {
+                if expired {
+                    observer.observe(DuplexRuntimeEvent::FirstAudioExpired { direction, utterance_id, observed_monotonic_ns: 6_000_000_000 });
+                }
+                observer.observe(DuplexRuntimeEvent::AudioFrame { direction, utterance_id, sequence: 0,
+                    provider_monotonic_ns: 6_000_000_000, observed_monotonic_ns: 6_000_000_000, queue_lag_ms: 0 });
+            }
+            let snapshot = store.snapshot();
+            let own = snapshot.translation_progress.iter().find(|progress| progress.direction_id == direction).unwrap();
+            proptest::prop_assert_eq!(own.audio_started, u64::from(!expired));
+            proptest::prop_assert_eq!(own.late_audio_dropped, u64::from(expired));
+            let peer = snapshot.translation_progress.iter().find(|progress| progress.direction_id != direction).unwrap();
+            proptest::prop_assert_eq!((peer.audio_started, peer.late_audio_dropped), (0, 0));
+        }
+    }
+
+    #[test]
+    fn translation_progress_retains_completed_utterance_until_first_native_write() {
+        let store = RuntimeStore::default();
+        let observer = RuntimeLatencyObserver::new(store.clone());
+        let direction = AudioDirection::Speaker;
+        let utterance_id = Uuid::new_v4();
+        observer.observe(DuplexRuntimeEvent::SpeechStarted {
+            direction,
+            utterance_id,
+            capture_monotonic_ns: 1,
+        });
+        observer.observe(DuplexRuntimeEvent::InputComplete {
+            direction,
+            utterance_id,
+            capture_monotonic_ns: 2,
+        });
+        observer.observe(DuplexRuntimeEvent::UtteranceTerminalOutcome {
+            direction,
+            utterance_id,
+            outcome: TerminalOutcome::Completed,
+        });
+        observer.observe(DuplexRuntimeEvent::UtteranceTerminal {
+            direction,
+            utterance_id,
+        });
+        assert_eq!(store.snapshot().translation_progress[1].audio_started, 0);
+        observer.observe(DuplexRuntimeEvent::AudioFrame {
+            direction,
+            utterance_id,
+            sequence: 0,
+            provider_monotonic_ns: 3,
+            observed_monotonic_ns: 3,
+            queue_lag_ms: 0,
+        });
+        assert_eq!(store.snapshot().translation_progress[1].audio_started, 1);
+        assert!(observer.utterances.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn translation_progress_survives_stale_controls_and_requires_native_audio() {
+        let store = RuntimeStore::default();
+        let observer = RuntimeLatencyObserver::new(store.clone());
+        let mut stale_start = store.snapshot();
+        stale_start.translation_running = true;
+        observer.start_session();
+        let direction = AudioDirection::Microphone;
+        let expired = Uuid::new_v4();
+        observer.observe(DuplexRuntimeEvent::SpeechStarted {
+            direction,
+            utterance_id: expired,
+            capture_monotonic_ns: 1,
+        });
+        for _ in 0..2 {
+            observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
+                direction,
+                utterance_id: expired,
+                observed_monotonic_ns: 6_000_000_000,
+            });
+        }
+        observer.observe(DuplexRuntimeEvent::UtteranceTerminalOutcome {
+            direction,
+            utterance_id: expired,
+            outcome: TerminalOutcome::Completed,
+        });
+        store.commit_control(stale_start);
+        let progress = store.snapshot().translation_progress;
+        assert_eq!(progress[0].late_audio_dropped, 1);
+        assert_eq!(progress[0].audio_started, 0);
+        assert_eq!(progress[1].late_audio_dropped, 0);
+        observer.observe(DuplexRuntimeEvent::UtteranceTerminal {
+            direction,
+            utterance_id: expired,
+        });
+        let next = Uuid::new_v4();
+        observer.observe(DuplexRuntimeEvent::SpeechStarted {
+            direction,
+            utterance_id: next,
+            capture_monotonic_ns: 7_000_000_000,
+        });
+        for id in [expired, next, next] {
+            observer.observe(DuplexRuntimeEvent::AudioFrame {
+                direction,
+                utterance_id: id,
+                sequence: 0,
+                provider_monotonic_ns: 8_000_000_000,
+                observed_monotonic_ns: 8_000_000_000,
+                queue_lag_ms: 0,
+            });
+        }
+        let progress = store.snapshot().translation_progress;
+        assert_eq!(progress[0].audio_started, 1);
+        assert_eq!(progress[0].late_audio_dropped, 1);
+        assert_eq!(
+            progress[0].last_outcome,
+            Some(crate::runtime_state::DirectionProgressOutcome::AudioStarted)
+        );
+        observer.reset_direction(direction);
+        observer.observe(DuplexRuntimeEvent::FirstAudioExpired {
+            direction,
+            utterance_id: next,
+            observed_monotonic_ns: 9_000_000_000,
+        });
+        assert_eq!(store.snapshot().translation_progress, progress);
+        observer.start_session();
+        observer.observe(DuplexRuntimeEvent::AudioFrame {
+            direction,
+            utterance_id: next,
+            sequence: 1,
+            provider_monotonic_ns: 10_000_000_000,
+            observed_monotonic_ns: 10_000_000_000,
+            queue_lag_ms: 0,
+        });
+        assert!(
+            store
+                .snapshot()
+                .translation_progress
+                .iter()
+                .all(|item| item.audio_started == 0
+                    && item.late_audio_dropped == 0
+                    && item.last_outcome.is_none())
+        );
     }
 
     #[test]

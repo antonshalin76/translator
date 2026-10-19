@@ -46,6 +46,38 @@ export function directionRuntimeLabel(direction: DirectionState, connected: bool
   }
 }
 
+export interface DirectionProgress {
+  direction_id: AudioDirection;
+  audio_started: number;
+  late_audio_dropped: number;
+  last_outcome: "audio_started" | "late_audio_dropped" | null;
+}
+
+export function directionProgressLabel(
+  snapshot: RuntimeSnapshot,
+  direction: DirectionState,
+  connected: boolean,
+): string | null {
+  if (!connected || !direction.enabled || !snapshot.translation_running ||
+      (snapshot.runtime_status !== undefined && snapshot.runtime_status !== "running") ||
+      (direction.runtime_status !== "running" && direction.runtime_status !== "recovering")) {
+    return null;
+  }
+  const progress = snapshot.translation_progress?.find(
+    (candidate) => candidate.direction_id === direction.direction_id,
+  );
+  if (progress?.last_outcome === "late_audio_dropped" && progress.late_audio_dropped > 0) {
+    return "Фраза пропущена из-за задержки. " + (direction.runtime_status === "recovering"
+      ? "Канал восстанавливается."
+      : "Канал ждёт следующую.");
+  }
+  if (progress?.last_outcome === "audio_started" && progress.audio_started > 0) {
+    return `Начата выдача аудио: ${progress.audio_started}. Пропущено из-за задержки: ${progress.late_audio_dropped}.` +
+      (direction.runtime_status === "recovering" ? " Канал восстанавливается." : "");
+  }
+  return null;
+}
+
 export interface AudioMixVolumes {
   microphone_original_percent: number;
   microphone_translation_percent: number;
@@ -293,6 +325,7 @@ export interface RuntimeSnapshot {
   debug_text_enabled: boolean;
   debug_capture_enabled: boolean;
   directions?: DirectionState[];
+  translation_progress?: DirectionProgress[];
   audio_mix?: AudioMixVolumes;
   provider_id: ProviderId;
   audio_leaves_machine?: boolean;

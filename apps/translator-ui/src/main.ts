@@ -13,6 +13,7 @@ import {
   debugToggleIntent,
   directionToggleIntent,
   directionRuntimeLabel,
+  directionProgressLabel,
   formatMs,
   headphoneConfirmationIntent,
   labelLanguage,
@@ -502,6 +503,14 @@ function directionPanel(directionId: AudioDirection): HTMLElement {
     audioMixSlider("Оригинал", originalField, mix[originalField]),
     audioMixSlider("Перевод", translationField, mix[translationField]),
   );
+  const progressLabel = directionProgressLabel(state.snapshot, direction, state.connected);
+  if (progressLabel) {
+    const progress = element("p", "eyebrow", progressLabel);
+    progress.id = `${directionId}-progress`;
+    progress.setAttribute("aria-live", "polite");
+    progress.setAttribute("aria-atomic", "true");
+    panel.append(progress);
+  }
   return panel;
 }
 
