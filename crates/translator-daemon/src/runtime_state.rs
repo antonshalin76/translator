@@ -927,7 +927,51 @@ mod tests {
                         queue_lag_ms: 100,
                     }
                 )
-                .is_some()
+                .is_none()
+        );
+        assert_eq!(
+            store.snapshot().latency_policy[0].current_mode,
+            super::TranslationMode::Balanced
+        );
+    }
+
+    #[test]
+    fn manual_reaffirmation_of_auto_mode_is_published_and_survives_provider_switch() {
+        let store = RuntimeStore::default();
+        let direction = super::AudioDirection::Microphone;
+        for at in 1..=3 {
+            store.record_latency_utterance(
+                direction,
+                at,
+                super::LatencySample {
+                    first_audio_ms: 6_000,
+                    last_audio_ms: 6_100,
+                    queue_lag_ms: 100,
+                },
+            );
+        }
+        assert_eq!(
+            store.snapshot().latency_policy[0].current_mode,
+            super::TranslationMode::Balanced
+        );
+        store.set_latency_policy(super::LatencyPolicyPatch {
+            direction_id: direction,
+            current_mode: super::TranslationMode::Balanced,
+        });
+        assert_eq!(
+            store.snapshot().latency_policy[0].reason.as_deref(),
+            Some("manual_policy_change")
+        );
+        let cloud = store
+            .provider_candidate(super::ProviderPatch {
+                provider_id: super::ProviderId::Openai,
+                cloud_opt_in: Some(true),
+            })
+            .unwrap();
+        store.commit_control(cloud);
+        assert_eq!(
+            store.snapshot().latency_policy[0].current_mode,
+            super::TranslationMode::Balanced
         );
     }
 

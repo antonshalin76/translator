@@ -8206,7 +8206,7 @@
         "crates/translator-ipc/src/lib.rs",
         "crates/translator-ipc/tests/provider_transport.rs"
       ],
-      "node_count": 1107,
+      "node_count": 1113,
       "nodes": [
         {
           "file": "crates/translator-aec-backend/src/main.rs",
@@ -10945,12 +10945,37 @@
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::latency::tests::cloud_automatic_paths_preserve_the_explicit_mode_and_breach_telemetry",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::latency::tests::cloud_manual_modes_and_provider_switches_preserve_local_adaptation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::latency::tests::cloud_observation_sequences_preserve_modes_across_manual_and_provider_changes",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::latency::tests::cloud_quality_four_seconds_do_not_trip_either_hysteresis",
           "status": "deterministic"
         },
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::latency::tests::consecutive_adaptation_obeys_provider_scoped_age_budget",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::latency::tests::entering_cloud_discards_local_auto_mode_but_preserves_manual_reaffirmation",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::latency::tests::suppressed_cloud_transitions_keep_tripwire_counters_bounded",
           "status": "deterministic"
         },
         {
@@ -11251,6 +11276,11 @@
         {
           "file": "crates/translator-daemon/src/lib.rs",
           "id": "translator-daemon::lib::translator_daemon::runtime_state::tests::graph_route_and_device_watch_updates_publish_only_on_change",
+          "status": "deterministic"
+        },
+        {
+          "file": "crates/translator-daemon/src/lib.rs",
+          "id": "translator-daemon::lib::translator_daemon::runtime_state::tests::manual_reaffirmation_of_auto_mode_is_published_and_survives_provider_switch",
           "status": "deterministic"
         },
         {

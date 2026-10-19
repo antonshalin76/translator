@@ -9159,7 +9159,7 @@ pub(crate) mod tests {
         }
         assert_eq!(
             observer.requested_mode(AudioDirection::Microphone),
-            Some(TranslationMode::Balanced)
+            Some(TranslationMode::QualityFirst)
         );
     }
 

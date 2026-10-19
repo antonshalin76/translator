@@ -107,7 +107,8 @@ impl DirectionPolicy {
             return None;
         }
         if sample.first_audio_ms > thresholds(self.provider, self.state.current_mode).0 {
-            self.consecutive_utterance_breaches += 1;
+            self.consecutive_utterance_breaches =
+                self.consecutive_utterance_breaches.saturating_add(1);
         } else {
             self.consecutive_utterance_breaches = 0;
         }
@@ -178,13 +179,13 @@ impl DirectionPolicy {
             || self.state.p95_queue_lag_ms > queue_limit;
 
         if breached && next_degraded_mode(self.state.current_mode).is_some() {
-            self.breach_windows += 1;
+            self.breach_windows = self.breach_windows.saturating_add(1);
             self.recovery_windows = 0;
             if self.breach_windows >= DEGRADE_WINDOWS {
                 return self.transition(epoch_end_ms, LatencyTransitionReason::WindowBreach, true);
             }
         } else if !breached && next_recovered_mode(self.state.current_mode).is_some() {
-            self.recovery_windows += 1;
+            self.recovery_windows = self.recovery_windows.saturating_add(1);
             self.breach_windows = 0;
             if self.recovery_windows >= RECOVER_WINDOWS && epoch_end_ms >= self.cooldown_until_ms {
                 return self.transition(
@@ -206,6 +207,10 @@ impl DirectionPolicy {
         reason: LatencyTransitionReason,
         degrade: bool,
     ) -> Option<LatencyTransition> {
+        // The fixed cloud cascade has no measured faster mode to switch to.
+        if self.provider == ProviderId::Openai {
+            return None;
+        }
         let from = self.state.current_mode;
         let to = if degrade {
             next_degraded_mode(from)?
@@ -241,7 +246,13 @@ impl DirectionPolicy {
 
     fn force_mode(&mut self, at_ms: u64, mode: TranslationMode) -> Option<LatencyTransition> {
         let from = self.state.current_mode;
-        if from == mode {
+        if from == mode
+            && self
+                .state
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason == LatencyTransitionReason::ManualPolicyChange.as_str())
+        {
             return None;
         }
         let first = self.state.p95_first_audio_ms;
@@ -296,7 +307,14 @@ impl DuplexLatencyPolicy {
         for direction in [AudioDirection::Microphone, AudioDirection::Speaker] {
             let policy = self.policy_mut(direction);
             if policy.provider != provider {
-                let mode = policy.state.current_mode;
+                let mode = if provider == ProviderId::Openai
+                    && policy.state.reason.as_deref().is_some_and(|reason| {
+                        reason != LatencyTransitionReason::ManualPolicyChange.as_str()
+                    }) {
+                    TranslationMode::QualityFirst
+                } else {
+                    policy.state.current_mode
+                };
                 *policy = DirectionPolicy::new(direction);
                 policy.provider = provider;
                 policy.state.current_mode = mode;
@@ -395,6 +413,242 @@ mod tests {
     use super::*;
     use proptest::{prelude::*, test_runner::RngSeed};
 
+    fn cloud_policy(mode: TranslationMode) -> DirectionPolicy {
+        let mut policy = DirectionPolicy::new(AudioDirection::Microphone);
+        policy.provider = ProviderId::Openai;
+        policy.force_mode(0, mode);
+        policy
+    }
+
+    #[test]
+    fn entering_cloud_discards_local_auto_mode_but_preserves_manual_reaffirmation() {
+        for breaches in [3, 6] {
+            for reaffirm in [false, true] {
+                let direction = AudioDirection::Microphone;
+                let mut policies = DuplexLatencyPolicy::default();
+                for at in 1..=breaches {
+                    policies.record_utterance(
+                        direction,
+                        at,
+                        LatencySample {
+                            first_audio_ms: 6_000,
+                            last_audio_ms: 6_100,
+                            queue_lag_ms: 100,
+                        },
+                    );
+                }
+                let automatic = policies.state(direction).current_mode;
+                assert_eq!(
+                    automatic,
+                    if breaches == 3 {
+                        TranslationMode::Balanced
+                    } else {
+                        TranslationMode::StreamingFirst
+                    }
+                );
+                if reaffirm {
+                    let selection = policies.force_mode(direction, 10, automatic).unwrap();
+                    assert_eq!(selection.from, selection.to);
+                    assert_eq!(
+                        selection.reason,
+                        LatencyTransitionReason::ManualPolicyChange
+                    );
+                    assert!(policies.force_mode(direction, 11, automatic).is_none());
+                }
+                policies.set_provider(ProviderId::Openai);
+                assert_eq!(
+                    policies.state(direction).current_mode,
+                    if reaffirm {
+                        automatic
+                    } else {
+                        TranslationMode::QualityFirst
+                    }
+                );
+                assert_eq!(
+                    policies.state(AudioDirection::Speaker).current_mode,
+                    TranslationMode::QualityFirst
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cloud_automatic_paths_preserve_the_explicit_mode_and_breach_telemetry() {
+        for mode in [
+            TranslationMode::QualityFirst,
+            TranslationMode::Balanced,
+            TranslationMode::StreamingFirst,
+        ] {
+            let mut consecutive = cloud_policy(mode);
+            let high = LatencySample {
+                first_audio_ms: 6_000,
+                last_audio_ms: 6_100,
+                queue_lag_ms: 600,
+            };
+            for index in 1..=3 {
+                assert!(
+                    consecutive.record_utterance(index, high).is_none(),
+                    "cloud consecutive breach changed explicit mode"
+                );
+            }
+            assert_eq!(consecutive.state.current_mode, mode);
+            assert_eq!(consecutive.samples.len(), 3);
+            if mode != TranslationMode::StreamingFirst {
+                assert_eq!(consecutive.consecutive_utterance_breaches, 3);
+            }
+
+            let mut queued = cloud_policy(mode);
+            assert!(queued.observe_queue_lag(1, Some(600)).is_none());
+            assert!(
+                queued.observe_queue_lag(2_001, Some(600)).is_none(),
+                "cloud queue breach changed explicit mode"
+            );
+            assert_eq!(queued.state.current_mode, mode);
+
+            for breached in [false, true] {
+                let mut windows = cloud_policy(mode);
+                for epoch in 0..5 {
+                    for index in 0..20 {
+                        let first_audio_ms = if breached && index % 3 != 0 {
+                            6_000
+                        } else {
+                            100
+                        };
+                        assert!(
+                            windows
+                                .record_utterance(
+                                    epoch * EPOCH_MS + index * 100 + 1,
+                                    LatencySample {
+                                        first_audio_ms,
+                                        last_audio_ms: first_audio_ms + 100,
+                                        queue_lag_ms: if breached { 600 } else { 100 }
+                                    }
+                                )
+                                .is_none()
+                        );
+                    }
+                    assert!(
+                        windows.evaluate_epoch((epoch + 1) * EPOCH_MS).is_none(),
+                        "cloud window changed explicit mode"
+                    );
+                }
+                assert_eq!(windows.state.current_mode, mode);
+                assert_eq!(
+                    windows.state.p95_first_audio_ms,
+                    if breached { 6_000 } else { 100 }
+                );
+                assert_eq!(
+                    windows.state.p95_queue_lag_ms,
+                    if breached { 600 } else { 100 }
+                );
+                if breached && mode != TranslationMode::StreamingFirst {
+                    assert_eq!(windows.breach_windows, 5);
+                }
+                if !breached && mode != TranslationMode::QualityFirst {
+                    assert_eq!(windows.recovery_windows, 5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cloud_manual_modes_and_provider_switches_preserve_local_adaptation() {
+        let mut policies = DuplexLatencyPolicy::default();
+        let direction = AudioDirection::Microphone;
+        policies.set_provider(ProviderId::Openai);
+        assert!(
+            policies
+                .force_mode(direction, 1, TranslationMode::StreamingFirst)
+                .is_some()
+        );
+        assert!(
+            policies
+                .force_mode(direction, 2, TranslationMode::QualityFirst)
+                .is_some()
+        );
+        let high = LatencySample {
+            first_audio_ms: 6_000,
+            last_audio_ms: 6_100,
+            queue_lag_ms: 100,
+        };
+        for at in 3..=5 {
+            assert!(policies.record_utterance(direction, at, high).is_none());
+        }
+        policies.set_provider(ProviderId::Local);
+        assert_eq!(
+            policies.state(direction).current_mode,
+            TranslationMode::QualityFirst
+        );
+        for at in 6..=8 {
+            policies.record_utterance(direction, at, high);
+        }
+        assert_eq!(
+            policies.state(direction).current_mode,
+            TranslationMode::Balanced
+        );
+        policies.set_provider(ProviderId::Openai);
+        assert_eq!(
+            policies.state(direction).current_mode,
+            TranslationMode::QualityFirst
+        );
+        for at in 9..=11 {
+            assert!(policies.record_utterance(direction, at, high).is_none());
+        }
+        assert_eq!(
+            policies.state(direction).current_mode,
+            TranslationMode::QualityFirst
+        );
+        assert_eq!(
+            policies.state(AudioDirection::Speaker).current_mode,
+            TranslationMode::QualityFirst
+        );
+        assert_eq!(
+            thresholds(ProviderId::Openai, TranslationMode::QualityFirst).0,
+            5_000
+        );
+        assert_eq!(
+            thresholds(ProviderId::Openai, TranslationMode::Balanced).0,
+            2_000
+        );
+        assert_eq!(
+            thresholds(ProviderId::Openai, TranslationMode::StreamingFirst).0,
+            1_000
+        );
+    }
+
+    #[test]
+    fn suppressed_cloud_transitions_keep_tripwire_counters_bounded() {
+        let mut policy = cloud_policy(TranslationMode::QualityFirst);
+        policy.consecutive_utterance_breaches = u32::MAX;
+        let high = LatencySample {
+            first_audio_ms: 6_000,
+            last_audio_ms: 6_100,
+            queue_lag_ms: 600,
+        };
+        assert!(policy.record_utterance(1, high).is_none());
+        assert_eq!(policy.consecutive_utterance_breaches, u32::MAX);
+        policy.breach_windows = u32::MAX;
+        for at in 2..22 {
+            policy.record_utterance(at, high);
+        }
+        assert!(policy.evaluate_epoch(EPOCH_MS).is_none());
+        assert_eq!(policy.breach_windows, u32::MAX);
+        policy.force_mode(EPOCH_MS, TranslationMode::Balanced);
+        policy.recovery_windows = u32::MAX;
+        for at in EPOCH_MS + 1..EPOCH_MS + 21 {
+            policy.record_utterance(
+                at,
+                LatencySample {
+                    first_audio_ms: 100,
+                    last_audio_ms: 200,
+                    queue_lag_ms: 0,
+                },
+            );
+        }
+        assert!(policy.evaluate_epoch(2 * EPOCH_MS).is_none());
+        assert_eq!(policy.recovery_windows, u32::MAX);
+    }
+
     #[test]
     fn cloud_quality_four_seconds_do_not_trip_either_hysteresis() {
         let mut policies = DuplexLatencyPolicy::default();
@@ -448,9 +702,42 @@ mod tests {
             let limit = match (cloud, mode_index) { (true, 0) => 5_000, (false, 0) => 3_000, (_, 1) => 2_000, _ => 1_000 };
             for at_ms in 1..=3 {
                 let transition = policies.record_utterance(AudioDirection::Microphone, at_ms, LatencySample { first_audio_ms, last_audio_ms: first_audio_ms + 100, queue_lag_ms: 100 });
-                prop_assert_eq!(transition.is_some(), at_ms == 3 && mode_index < 2 && first_audio_ms > limit);
+                prop_assert_eq!(transition.is_some(), !cloud && at_ms == 3 && mode_index < 2 && first_audio_ms > limit);
             }
             prop_assert_eq!(policies.state(AudioDirection::Speaker).current_mode, TranslationMode::QualityFirst);
+        }
+
+        #[test]
+        fn cloud_observation_sequences_preserve_modes_across_manual_and_provider_changes(
+            actions in prop::collection::vec((0_u8..5, 0_u32..=7_000), 1..48),
+        ) {
+            let mut policies = DuplexLatencyPolicy::default();
+            let mut provider = ProviderId::Local;
+            for (index, (action, value)) in actions.into_iter().enumerate() {
+                let at_ms = (index as u64 + 1) * EPOCH_MS;
+                let direction = if value.is_multiple_of(2) { AudioDirection::Microphone } else { AudioDirection::Speaker };
+                if action == 0 {
+                    provider = if value.is_multiple_of(2) { ProviderId::Local } else { ProviderId::Openai };
+                    policies.set_provider(provider);
+                    continue;
+                }
+                if action == 1 {
+                    let mode = [TranslationMode::QualityFirst, TranslationMode::Balanced, TranslationMode::StreamingFirst][(value % 3) as usize];
+                    policies.force_mode(direction, at_ms, mode);
+                    prop_assert_eq!(policies.state(direction).current_mode, mode);
+                    continue;
+                }
+                let before = [policies.state(AudioDirection::Microphone).current_mode, policies.state(AudioDirection::Speaker).current_mode];
+                let transition = match action {
+                    2 => policies.record_utterance(direction, at_ms, LatencySample { first_audio_ms: value, last_audio_ms: value + 100, queue_lag_ms: value % 1_001 }),
+                    3 => policies.observe_queue_lag(direction, at_ms, Some(value % 1_001)),
+                    _ => policies.evaluate_epoch(direction, at_ms),
+                };
+                if provider == ProviderId::Openai {
+                    prop_assert!(transition.is_none());
+                    prop_assert_eq!([policies.state(AudioDirection::Microphone).current_mode, policies.state(AudioDirection::Speaker).current_mode], before);
+                }
+            }
         }
     }
 }
