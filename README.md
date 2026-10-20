@@ -12,7 +12,7 @@ It is not a general cross-platform release yet. The default target is Linux with
 
 - Duplex Ru <-> En translation with independent microphone and speaker channels.
 - Per-channel enable/disable controls, direction selection, and separate original/translation volume mixing.
-- Local provider as the default path; opt-in OpenAI uses HTTPS `gpt-transcribe` → `gpt-4.1` → `gpt-4o-mini-tts` with the fixed `marin` voice. Cloud translation preserves local speech boundaries and translates rather than answering the speaker. Cloud DNS and connections require the `amn0` VPN interface; there is no direct-network fallback. OpenAI Quality-first prepares a complete, bounded speech response before playback to isolate it from TTS chunk gaps, within five seconds from end of speech to first playable audio; local and other modes retain their limits. This new path still requires sustained and installed-package qualification.
+- Local provider as the default path; opt-in OpenAI uses HTTPS `gpt-transcribe` → `gpt-4.1` → `gpt-4o-mini-tts` with the fixed `marin` voice. Cloud translation preserves local speech boundaries and translates rather than answering the speaker. Cloud DNS and connections require the `amn0` VPN interface; there is no direct-network fallback. OpenAI Quality-first validates the complete TTS response before playback. Five seconds after end of speech is a target, not a cutoff: preparation has one 12-second budget including queueing, ASR, translation and complete TTS. Local/other-mode limits, cancellation and Start/Stop are unchanged. This is a bounded policy, not a guarantee against network failures or arbitrarily late responses.
 - PipeWire/Pulse virtual endpoints for `Translator_Virtual_Mic`, `Translator_Mic_Out`, and `Translator_Remote_In`.
 - App routing watcher for call-like streams from Zoom, Telegram Desktop, and browser meetings.
 - Tauri tray/status UI plus a user-level `translator` lifecycle command.
@@ -75,6 +75,25 @@ translator down
 ```
 
 The `translator` command is installed into `~/.local/bin` and works from any directory after install.
+
+### Installed private preview
+
+The recovery candidate `3989abd` uses Turbo → Hy-MT2 → Piper locally and the
+opt-in OpenAI chain above. Its installed native UI/API checks cover Start/Stop,
+original-microphone gain changes, restart and rollback. The installed cloud
+check used fixed synthetic remote audio with microphone translation disabled;
+physical microphone audio was not uploaded. Earlier 20-minute local/cloud
+duplex results are reused only for unchanged translation/provider paths.
+See [the recovery plan](docs/stabilization/product-recovery-20261017.md) for
+the evidence boundaries, retained failures and quality limitations.
+
+For the installed preview, use `translator-preview up`,
+`translator-preview status`, and `translator-preview down`. This separate user service uses port
+47682 and `%E/translator-preview/environment`; it does not replace the canonical
+`translator` service. Preview installation does not enable login autostart.
+Translation starts only through the UI/API; OpenAI additionally needs explicit
+cloud opt-in and the active `amn0` VPN. Headphone confirmation is device-bound
+and is reset by service restart or device changes.
 
 ## Configuration
 
